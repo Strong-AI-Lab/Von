@@ -329,3 +329,21 @@ def test_owner_subscription_covers_new_namespaces_but_not_other_owners(nodes):
     }
     for record in conversations:
         c.validate_catalogue_record(record)
+
+
+def test_compact_refresh_reuses_only_authenticated_unchanged_cache(nodes):
+    a, b, da, db, _ = prepare(nodes)
+    first = sync(a, b, da, db)
+    new = service.export_snapshot(a, "dgx", db=da)
+    compact = p.compact_snapshot(new, first["payload"]["digest"])
+    assert "records" not in compact["payload"]
+    receipt = service.import_snapshot(b, "atlas", compact, db=db)
+    assert receipt["status"] == "already_applied"
+    assert db[service.REPLICAS].find_one()["checked_at"] == new["payload"]["checked_at"]
+    compact["payload"]["digest"] = "forged"
+    with pytest.raises(ValueError, match="cache mismatch"):
+        service.import_snapshot(b, "atlas", compact, db=db)
+    compact = p.compact_snapshot(new, first["payload"]["digest"])
+    compact["signature"] = "forged"
+    with pytest.raises(PermissionError):
+        service.import_snapshot(b, "atlas", compact, db=db)

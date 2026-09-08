@@ -23,9 +23,12 @@ def remote(config, peer, action, payload=None):
         "--env-file",
         transport["env_file"],
         action,
-        "--peer" if action in {"export", "content"} else "--origin",
+        "--peer" if action in {"export", "content", "status"} else "--origin",
         config["node_id"],
     ]
+    if action == "export" and payload and payload.get("known_digest"):
+        command.extend(["--known-digest", payload["known_digest"]])
+        payload = None
     result = subprocess.run(
         [
             "ssh",
@@ -55,7 +58,7 @@ def remote(config, peer, action, payload=None):
 
 def remote_content_http(config, peer, request):
     from urllib.parse import urlparse
-    from urllib.request import HTTPRedirectHandler, Request, build_opener
+    from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
     from .protocol import key, now, peer_config, sign
 
@@ -90,7 +93,9 @@ def remote_content_http(config, peer, request):
         def redirect_request(self, *args, **kwargs):
             raise ValueError("content transport redirects are not permitted")
 
-    with build_opener(NoRedirect).open(message, timeout=180) as response:
+    with build_opener(ProxyHandler({}), NoRedirect).open(
+        message, timeout=180
+    ) as response:
         data = response.read(MAX_CONTENT_BYTES + 1)
     if len(data) > MAX_CONTENT_BYTES:
         raise ValueError("content response exceeds bound")

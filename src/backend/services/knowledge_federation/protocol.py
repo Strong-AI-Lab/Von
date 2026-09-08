@@ -273,9 +273,33 @@ def make_snapshot(collection, config: dict, peer: str, records: list[dict]) -> d
     raise RuntimeError("concurrent federation export; retry")
 
 
+def compact_snapshot(envelope, known_digest):
+    """Omit unchanged records only when the receiver advertises that exact digest.
+
+    Signature remains over the full payload. Receiver reconstruction must match
+    its authenticated stored head and is verified before advancing freshness.
+    """
+    if known_digest and envelope["payload"]["digest"] == known_digest:
+        return {
+            "payload": {k: v for k, v in envelope["payload"].items() if k != "records"},
+            "signature": envelope["signature"],
+            "records_omitted": True,
+        }
+    return envelope
+
+
 def apply_snapshot(collection, config: dict, origin: str, envelope: dict) -> dict:
     settings = peer_config(config, "imports", origin)
     payload = envelope.get("payload", {})
+    if envelope.get("records_omitted") is True:
+        cached = collection.find_one({"_id": origin})
+        if (
+            not cached
+            or cached["digest"] != payload.get("digest")
+            or "records" in payload
+        ):
+            raise ValueError("compact snapshot cache mismatch; retry full exchange")
+        payload = {**payload, "records": cached["records"]}
     expected = hmac.new(key(settings), encode(payload), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, str(envelope.get("signature", ""))):
         raise PermissionError("snapshot authentication failed")

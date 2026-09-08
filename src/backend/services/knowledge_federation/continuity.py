@@ -369,12 +369,19 @@ def serve_content(config, peer, request, *, db):
         from ..computer_file_copy_service import fetch_file_copy_bytes
 
         prefix, actor = record["audience"].split(":", 1)
-        result = fetch_file_copy_bytes(
-            file_copy_concept_id=claim["source_id"],
-            user_concept_id=actor if prefix == "user" else None,
-            organisation_concept_id=actor if prefix == "org" else None,
-            max_bytes=MAX_FILE_BYTES,
-        )
+        from ...security.access_control import override_current_actor
+
+        # Source identity is resolved solely from the revalidated admitted
+        # record, never from caller-supplied identity fields.
+        with override_current_actor(
+            actor if prefix == "user" else None, actor if prefix == "org" else None
+        ):
+            result = fetch_file_copy_bytes(
+                file_copy_concept_id=claim["source_id"],
+                user_concept_id=actor if prefix == "user" else None,
+                organisation_concept_id=actor if prefix == "org" else None,
+                max_bytes=MAX_FILE_BYTES,
+            )
         if not result.get("success"):
             raise RuntimeError("source file bytes unavailable")
         data = result["data"]

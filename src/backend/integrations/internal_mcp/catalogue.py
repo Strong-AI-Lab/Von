@@ -3706,7 +3706,7 @@ def _federated_content_operation(kwargs, *, materialise=False):
                 return import_file(kwargs["federated_id"])
             return read_conversation(kwargs["federated_id"], offset=int(kwargs.get("offset") or 0),
                                      content_digest=kwargs.get("content_digest"))
-    except (PermissionError, ValueError, RuntimeError, KeyError) as exc:
+    except (OSError, ValueError, RuntimeError, KeyError) as exc:
         return make_error_response(
             "federated_content_unavailable", "The source content could not be obtained.",
             details={"error_type": type(exc).__name__},

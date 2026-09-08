@@ -17,7 +17,7 @@ place. The original v1 pilot transferred at most 1,000 records / 4 MiB per direc
 v2 extension below raises this bounded metadata capacity. Transfer
 cost is proportional to the selected slice. It deliberately polls and transfers
 the bounded slice even when unchanged, so a fresh authenticated observation can
-renew private readability. Measure bytes and lag before adding a delta protocol.
+renew private readability. The v2 extension below adds an authenticated compact refresh for unchanged records.
 
 A node owns its original claims. The same source assertion ID from two nodes
 produces two distinct origin-qualified references. Local IDs are never silently
@@ -254,3 +254,11 @@ conversation or a claim that a file has been saved. Metadata exchange is indepen
 of the reverse content route. Rollback stops the reader/tunnel, restores the earlier
 private configuration, and disables the extended selection before downgrading both
 nodes; retain generation heads and existing canonical data.
+
+
+When both peers have the same catalogue digest, v2 omits record bytes from the
+refresh. The receiver reconstructs only from its matching stored head and verifies
+the original signature over the full reconstructed payload before updating freshness.
+A missing/mismatched cache requests a full retry; a stale, tampered or equivocal
+refresh cannot advance the view. Changed catalogues still transfer a complete slice.
+This reduces unchanged wire traffic without introducing per-assertion delta cursors.

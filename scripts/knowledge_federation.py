@@ -32,9 +32,18 @@ def exchange(config, peer):
 
     peer_config(config, "exports", peer)
     peer_config(config, "imports", peer)
-    outgoing = export_snapshot(config, peer)
+    from src.backend.services.knowledge_federation.protocol import compact_snapshot
+    from src.backend.services.knowledge_federation.service import REPLICAS, database
+
+    remote_head = remote(config, peer, "status")
+    outgoing = compact_snapshot(
+        export_snapshot(config, peer), remote_head.get("digest")
+    )
     pushed = remote(config, peer, "import", outgoing)
-    incoming = remote(config, peer, "export")
+    local_head = database()[REPLICAS].find_one({"_id": peer}, {"digest": 1}) or {}
+    incoming = remote(
+        config, peer, "export", {"known_digest": local_head.get("digest")}
+    )
     pulled = import_snapshot(config, peer, incoming)
     return {
         "peer": peer,
@@ -50,12 +59,14 @@ def main():
     parser.add_argument("--config")
     parser.add_argument("--env-file", default=str(ROOT / ".env"))
     parser.add_argument(
-        "action", choices=["export", "import", "exchange", "watch", "content", "serve"]
+        "action",
+        choices=["export", "import", "exchange", "watch", "content", "serve", "status"],
     )
     parser.add_argument("--peer")
     parser.add_argument("--origin")
     parser.add_argument("--interval", type=int, default=60)
     parser.add_argument("--port", type=int, default=5013)
+    parser.add_argument("--known-digest")
     args = parser.parse_args()
     from dotenv import load_dotenv
 
@@ -76,7 +87,26 @@ def main():
         config = load_config(args.config)
         try:
             if args.action == "export":
-                result = export_snapshot(config, args.peer)
+                from src.backend.services.knowledge_federation.protocol import (
+                    compact_snapshot,
+                )
+
+                result = compact_snapshot(
+                    export_snapshot(config, args.peer), args.known_digest
+                )
+            elif args.action == "status":
+                from src.backend.services.knowledge_federation.service import (
+                    REPLICAS,
+                    database,
+                )
+
+                peer_config(config, "imports", args.peer)
+                result = (
+                    database()[REPLICAS].find_one(
+                        {"_id": args.peer}, {"_id": 0, "digest": 1}
+                    )
+                    or {}
+                )
             elif args.action == "content":
                 from src.backend.services.knowledge_federation.continuity import (
                     serve_content,
