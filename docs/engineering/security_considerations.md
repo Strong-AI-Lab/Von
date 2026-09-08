@@ -359,6 +359,10 @@ configuration cannot silently reuse the previous account's proxy.
   surfaces and may use operator-supplied scope. They are not part of the
   ordinary actor-scoped projection and must not be described as though every
   MCP route shared its identity model.
+- Local stdio diagnostic reads use an explicit server-side operator allow-list
+  in `mcp_stdio_server.py`. Existing actor contexts are preserved; supplied
+  telemetry references retain their signed target checks. This does not grant
+  operator provenance to workflow execution, recovery, or ontology mutation.
 - External MCP servers (arXiv, future integrations) may not respect namespace
 - No rate limiting on tool invocations
 - No audit trail of tool access by user

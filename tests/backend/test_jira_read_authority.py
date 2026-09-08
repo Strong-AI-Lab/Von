@@ -258,3 +258,14 @@ def test_operator_migration_cli_binds_authority_only_around_its_runner(
     assert calls == [True]
     assert not internal_mcp_actor_context_is_trusted_local_operator()
     assert '"dry_run": true' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name,arguments", READS)
+def test_local_stdio_jira_reads_reach_account_rpc(account, name, arguments):
+    import json
+    from src.backend.mcp_server import mcp_stdio_server
+
+    blocks = asyncio.run(mcp_stdio_server.call_tool(name, arguments))
+    result = json.loads(blocks[0].text)
+    assert result.get("success") is not False
+    assert account["calls"] == [(name, arguments)]

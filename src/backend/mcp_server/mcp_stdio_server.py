@@ -500,6 +500,7 @@ _VON_CHAT_RUN_WORKER_SLOTS = threading.BoundedSemaphore(
 class VonChatRunCapacityUnavailable(RuntimeError):
     """Raised when all bounded ``von_chat_run`` worker slots are occupied."""
 
+
 _TOOL_LIST_CACHE: list[Tool] | None = None
 _TOOL_LIST_CACHE_PATH = (
     Path(project_root) / "data" / "mcp_tool_cache" / "vontology_tools_runtime.json"
@@ -1027,6 +1028,30 @@ _TRUSTED_LOCAL_OPERATOR_CONVERSATION_TOOLS = frozenset(
     }
 )
 
+# Only these read handlers inherit the local stdio operator boundary. Keep
+# execution, recovery, schedules and ontology mutations on their own authority
+# paths; an input flag or actor identifier must never enlarge this set.
+_TRUSTED_LOCAL_OPERATOR_DIAGNOSTIC_READ_TOOLS = frozenset(
+    {
+        "chat_history_get_debug_entry",
+        "chat_history_get_segments",
+        "conversation_inspect_batch",
+        "conversation_telemetry_get_locator",
+        "conversation_transcript_page",
+        "jira_get_comments",
+        "jira_get_issue",
+        "jira_search",
+        "turn_execution_get",
+        "turn_execution_get_diagnostics",
+        "turn_execution_get_live_progress",
+        "turn_execution_list",
+        "workflow_get_execution_trace",
+        "workflow_get_instance",
+        "workflow_list_execution_traces",
+        "workflow_list_instances",
+    }
+)
+
 _STDIO_GOVERNED_ONTOLOGY_METHODS = {
     "create_concepts": "create_concepts",
     "upsert_text_relation": "upsert_text_relation",
@@ -1191,9 +1216,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ig
                         "effect_status": "not_started",
                         "mutation_outcome": "not_started",
                         "changed": False,
-                        "error_code": (
-                            "ontology_sessionless_delegation_not_supported"
-                        ),
+                        "error_code": ("ontology_sessionless_delegation_not_supported"),
                         "error": (
                             "Sessionless ontology delegation execution is "
                             "unavailable; use an actor-bound trusted surface."
@@ -1201,6 +1224,42 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ig
                     }
                 )
             ]
+        if name in _TRUSTED_LOCAL_OPERATOR_DIAGNOSTIC_READ_TOOLS:
+            from src.backend.security.access_control import (
+                get_effective_organisation_concept_id,
+                get_effective_user_concept_id,
+            )
+
+            # A supplied delegation keeps its narrower target and validation;
+            # never silently replace an existing actor context with operator.
+            source = internal_mcp_gateway_module.get_internal_mcp_actor_context_source()
+            actor = (
+                internal_mcp_gateway_module.get_internal_mcp_preexisting_actor_context()
+            )
+            actor = actor or (
+                get_effective_user_concept_id(),
+                get_effective_organisation_concept_id(),
+            )
+            has_reference = any(
+                key in parsed_arguments
+                for key in (
+                    "conversation_ref",
+                    "history_location_ref",
+                    "turn_telemetry_ref",
+                )
+            )
+            if has_reference:
+                source = "tool_payload_fallback"
+            elif source is None:
+                source = (
+                    "preexisting_authenticated_or_workflow_context"
+                    if any(actor)
+                    else internal_mcp_gateway_module.INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE
+                )
+            with bind_internal_mcp_actor_context_source(
+                source, preexisting_actor_context=actor if any(actor) else None
+            ):
+                return await handler(parsed_arguments)
         if name in (
             _TRUSTED_LOCAL_OPERATOR_GMAIL_TOOLS
             | _TRUSTED_LOCAL_OPERATOR_CONVERSATION_TOOLS
@@ -3430,6 +3489,39 @@ def _run_catalogue_proxy_handler(
         ]
 
 
+def _run_diagnostic_read_proxy_handler(
+    handler: Callable[..., Any],
+    arguments: dict[str, Any],
+    **kwargs: Any,
+) -> list[TextContent]:
+    """Preserve entry-point authority; a direct handler call cannot mint it."""
+
+    source = internal_mcp_gateway_module.get_internal_mcp_actor_context_source()
+    actor = internal_mcp_gateway_module.get_internal_mcp_preexisting_actor_context()
+    with bind_internal_mcp_actor_context_source(
+        source or "tool_payload_fallback", preexisting_actor_context=actor
+    ):
+        # Reuse the signed-reference transport pager for local operator reads.
+        # Do not page errors or re-page an already bounded delegated response.
+        def bounded_handler(**payload_args: Any) -> Any:
+            result = handler(**payload_args)
+            if (
+                isinstance(result, dict)
+                and result.get("success") is not False
+                and "bounded_read" not in result
+                and len(json.dumps(result, separators=(",", ":"), default=str))
+                > _get_stdio_max_response_chars()
+            ):
+                return internal_mcp_catalogue_module._bounded_telemetry_payload(
+                    result, arguments=arguments,
+                    artifact_kind=handler.__name__.lstrip("_"),
+                    preserve_inline_below_limit=True,
+                )
+            return result
+
+        return _run_catalogue_proxy_handler(bounded_handler, arguments, **kwargs)
+
+
 def _run_untrusted_workflow_proxy_handler(
     handler: Callable[..., Any],
     arguments: dict[str, Any],
@@ -3445,7 +3537,7 @@ def _run_untrusted_workflow_proxy_handler(
 
 
 async def _handle_jira_search(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _jira_search,
         arguments,
         tool_family_label="Jira",
@@ -3454,7 +3546,7 @@ async def _handle_jira_search(arguments: dict[str, Any]) -> list[TextContent]:
 
 
 async def _handle_jira_get_comments(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _jira_get_comments,
         arguments,
         tool_family_label="Jira",
@@ -3463,7 +3555,7 @@ async def _handle_jira_get_comments(arguments: dict[str, Any]) -> list[TextConte
 
 
 async def _handle_jira_get_issue(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _jira_get_issue,
         arguments,
         tool_family_label="Jira",
@@ -3755,18 +3847,20 @@ async def _handle_workflow_execute(arguments: dict[str, Any]) -> list[TextConten
 async def _handle_workflow_list_instances(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_untrusted_workflow_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _workflow_list_instances,
         arguments,
+        tool_family_label="Diagnostics",
     )
 
 
 async def _handle_workflow_list_execution_traces(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_untrusted_workflow_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _workflow_list_execution_traces,
         arguments,
+        tool_family_label="Diagnostics",
     )
 
 
@@ -3780,18 +3874,20 @@ async def _handle_workflow_build_prediction_envelope(
 
 
 async def _handle_workflow_get_instance(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_untrusted_workflow_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _workflow_get_instance,
         arguments,
+        tool_family_label="Diagnostics",
     )
 
 
 async def _handle_workflow_get_execution_trace(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_untrusted_workflow_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _workflow_get_execution_trace,
         arguments,
+        tool_family_label="Diagnostics",
     )
 
 
@@ -3877,18 +3973,20 @@ async def _handle_workflow_trigger_schedule(
 async def _handle_chat_history_get_segments(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_untrusted_workflow_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _chat_history_get_segments,
         arguments,
+        tool_family_label="Diagnostics",
     )
 
 
 async def _handle_chat_history_get_debug_entry(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_untrusted_workflow_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _chat_history_get_debug_entry,
         arguments,
+        tool_family_label="Diagnostics",
     )
 
 
@@ -3915,7 +4013,7 @@ async def _handle_conversation_get(
 async def _handle_conversation_transcript_page(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _conversation_transcript_page,
         arguments,
         tool_family_label="Conversation",
@@ -3925,7 +4023,7 @@ async def _handle_conversation_transcript_page(
 async def _handle_conversation_inspect_batch(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_catalogue_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _conversation_inspect_batch,
         arguments,
         tool_family_label="Conversation",
@@ -3965,32 +4063,36 @@ async def _handle_conversation_manage_batch(
 async def _handle_conversation_telemetry_get_locator(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_untrusted_workflow_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _conversation_telemetry_get_locator,
         arguments,
+        tool_family_label="Diagnostics",
     )
 
 
 async def _handle_turn_execution_list(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_untrusted_workflow_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _turn_execution_list,
         arguments,
+        tool_family_label="Diagnostics",
     )
 
 
 async def _handle_turn_execution_get(arguments: dict[str, Any]) -> list[TextContent]:
-    return _run_untrusted_workflow_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _turn_execution_get,
         arguments,
+        tool_family_label="Diagnostics",
     )
 
 
 async def _handle_turn_execution_get_diagnostics(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_untrusted_workflow_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _turn_execution_get_diagnostics,
         arguments,
+        tool_family_label="Diagnostics",
     )
 
 
@@ -4017,9 +4119,10 @@ async def _handle_failure_case_reference_resolve(
 async def _handle_turn_execution_get_live_progress(
     arguments: dict[str, Any],
 ) -> list[TextContent]:
-    return _run_untrusted_workflow_proxy_handler(
+    return _run_diagnostic_read_proxy_handler(
         _turn_execution_get_live_progress,
         arguments,
+        tool_family_label="Diagnostics",
     )
 
 

@@ -153,7 +153,18 @@ unchanged verification when needed, and published a current dependency
 receipt. This command is not a startup workaround and must not be scheduled on
 every restart.
 
-### 3.4 Clean up repeated local helpers
+### 3.4 Keep pending blobs accessible across runtime checkouts
+
+The default blob spillway is `data/blob_spillway` in the main Git checkout,
+shared by linked worktrees. `VON_BLOB_SPILLWAY_DIR` remains an explicit override;
+use an absolute path when multiple processes must share pending blobs. Before
+switching an existing deployment from a worktree-local queue, copy its pending
+blobs and manifests into the shared directory, check immutable blob hashes,
+and preserve the originals until recovery is verified. Missing complete inputs
+or workflow checkpoints block execution; diagnostic reads retain the failed
+reference so the original bytes can be recovered.
+
+### 3.5 Clean up repeated local helpers
 
 Before starting another server, browser replay, or MCP-heavy batch after
 several retries, inspect for:

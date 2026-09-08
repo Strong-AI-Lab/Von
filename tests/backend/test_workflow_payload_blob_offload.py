@@ -750,3 +750,30 @@ def test_trace_store_compacts_and_hydrates_execution_trace(monkeypatch) -> None:
     loaded = trace_store.get_workflow_execution_trace("execution-1")
     assert loaded is not None
     assert loaded["actions"] == actions
+
+
+@pytest.mark.parametrize("field", ["inputs", "workflow_data"])
+def test_missing_complete_execution_payload_remains_recoverable_but_cannot_run(monkeypatch, field):
+    import copy
+
+    store = _FakeBlobStore()
+    monkeypatch.setattr("src.backend.services.blob_store.get_blob_store_from_env", lambda: store)
+    monkeypatch.setenv("VON_WORKFLOW_PAYLOAD_BLOB_THRESHOLD_BYTES", "512")
+    payload = {"paper_concept_id": "#V#existing_paper", "context": "x" * 300_000}
+    ref = WorkflowInstanceManager._compact_instance_payload_field(
+        payload, field=field, instance_id="checkpoint-incident"
+    )
+    assert ref["schema_version"] == "workflow_payload_blob_ref.v1"
+    doc = {field: ref, "current_state": "summarise_representation_evidence"}
+    persisted = copy.deepcopy(doc)
+    saved_bytes = list(store.writes)
+    store.writes.clear()
+    degraded = WorkflowInstanceManager._hydrate_instance_payloads(doc)
+    assert degraded[field]["hydration_error"]
+    with pytest.raises(RuntimeError, match="hydration_failed"):
+        WorkflowInstanceManager._hydrate_instance_payloads(doc, fail_soft=False)
+    assert doc == persisted
+    store.writes.extend(saved_bytes)
+    restored = WorkflowInstanceManager._hydrate_instance_payloads(doc, fail_soft=False)
+    assert restored[field] == payload
+    assert restored["current_state"] == persisted["current_state"]

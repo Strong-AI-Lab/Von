@@ -7895,6 +7895,12 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "offset": {
+                        "type": "integer"
+                    },
+                    "limit": {
+                        "type": "integer"
+                    },
                     "execution_id": {
                         "type": [
                             "string",
@@ -7921,6 +7927,12 @@
                 "properties": {
                     "instance_id": {
                         "type": "string"
+                    },
+                    "offset": {
+                        "type": "integer"
+                    },
+                    "limit": {
+                        "type": "integer"
                     },
                     "await_terminal": {
                         "type": [
