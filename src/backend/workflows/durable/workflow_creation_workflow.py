@@ -180,9 +180,14 @@ def _extract_request_text(context: Mapping[str, Any]) -> str:
 
 
 def _extract_workflow_spec(context: Mapping[str, Any]) -> Mapping[str, Any]:
-    raw = context.get("workflow_spec")
-    if isinstance(raw, Mapping):
-        return dict(raw)
+    # Later creation stages and resumed instances must use the design already
+    # produced by identify_need. Re-inference can give each stage a different
+    # identity and leave the materialised graph pointing at missing concepts.
+    # An explicitly supplied repair spec still takes precedence.
+    for key in ("workflow_spec", "workflow_creation_spec"):
+        raw = context.get(key)
+        if isinstance(raw, Mapping) and raw:
+            return dict(raw)
     return {}
 
 

@@ -28,6 +28,11 @@ def configured(tmp_path, monkeypatch):
     root = tmp_path / "collection"
     settings = {"account_email": "owner@example.org"}
     monkeypatch.setattr(service, "config", lambda _: (archive, root, settings))
+    monkeypatch.setattr(
+        service,
+        "emit_collection_event",
+        lambda *args: {"success": False, "reason": "workflow_not_configured"},
+    )
     return archive, root, settings
 
 
@@ -381,3 +386,113 @@ def test_mismatched_account_does_not_fetch_or_block_valid_account(
             ).fetchone()
             is None
         )
+
+
+def test_collection_event_uses_trusted_private_actor_and_stable_source_identity(
+    monkeypatch,
+):
+    from src.backend.security.access_control import get_effective_user_concept_id
+    from src.backend.services import workflow_event_integration_service as events
+
+    calls = []
+
+    def launch(**kwargs):
+        assert get_effective_user_concept_id() == "#V#owner"
+        calls.append(kwargs)
+        return {"success": True, "triggered": len(calls) == 1}
+
+    monkeypatch.setattr(events, "launch_event_workflow", launch)
+    archive = SimpleNamespace(owner_user_concept_id="#V#owner")
+    meeting = {
+        "id": "same-recording",
+        "url": "https://otter.ai/u/same-recording",
+        "text": "Private source content is retrieved separately",
+        "metadata": {"owner_user_concept_id": "#V#attacker", "org_id": "#V#other"},
+    }
+    archived = {"status": "new", "source_sha256": "abc", "transcript_available": True}
+    represented = {
+        "meeting_concept_id": "#V#meeting",
+        "transcript_url": "/private-source",
+    }
+    service.emit_collection_event(archive, "private", meeting, archived, represented)
+    service.emit_collection_event(
+        archive, "private", meeting, {**archived, "status": "unchanged"}, represented
+    )
+    assert calls[0]["event_id"] == calls[1]["event_id"]
+    assert calls[0]["event_type"] == "otter.meeting_collected"
+    assert calls[0]["user_id"] == "#V#owner"
+    assert calls[0]["org_id"] is None
+    assert "Private source content" not in json.dumps(calls)
+    service.emit_collection_event(
+        archive,
+        "private",
+        meeting,
+        {**archived, "source_sha256": "changed"},
+        represented,
+    )
+    assert calls[-1]["event_id"] != calls[0]["event_id"]
+
+
+def test_failed_event_handoff_preserves_import_and_retries_same_recording(
+    configured, monkeypatch
+):
+    class Session:
+        async def call_tool(self, name, arguments):
+            if name == "otter_get_user_info":
+                return "Name: Owner\nEmail: owner@example.org"
+            return {
+                "id": "a",
+                "url": "https://otter.ai/u/a",
+                "text": "[0:01] Person: Hello",
+            }
+
+    @asynccontextmanager
+    async def session(_):
+        yield Session()
+
+    imported = []
+    monkeypatch.setattr(service, "otter_session", session)
+    monkeypatch.setattr(
+        service,
+        "import_snapshot",
+        lambda a, m: (
+            imported.append(m["id"])
+            or {
+                "conversation_id": m["id"],
+                "status": "new" if len(imported) == 1 else "unchanged",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        representation,
+        "represent_meeting",
+        lambda *args: {"meeting_concept_id": "#V#meeting"},
+    )
+    monkeypatch.setattr(
+        service,
+        "emit_collection_event",
+        lambda *args: {"success": False, "reason": "launch_failed"},
+    )
+    first = service.enqueue("private", meeting_ids=["a"], spawn=False)
+    service.work("private")
+    status = service.status("private", first["run_id"])
+    assert status["runs"][0]["status"] == "partial"
+    assert status["runs"][0]["receipt"]["counts"] == {
+        "new": 1,
+        "revised": 0,
+        "unchanged": 0,
+        "failed": 0,
+    }
+    assert status["runs"][0]["receipt"]["event_handoff_failures"] == 1
+    assert status["pending_meetings"] == 1
+    monkeypatch.setattr(
+        service,
+        "emit_collection_event",
+        lambda *args: {"success": True, "idempotent_reused": True},
+    )
+    second = service.enqueue("private", meeting_ids=["a"], spawn=False)
+    service.work("private")
+    status = service.status("private", second["run_id"])
+    assert status["runs"][0]["status"] == "completed"
+    assert status["pending_meetings"] == 0
+    assert imported == ["a", "a"]

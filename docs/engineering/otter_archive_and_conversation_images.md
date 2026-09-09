@@ -181,3 +181,26 @@ represent mentioned papers is tracked in
 [JVNAUTOSCI-2732](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2732).
 It must be authored and exercised through the Von UI; collection does not send
 presenter requests or assert paper interpretations.
+
+### Collection events
+
+After source preservation and canonical meeting representation, the collector
+emits `otter.meeting_collected` through the existing durable event dispatcher.
+The event ID combines the private meeting concept ID and source hash, so an
+identical revision has the same identity across account fallback and retries.
+Bindings and their represented conditions select the downstream workflow; the
+collector does not identify presenters, send requests or interpret papers.
+
+Inputs contain `resource_id`, `otter_id`, `meeting_concept_id`, `source_sha256`,
+`source_url`, `source_title`, `collected_via_account`, `collection_status`,
+`transcript_available` and `transcript_url`. Source text remains in the private
+archive and is retrieved through its existing actor-bound tools. The event actor
+comes from the validated archive-owner configuration, with no organisation
+publication implied. Source metadata cannot choose a different actor.
+
+Each meeting receipt includes `workflow_event`. An absent binding is an explicit
+unconfigured handoff, compatible with ordinary collection. A failed configured
+handoff increments `event_handoff_failures`, leaves the meeting pending, and
+makes the run partial while retaining the successful preservation receipt. A
+retry reuses the event's durable instance when one already exists. A queued or
+reused workflow does not prove its later mail, deck or paper effects succeeded.

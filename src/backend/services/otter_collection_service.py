@@ -355,6 +355,41 @@ def import_snapshot(archive, meeting):
     return receipt
 
 
+def emit_collection_event(archive, resource_id, meeting, archived, represented):
+    """Publish preserved-source evidence through the canonical event dispatcher.
+
+    An identical source revision has an identical event ID, including across
+    retries/accounts. Represented bindings own selection and workflow policy.
+    The trusted archive configuration owns the actor; source metadata cannot.
+    """
+    from ..security.access_control import override_current_actor
+    from .workflow_event_integration_service import launch_event_workflow
+
+    payload = {
+        "resource_id": resource_id,
+        "otter_id": meeting["id"],
+        "meeting_concept_id": represented["meeting_concept_id"],
+        "source_sha256": archived["source_sha256"],
+        "source_url": meeting["url"],
+        "source_title": meeting.get("title"),
+        "collected_via_account": archived.get("collected_via_account"),
+        "collection_status": archived["status"],
+        "transcript_available": archived.get("transcript_available", True),
+        "transcript_url": represented.get("transcript_url"),
+    }
+    with override_current_actor(archive.owner_user_concept_id, None):
+        return launch_event_workflow(
+            event_type="otter.meeting_collected",
+            event_id=represented["meeting_concept_id"]
+            + ":"
+            + archived["source_sha256"],
+            user_id=archive.owner_user_concept_id,
+            org_id=None,
+            inputs=payload,
+            event_payload=payload,
+        )
+
+
 async def collect(resource_id, run_id, request):
     archive, root, settings = config(resource_id)
     receipt = {
@@ -362,6 +397,7 @@ async def collect(resource_id, run_id, request):
         "counts": {"new": 0, "revised": 0, "unchanged": 0, "failed": 0},
         "meetings": [],
         "discovery_complete": True,
+        "event_handoff_failures": 0,
     }
 
     def checkpoint():
@@ -441,11 +477,34 @@ async def collect(resource_id, run_id, request):
                 )
                 available = archived.get("transcript_available", True)
                 receipt["counts"][archived["status"] if available else "failed"] += 1
-                receipt["meetings"].append({**archived, **represented})
-                if not available:
-                    receipt["meetings"][-1]["error_code"] = (
-                        "otter_transcript_unavailable"
+                item_receipt = {**archived, **represented}
+                receipt["meetings"].append(item_receipt)
+                try:
+                    handoff = await asyncio.to_thread(
+                        emit_collection_event,
+                        archive,
+                        resource_id,
+                        meeting,
+                        archived,
+                        represented,
                     )
+                except Exception as exc:  # noqa: BLE001 - retain source and retry the handoff
+                    handoff = {
+                        "success": False,
+                        "reason": "otter_event_handoff_failed",
+                        "error_type": type(exc).__name__,
+                    }
+                item_receipt["workflow_event"] = handoff
+                handoff_ok = bool(handoff.get("success")) or (
+                    handoff.get("reason") == "workflow_not_configured"
+                )
+                if not handoff_ok:
+                    receipt["event_handoff_failures"] += 1
+                if not available:
+                    item_receipt["error_code"] = "otter_transcript_unavailable"
+                    checkpoint()
+                    return
+                if not handoff_ok:
                     checkpoint()
                     return
                 with state_db(root) as db:
@@ -478,6 +537,7 @@ async def collect(resource_id, run_id, request):
         if (
             receipt["discovery_complete"]
             and not receipt["counts"]["failed"]
+            and not receipt["event_handoff_failures"]
             and not request["meeting_ids"]
         ):
             with state_db(root) as db:
@@ -486,7 +546,9 @@ async def collect(resource_id, run_id, request):
                     (end.isoformat(),),
                 )
     receipt["finished_at"] = now()
-    receipt["collection_complete"] = not receipt["counts"]["failed"]
+    receipt["collection_complete"] = (
+        not receipt["counts"]["failed"] and not receipt["event_handoff_failures"]
+    )
     receipt["collection_scope"] = (
         "returned_meetings"
         if not receipt["discovery_complete"]
