@@ -34,6 +34,7 @@ def represent_meeting(owner, meeting, archived, bindings):
         create_concept,
         get_concept_by_concept_id_exact,
     )
+    from .relationship_extent_index_service import defer_relationship_extent_index_sync
     from .scoped_assertion_service import (
         list_visible_scoped_assertions_page,
         retract_scoped_assertion,
@@ -52,9 +53,12 @@ def represent_meeting(owner, meeting, archived, bindings):
         "otter_id": cid,
         "source_sha256": archived["source_sha256"],
     }
+    if archived.get("collected_via_account"):
+        source["collected_via_account"] = archived["collected_via_account"]
     with (
         override_current_actor(owner, None),
         suppress_event_workflow_launches("otter_source_collection"),
+        defer_relationship_extent_index_sync(),
     ):
 
         def lookup(concept_id):

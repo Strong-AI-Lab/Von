@@ -263,3 +263,121 @@ def test_participant_binding_survives_refresh_and_rebinding_retracts_old_link(
         "#V#owner", meeting, archived, {"Person": "#V#corrected"}
     )
     assert [r["object_concept_id"] for r in assertions] == ["#V#corrected"]
+
+
+def test_multi_account_union_fallback_and_exact_id_deduplication(
+    configured, monkeypatch
+):
+    configured[2]["additional_accounts"] = [
+        {"id": "second", "email": "second@example.org"}
+    ]
+    calls = []
+
+    class Session:
+        def __init__(self, second):
+            self.second = second
+
+        async def call_tool(self, name, args):
+            calls.append((self.second, name, args))
+            if name == "otter_get_user_info":
+                return "Name: Owner\nEmail: " + (
+                    "second@example.org" if self.second else "owner@example.org"
+                )
+            if name == "otter_search":
+                return {
+                    "results": [
+                        {"id": "shared"},
+                        {"id": "second_only" if self.second else "primary_only"},
+                    ],
+                    "pagination_completion_reason": "all_results_returned",
+                }
+            if args["id"] == "second_only" and not self.second:
+                raise RuntimeError("not accessible")
+            return {
+                "id": args["id"],
+                "text": "[0:01] Owner: Hello",
+                "url": "https://otter.ai/u/" + args["id"],
+            }
+
+    @asynccontextmanager
+    async def session(path):
+        yield Session("accounts" in path.parts)
+
+    monkeypatch.setattr(service, "otter_session", session)
+    imported = []
+    monkeypatch.setattr(
+        service,
+        "import_snapshot",
+        lambda a, m: (
+            imported.append(m["id"]) or {"conversation_id": m["id"], "status": "new"}
+        ),
+    )
+    monkeypatch.setattr(representation, "represent_meeting", lambda *a: {})
+    job = service.enqueue("private", spawn=False)
+    service.work("private")
+    result = service.status("private", job["run_id"])["runs"][0]
+    assert result["status"] == "completed"
+    assert sorted(imported) == ["primary_only", "second_only", "shared"]
+    assert (
+        next(
+            x
+            for x in result["receipt"]["meetings"]
+            if x["conversation_id"] == "second_only"
+        )["collected_via_account"]
+        == "second@example.org"
+    )
+    assert all(c[2]["include_shared_meetings"] for c in calls if c[1] == "otter_search")
+
+
+def test_mismatched_account_does_not_fetch_or_block_valid_account(
+    configured, monkeypatch
+):
+    configured[2]["additional_accounts"] = [
+        {"id": "second", "email": "second@example.org"}
+    ]
+
+    class Session:
+        def __init__(self, second):
+            self.second = second
+
+        async def call_tool(self, name, args):
+            if name == "otter_get_user_info":
+                return "Name: Owner\nEmail: " + (
+                    "second@example.org" if self.second else "unexpected@example.org"
+                )
+            assert self.second
+            if name == "otter_search":
+                return {
+                    "results": [{"id": "a"}],
+                    "pagination_completion_reason": "all_results_returned",
+                }
+            return {
+                "id": "a",
+                "text": "[0:01] Owner: Hello",
+                "url": "https://otter.ai/u/a",
+            }
+
+    @asynccontextmanager
+    async def session(path):
+        yield Session("accounts" in path.parts)
+
+    monkeypatch.setattr(service, "otter_session", session)
+    monkeypatch.setattr(
+        service,
+        "import_snapshot",
+        lambda a, m: {"conversation_id": m["id"], "status": "new"},
+    )
+    monkeypatch.setattr(representation, "represent_meeting", lambda *a: {})
+    job = service.enqueue("private", spawn=False)
+    service.work("private")
+    run = service.status("private", job["run_id"])["runs"][0]
+    assert run["status"] == "completed_with_coverage_limit"
+    assert run["receipt"]["counts"]["new"] == 1
+    assert run["receipt"]["source_accounts"][0]["connected"] is False
+    with service.state_db(configured[1]) as db:
+        assert (
+            db.execute(
+                "SELECT value FROM state WHERE key='last_complete_date'"
+            ).fetchone()
+            is None
+        )
