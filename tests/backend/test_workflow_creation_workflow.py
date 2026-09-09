@@ -1398,6 +1398,49 @@ def test_normalise_workflow_spec_derives_bounded_stable_generated_workflow_id() 
     assert assess_workflow_id_hygiene(workflow_id)["valid"] is True
 
 
+def test_creation_stages_reuse_persisted_design_without_identity_reinference() -> None:
+    from src.backend.workflows.durable import workflow_creation_workflow as creation
+
+    persisted_spec = {
+        "workflow_id": "#V#meeting_followup_workflow",
+        "workflow_name": "Meeting Follow-up",
+        "steps": [
+            {
+                "state_key": "read_source",
+                "action_id": "fetch_concept",
+                "inputs": {"concept_id": "#V#meeting_source"},
+                "next_state_key": "completed",
+            },
+            {"state_key": "completed", "terminal": True},
+        ],
+        "required_effects": ["source_read"],
+    }
+    with (
+        patch.object(creation, "infer_workflow_authoring_identity") as infer,
+        patch.object(creation, "_resolve_workflow_template_spec") as template,
+    ):
+        context = {
+            "prompt": "Create a meeting workflow",
+            "workflow_creation_spec": persisted_spec,
+        }
+        for _ in range(4):
+            normalised = creation._normalise_workflow_spec(context)
+            assert normalised["workflow_id"] == persisted_spec["workflow_id"]
+            assert normalised["steps"][0]["action_id"] == "fetch_concept"
+            assert normalised["required_effects"] == ["source_read"]
+            context["workflow_creation_spec"] = normalised
+        infer.assert_not_called()
+        template.assert_not_called()
+
+        # A repair supplied by the authoring workflow replaces the prior design.
+        context["workflow_spec"] = {
+            **persisted_spec,
+            "steps": [{"state_key": "repaired", "terminal": True}],
+        }
+        repaired = creation._normalise_workflow_spec(context)
+        assert repaired["steps"][0]["state_key"] == "repaired"
+
+
 def test_workflow_authoring_preflight_create_routes_through_wrapper_workflow() -> None:
     _publish_workflow_authoring_governance_workflows()
 
