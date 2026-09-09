@@ -2678,7 +2678,7 @@
         },
         {
             "name": "fetch_concept_content",
-            "description": "Fetch rendered markdown content for a concept (content_html + md_content + raw_doc). Use reconstruct_md=false to avoid masking missing md_content.",
+            "description": "Fetch concept content (content_html + md_content + raw_doc). The default reconstruct_md=true includes stored text relations when no legacy markdown exists. reconstruct_md=false inspects legacy markdown/metadata only; empty md_content in that mode does not mean the concept has no stored text. Use get_text_relations for direct labelled text rows.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3134,7 +3134,7 @@
         },
         {
             "name": "get_source_processing_marker",
-            "description": "Read the durable Vontology marker for a source item, if one exists. Use before repeating source-processing work so a workflow can reuse represented evidence instead of mutating the source system.",
+            "description": "Read the durable Vontology marker for a source item, if one exists. Use before repeating source-processing work so a workflow can reuse represented evidence instead of mutating the source system. To assess currency, supply source_fingerprint from current source evidence and, where relevant, processing_authority_fingerprint. Omitting the expected source fingerprint returns comparison=not_requested, not evidence of a changed source. Marker existence does not prove adequacy under a revised user expectation. An authorised Gmail profile's resource ID and runtime alias resolve to the same existing marker; alternate historical marker IDs are exposed for inspection.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3195,7 +3195,7 @@
                     "source_item_id"
                 ],
                 "additionalProperties": true,
-                "description": "source processing marker lookup: source_system and source_item_id identify the source item. Supply the exact stable source_profile for profile-scoped markers; omit it only to read an historical profileless marker.",
+                "description": "source processing marker lookup: source_system and source_item_id identify the source item. Supply the exact stable source_profile for profile-scoped markers; omit it only to read an historical profileless marker. Supply source_fingerprint from the current source evidence to compare currency. Without it, comparison is not_requested; the legacy false matches/current flags do not establish that the source changed.",
                 "x-von-argument-aliases": {
                     "profile": "source_profile",
                     "profile_id": "source_profile"
@@ -3549,7 +3549,7 @@
         },
         {
             "name": "gmail_modify_labels",
-            "description": "Atomically add/remove labels on a Gmail message. Requires allow_mutation=true and profile with gmail.modify scope. Use verify_after=true for independent canonical state read-back and lost-response reconciliation.",
+            "description": "Atomically add/remove labels on one authorised Gmail message. Resolve mailbox-specific label IDs with gmail_list_labels. Only the requested labels change: adding a completion label does not implicitly archive or mark the message read. Choose disposition from the user's current guidance. Requires a profile with gmail.modify scope. Ordinary turns bind allow_mutation=true and verify_after=true for independent canonical state read-back and lost-response reconciliation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3912,6 +3912,9 @@
                     "issue_key": {
                         "type": "string"
                     },
+                    "resource_id": {
+                        "type": "string"
+                    },
                     "start_at": {
                         "type": "integer"
                     },
@@ -3948,6 +3951,9 @@
                     "expand": {
                         "type": "array",
                         "items": {}
+                    },
+                    "resource_id": {
+                        "type": "string"
                     }
                 },
                 "required": [
@@ -4196,6 +4202,9 @@
                 "type": "object",
                 "properties": {
                     "jql": {
+                        "type": "string"
+                    },
+                    "resource_id": {
                         "type": "string"
                     },
                     "max_results": {
@@ -4802,6 +4811,55 @@
             }
         },
         {
+            "name": "otter_collect_now",
+            "description": "Collect new Otter meetings now or refresh exact IDs/URLs into the private archive and link participants. Dates use YYYY-MM-DD. Optional participant_bindings maps requested meeting ID to exact source speaker label to reviewed existing person concept ID. Returns a queued run ID; inspect otter_collection_status before claiming collection complete.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "resource_id": {
+                        "type": "string"
+                    },
+                    "meeting_ids": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "created_after": {
+                        "type": "string"
+                    },
+                    "created_before": {
+                        "type": "string"
+                    },
+                    "participant_bindings": {
+                        "type": "object",
+                        "additionalProperties": true
+                    }
+                },
+                "required": [
+                    "resource_id"
+                ],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "otter_collection_status",
+            "description": "Inspect Otter collection runs, failures, participant concept links and scheduled collection configuration. Queued or running is not imported.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "resource_id": {
+                        "type": "string"
+                    },
+                    "run_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "resource_id"
+                ],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "preview_remove_relationship",
             "description": "Preview relationship removal effects without mutating data. Supports relation_id or triple selectors and returns impact/warning diagnostics.",
             "inputSchema": {
@@ -4964,7 +5022,7 @@
         },
         {
             "name": "record_source_processing_marker",
-            "description": "Create or update a durable Vontology marker that records a source item as processed into represented artefacts. This is additive Vontology state and should be called only after durable representation and read-back have verified processing success. It does not mutate the source system.",
+            "description": "Create or update a durable Vontology marker that records a source item as processed into represented artefacts. This is additive Vontology state and should be called only after durable representation and read-back have verified processing success. It does not mutate the source system. Authorised Gmail profile IDs and runtime aliases reuse the same marker identity.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -5090,7 +5148,7 @@
         },
         {
             "name": "remove_relationship",
-            "description": "Remove a relationship between two concepts (concept-to-concept only). Use to clean incorrect type/instance links or other structural predicates. Text relation removal is not supported in this tool.",
+            "description": "Correct one unsupported or duplicate concept-to-concept relationship using its exact source, predicate and target, or its relation identity. This removes the relationship, not the concepts. Ordinary chat uses audited soft deletion with an undo token; canonical source and inverse-target authority checks still apply. Inspect source evidence and the resulting relationships. Text relation removal is not supported.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -7230,7 +7288,7 @@
         },
         {
             "name": "upsert_singleton_text_relation",
-            "description": "Upsert a text relation and enforce singleton semantics for (concept, predicate, language) by replacing any other relations in the same group.",
+            "description": "Replace the current text of a maintained document or brief, leaving one base text relation for the selected concept, predicate and language. Read and consolidate useful previous contents first. Other languages, predicates and scoped assertions are unaffected. Use additive upsert_text_relation for independent notes or multiple values. Requires mutation authority over the subject; ordinary turns retain replaced text values and return their attachment metadata for recovery.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -7289,7 +7347,7 @@
         },
         {
             "name": "upsert_text_relation",
-            "description": "Add or update a canonical text relation when the actor has mutation authority over the subject concept. On an actor-bound surface that exposes upsert_scoped_assertion, use that capability for knowledge about a visible concept the actor does not own. Supports hasContent, hasDescription, hasNote, hasName, and existing custom predicate concepts.",
+            "description": "Attach text, reusing an identical attachment; different text adds another row and does not replace previous contents. To maintain one current document body, use upsert_singleton_text_relation. Requires mutation authority over the subject concept. On an actor-bound surface that exposes upsert_scoped_assertion, use that capability for knowledge about a visible concept the actor does not own. Supports hasContent, hasDescription, hasNote, hasName, and existing custom predicate concepts.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -7691,7 +7749,7 @@
         },
         {
             "name": "workflow_create_schedule",
-            "description": "Create a scheduled trigger for a workflow. Supports three types: 'interval' (run every N seconds), 'cron' (5-field cron expression), 'once' (run at a specific time). The scheduler will automatically create workflow instances when schedules are due.",
+            "description": "Create a scheduled trigger for a workflow. Supports three types: 'interval' (run every N seconds), 'cron' (5-field cron expression), 'once' (run at a specific time). Cron uses UTC and weekday 0=Monday. Intervals first run after one interval. The scheduler will automatically create workflow instances when schedules are due.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -7730,6 +7788,12 @@
                         "additionalProperties": true
                     },
                     "description": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "idempotency_key": {
                         "type": [
                             "string",
                             "null"

@@ -41507,6 +41507,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
             ),
         ),
         *otter_archive_definitions(),
+        *otter_collection_definitions(),
         *knowkat_definitions(),
         *conversation_image_definitions(),
         # Owner-scoped LinkedIn export search via a local external MCP server.
@@ -46301,6 +46302,7 @@ def _register_dynamic_catalogue_methods(
 
 from .conversation_image_tools import definitions as conversation_image_definitions
 from .otter_archive_tools import definitions as otter_archive_definitions
+from .otter_collection_tools import definitions as otter_collection_definitions
 
 
 def build_default_catalogue() -> MethodCatalogue:

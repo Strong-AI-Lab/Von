@@ -1227,6 +1227,8 @@ _DEFAULT_TOOL_METADATA: dict[str, dict[str, Any]] = {
 }
 
 _DEFAULT_VONTOLOGY_STDIO_EXPOSED_TOOL_NAMES = {
+    "otter_collect_now",
+    "otter_collection_status",
     "add_names",
     "add_relationship",
     "assign_task",
@@ -1421,6 +1423,7 @@ _DEFAULT_JIRA_FAMILY_SERVER_EXPOSED_TOOL_NAMES = {
 }
 
 _DEFAULT_WRITE_TOOL_NAMES = {
+    "otter_collect_now",
     "add_issue_comment",
     "add_names",
     "add_relationship",

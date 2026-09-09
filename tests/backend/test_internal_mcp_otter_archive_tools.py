@@ -33,6 +33,7 @@ def test_archive_tools_are_registered_without_removing_linkedin():
     names = set(build_default_catalogue().list_methods())
     assert {"otter_archive_" + name for name in TOOL_SPECS} <= names
     assert "linkedin_index_status" in names
+    assert {"otter_collect_now", "otter_collection_status"} <= names
 
 
 def test_resource_binding_is_returned_only_for_configured_owner():
@@ -65,6 +66,9 @@ def test_otter_archive_tools_are_projected_only_with_server_bound_resource():
 
     assert "otter_archive_search_archive" not in without_binding
     assert "otter_archive_search_archive" in with_binding
+    assert "otter_collect_now" in with_binding
+    assert "otter_collection_status" in with_binding
+    assert "otter_collect_now" not in without_binding
 
     definition = gateway.get_method_definition("otter_archive_search_archive")
     assert definition is not None
