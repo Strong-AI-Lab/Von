@@ -1263,6 +1263,7 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ig
         if name in (
             _TRUSTED_LOCAL_OPERATOR_GMAIL_TOOLS
             | _TRUSTED_LOCAL_OPERATOR_CONVERSATION_TOOLS
+            | {"otter_collect_now", "otter_collection_status"}
         ):
             # This stdio server is the deliberately local coding/operator
             # surface. Bind that provenance only around explicitly listed
@@ -4712,7 +4713,19 @@ async def _handle_assign_task(arguments: dict[str, Any]) -> list[TextContent]:
         return [_json_text({"error": str(exc), "success": False})]
 
 
+async def _handle_otter_collect_now(arguments: dict[str, Any]) -> list[TextContent]:
+    from src.backend.integrations.internal_mcp.otter_collection_tools import call_collection
+    return [_json_text(call_collection("enqueue", **arguments))]
+
+
+async def _handle_otter_collection_status(arguments: dict[str, Any]) -> list[TextContent]:
+    from src.backend.integrations.internal_mcp.otter_collection_tools import call_collection
+    return [_json_text(call_collection("status", **arguments))]
+
+
 _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]]]] = {
+    "otter_collect_now": _handle_otter_collect_now,
+    "otter_collection_status": _handle_otter_collection_status,
     "get_context": _handle_get_context,
     "create_concepts": _handle_create_concepts,
     "find_subconcepts": _handle_find_subconcepts,

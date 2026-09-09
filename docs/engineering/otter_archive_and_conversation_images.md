@@ -98,3 +98,72 @@ source hashes, model and prompt versions with any persisted interpretation. A ca
 render or OCR result is not a verified semantic interpretation. Reuse represented
 workflow authoring for analysis/persistence/recovery rather than treating a successful
 file import, graph creation or schedule as proof of slide understanding.
+
+## New meeting collection
+
+[JVNAUTOSCI-314](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-314) adds a
+collector using Otter's [official hosted MCP](https://help.otter.ai/hc/en-us/articles/35287607569687-Otter-MCP-Server).
+Von authenticates its own read-only OAuth client. A connector available inside
+ChatGPT/Codex is not a credential or execution service available to the Von server.
+No model call is needed for discovery, copying, deduplication or scheduling.
+
+The existing private archive remains the source store. Its operator-only
+`import-live` CLI saves immutable source JSON and content-hashed revisions without
+modifying the original backup. Query MCP access remains read-only. The collector
+stores operational jobs, retry IDs and receipts beside the archive in
+`collection/state.sqlite3`; canonical concept and scoped-assertion services own
+meeting representation and participant links. Source text cannot trigger tools.
+
+Configure `collection/settings.json` beside the archive database with `enabled`,
+`owner_user_concept_id` matching the deployment binding, and the authorised Otter
+`account_email`. Keep this file and the sibling `credentials` directory private
+and outside Git. Run `pdm run python scripts/collect_otter.py authorise`, open the
+URL in `credentials/authorisation-request.json`, and authorise Otter access. The
+loopback callback verifies OAuth state; saved token expiry survives restarts and
+refresh tokens support unattended renewal. Revoked consent requires operator
+reauthorisation and appears as a failed run, never a successful empty import.
+
+The owning Von actor can use `otter_collect_now` for date-window discovery or
+exact meeting IDs/URLs, and `otter_collection_status` to inspect durable receipts.
+The ordinary-turn resource selector comes from trusted server context. The local
+Von stdio MCP also exposes these tools under its explicit operator provenance.
+Dates are `YYYY-MM-DD`. Optional `participant_bindings` maps a requested meeting
+ID to exact transcript speaker labels and reviewed existing person concept IDs.
+Existing reviewed bindings survive scheduled refreshes; a corrected binding
+retracts the prior collector-authored link. Unreconciled named speakers receive
+private meeting-local person concepts; unknown speaker labels remain unresolved.
+Calendar invitees are preserved as source metadata, not asserted to have attended.
+
+An operator can run `collect`, `daily`, `work` or `status` with the same script.
+`collect --meeting ID` forces a fresh source fetch even for a preserved meeting.
+`--after` and `--before` select a discovery window; `--bindings-file` supplies
+reviewed participant bindings. Requests persist before worker launch, workers
+serialise through a host lock, and interrupted jobs and failed items can resume.
+Source and assertion writes are idempotent; receipts distinguish new, revised,
+unchanged, unavailable and failed content. No-transcript notices preserve metadata
+and remain pending for retry.
+
+On macOS, run `install-schedule` **from the deployed runtime checkout**, using its
+Python environment. It installs `org.von.otter-collection` as a per-user launchd
+job at 06:00 in the host's local timezone. The user must remain logged in; launchd
+handles a calendar job missed during sleep when the host wakes. Inspect with
+`launchctl print gui/$(id -u)/org.von.otter-collection`; `launchctl kickstart` on
+that service exercises the installed job. Job logs and receipts remain private.
+On Linux, an equivalent owner crontab can invoke the deployed script's `daily`
+action. Daily requests deduplicate by UTC date; explicit `collect` remains
+available to retry or refresh immediately.
+
+Discovery defaults to the past seven days and retries retained failures. Otter's
+current responses may omit both a cursor and an explicit completion reason.
+Such runs report `discovery_complete=false` and never advance the completeness
+watermark; `completed_with_coverage_limit` means all **returned** meetings were
+preserved, not that the source was exhaustively enumerated. Older newly shared
+meetings or old transcript edits may require an explicit date window or ID.
+Audio and new screenshots are not supplied by these hosted MCP tools. Existing
+archive images remain available through the archive image routes.
+
+The later workflow to request slides from presenters, connect decks and fully
+represent mentioned papers is tracked in
+[JVNAUTOSCI-2732](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2732).
+It must be authored and exercised through the Von UI; collection does not send
+presenter requests or assert paper interpretations.
