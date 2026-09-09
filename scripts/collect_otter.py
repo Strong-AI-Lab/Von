@@ -28,6 +28,9 @@ def main():
     parser.add_argument("--before")
     parser.add_argument("--bindings-file", type=Path)
     parser.add_argument("--run-id")
+    parser.add_argument(
+        "--account", default="primary", help="Configured source ID for authorise only"
+    )
     args = parser.parse_args()
     from src.backend.integrations.internal_mcp.otter_archive_proxy_mcp import (
         _build_otter_archive_config,
@@ -38,7 +41,18 @@ def main():
         from src.backend.integrations.otter_live_client import authorise
 
         archive = _build_otter_archive_config(resource_id=args.resource_id)
-        result = asyncio.run(authorise(archive.database.parent / "credentials"))
+        _, _, settings = service.config(args.resource_id)
+        account = next(
+            (
+                x
+                for x in service.source_accounts(archive, settings)
+                if x["id"] == args.account
+            ),
+            None,
+        )
+        if account is None:
+            parser.error("Unknown configured account")
+        result = asyncio.run(authorise(account["credentials"]))
     elif args.action in {"collect", "daily"}:
         result = service.enqueue(
             args.resource_id,

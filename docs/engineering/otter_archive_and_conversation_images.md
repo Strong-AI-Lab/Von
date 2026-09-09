@@ -123,6 +123,20 @@ loopback callback verifies OAuth state; saved token expiry survives restarts and
 refresh tokens support unattended renewal. Revoked consent requires operator
 reauthorisation and appears as a failed run, never a successful empty import.
 
+Additional authorised source accounts use `additional_accounts` in the same
+private settings file, for example `[{"id": "zhan", "email": "account@example.org"}]`.
+Each has separate OAuth credentials at `accounts/<id>/credentials` beside the
+archive. Run `authorise --account <id>` after configuring it. Both scheduled and
+forced collection use these configured accounts, verifying each authenticated
+email before fetching. A disconnected or mismatched account is reported without
+blocking the other accounts; incomplete discovery never advances the watermark.
+Exact Otter IDs are deduplicated across sources, and fetch can fall back to another
+authorised account. The successful source account is retained in the receipt and
+canonical meeting provenance without altering or rehashing the source transcript.
+Different Otter IDs remain distinct source recordings even when they concern the
+same real meeting; reviewed same-meeting links can connect them without discarding
+complementary transcripts or images.
+
 The owning Von actor can use `otter_collect_now` for date-window discovery or
 exact meeting IDs/URLs, and `otter_collection_status` to inspect durable receipts.
 The ordinary-turn resource selector comes from trusted server context. The local

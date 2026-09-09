@@ -14,7 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import uuid
-from contextlib import contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -40,6 +40,140 @@ def config(resource_id):
     if not settings.get("enabled"):
         raise RuntimeError("otter_collection_disabled")
     return archive, root, settings
+
+
+def source_accounts(archive, settings):
+    """Trusted operator configuration; tool callers cannot select credentials."""
+    accounts = [
+        {
+            "id": "primary",
+            "email": settings["account_email"],
+            "credentials": archive.database.parent / "credentials",
+        }
+    ]
+    for item in settings.get("additional_accounts", []):
+        key = item["id"]
+        if not re.fullmatch(r"[a-z0-9_-]{1,40}", key) or key == "primary":
+            raise ValueError("invalid_otter_source_account")
+        if any(
+            x["id"] == key or x["email"].casefold() == item["email"].casefold()
+            for x in accounts
+        ):
+            raise ValueError("duplicate_otter_source_account")
+        accounts.append(
+            {
+                "id": key,
+                "email": item["email"],
+                "credentials": archive.database.parent
+                / "accounts"
+                / key
+                / "credentials",
+            }
+        )
+    return accounts
+
+
+@asynccontextmanager
+async def connected_sources(accounts, receipt):
+    async with AsyncExitStack() as stack:
+        sources = []
+        receipt["source_accounts"] = []
+        for account in accounts:
+            state = {"id": account["id"], "email": account["email"], "connected": False}
+            receipt["source_accounts"].append(state)
+            try:
+                session = await stack.enter_async_context(
+                    otter_session(account["credentials"])
+                )
+                info = unwrap(await session.call_tool("otter_get_user_info", {}))
+                if not isinstance(info, str) or not re.search(
+                    r"^Email:\s*" + re.escape(account["email"]) + r"\s*$",
+                    info,
+                    re.MULTILINE | re.IGNORECASE,
+                ):
+                    raise PermissionError("otter_source_account_mismatch")
+                name = re.search(r"^Name:\s*(.+)$", info, re.MULTILINE)
+                state["connected"] = True
+                sources.append(
+                    {**account, "session": session, "name": name[1] if name else None}
+                )
+            except Exception as exc:  # noqa: BLE001 - record account failure without source secrets
+                state["error_type"] = type(exc).__name__
+                receipt["discovery_complete"] = False
+        if not sources:
+            raise RuntimeError("otter_no_source_accounts_connected")
+        yield sources
+
+
+async def discover_sources(sources, arguments, receipt):
+    ids = []
+    for source in sources:
+        state = next(x for x in receipt["source_accounts"] if x["id"] == source["id"])
+        cursor = None
+        seen = set()
+        complete = False
+        try:
+            for _ in range(100):
+                query = (
+                    {"cursor": cursor, "page_size": 25}
+                    if cursor
+                    else {
+                        **arguments,
+                        "username": source["name"],
+                        "include_shared_meetings": True,
+                    }
+                )
+                result = unwrap(
+                    await source["session"].call_tool("otter_search", query)
+                )
+                if not isinstance(result, dict) or not isinstance(
+                    result.get("results"), list
+                ):
+                    raise TypeError("otter_search_shape_unsupported")
+                ids.extend(meeting_id(x["id"]) for x in result["results"])
+                cursor = result.get("next_cursor")
+                reason = result.get("pagination_completion_reason")
+                if not cursor:
+                    complete = reason == "all_results_returned"
+                    state["discovery_completion_reason"] = (
+                        reason or "upstream_completion_unspecified"
+                    )
+                    break
+                if cursor in seen:
+                    state["discovery_completion_reason"] = "repeated_cursor"
+                    break
+                seen.add(cursor)
+            else:
+                state["discovery_completion_reason"] = "bounded_page_limit"
+        except Exception as exc:  # noqa: BLE001 - preserve other accounts and partial discovery
+            state["discovery_error_type"] = type(exc).__name__
+        state["discovery_complete"] = complete
+        receipt["discovery_complete"] &= complete
+    return list(dict.fromkeys(ids))
+
+
+async def fetch_from_sources(sources, cid):
+    """A shared ID is one recording; another authorised account can supply it."""
+    notice = None
+    for source in sources:
+        try:
+            meeting = unwrap(
+                await source["session"].call_tool("otter_fetch", {"id": cid})
+            )
+            if not isinstance(meeting, dict) or meeting.get("id") != cid:
+                continue
+            text = meeting.get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            if text.strip().casefold() == "no transcript available":
+                notice = notice or (meeting, source["email"])
+                continue
+            return meeting, source["email"]
+        except Exception:  # noqa: BLE001, S112 - try remaining authorised sources, then emit one typed failure
+            continue
+    if notice:
+        return notice
+    raise RuntimeError("otter_fetch_unavailable_from_connected_accounts")
 
 
 @contextmanager
@@ -181,6 +315,9 @@ def status(resource_id, run_id=None):
         "runs": runs,
         "pending_meetings": pending,
         "schedule": settings.get("schedule", {}),
+        "source_accounts": [
+            x["email"] for x in source_accounts(config(resource_id)[0], settings)
+        ],
         "coverage_note": "Date-window discovery; exact-ID refresh also supports older changed/shared meetings. Audio and screenshots are not collected.",
     }
 
@@ -233,15 +370,8 @@ async def collect(resource_id, run_id, request):
                 "UPDATE jobs SET receipt=? WHERE id=?", (json.dumps(receipt), run_id)
             )
 
-    async with otter_session(archive.database.parent / "credentials") as session:
-        info = unwrap(await session.call_tool("otter_get_user_info", {}))
-        if not isinstance(info, str) or not re.search(
-            r"^Email:\s*" + re.escape(settings["account_email"]) + r"\s*$",
-            info,
-            re.MULTILINE | re.IGNORECASE,
-        ):
-            raise PermissionError("otter_source_account_mismatch")
-        name = re.search(r"^Name:\s*(.+)$", info, re.MULTILINE)
+    accounts = source_accounts(archive, settings)
+    async with connected_sources(accounts, receipt) as sources:
         with state_db(root) as db:
             pending = [r[0] for r in db.execute("SELECT id FROM pending")]
             watermark = db.execute(
@@ -263,40 +393,17 @@ async def collect(resource_id, run_id, request):
                 )
             )
             receipt["date_window"] = {"from": start.isoformat(), "to": end.isoformat()}
-            cursor = None
-            seen_cursors = set()
-            for _ in range(100):
-                arguments = (
-                    {"cursor": cursor, "page_size": 25}
-                    if cursor
-                    else {
+            ids.extend(
+                await discover_sources(
+                    sources,
+                    {
                         "created_after": start.strftime("%Y/%m/%d"),
                         "created_before": end.strftime("%Y/%m/%d"),
                         "page_size": 25,
-                        "username": name[1] if name else None,
-                    }
+                    },
+                    receipt,
                 )
-                result = unwrap(await session.call_tool("otter_search", arguments))
-                if not isinstance(result, dict) or not isinstance(
-                    result.get("results"), list
-                ):
-                    raise TypeError("otter_search_shape_unsupported")
-                ids.extend(meeting_id(x["id"]) for x in result["results"])
-                cursor = result.get("next_cursor")
-                reason = result.get("pagination_completion_reason")
-                if not cursor:
-                    receipt["discovery_complete"] = reason == "all_results_returned"
-                    receipt["discovery_completion_reason"] = (
-                        reason or "upstream_completion_unspecified"
-                    )
-                    break
-                if cursor in seen_cursors:
-                    receipt["discovery_complete"] = False
-                    break
-                seen_cursors.add(cursor)
-            else:
-                receipt["discovery_complete"] = False
-                receipt["discovery_completion_reason"] = "bounded_page_limit"
+            )
         ids = list(dict.fromkeys(ids))
         # Persist all discovered IDs before processing any item. Failures survive windows.
         with state_db(root) as db:
@@ -304,20 +411,19 @@ async def collect(resource_id, run_id, request):
                 "INSERT OR IGNORE INTO pending VALUES(?)", [(cid,) for cid in ids]
             )
         checkpoint()
-        for cid in ids:
+
+        async def collect_item(cid):
             try:
                 current_archive, _, current_settings = config(resource_id)
                 if (
                     current_archive.owner_user_concept_id
                     != archive.owner_user_concept_id
-                    or current_settings["account_email"] != settings["account_email"]
+                    or source_accounts(current_archive, current_settings) != accounts
                 ):
                     raise PermissionError("otter_collection_binding_changed")
-                raw = await session.call_tool("otter_fetch", {"id": cid})
-                meeting = unwrap(raw)
-                if not isinstance(meeting, dict) or meeting.get("id") != cid:
-                    raise RuntimeError("otter_fetch_identity_mismatch")
+                meeting, source_email = await fetch_from_sources(sources, cid)
                 archived = await asyncio.to_thread(import_snapshot, archive, meeting)
+                archived["collected_via_account"] = source_email
                 from .otter_representation_service import represent_meeting
 
                 with state_db(root) as db:
@@ -341,7 +447,7 @@ async def collect(resource_id, run_id, request):
                         "otter_transcript_unavailable"
                     )
                     checkpoint()
-                    continue
+                    return
                 with state_db(root) as db:
                     db.execute("DELETE FROM pending WHERE id=?", (cid,))
                     db.execute(
@@ -360,6 +466,15 @@ async def collect(resource_id, run_id, request):
                     }
                 )
             checkpoint()
+
+        # Independent recordings use disjoint identities; bound upstream/Atlas load.
+        slots = asyncio.Semaphore(3)
+
+        async def bounded_item(cid):
+            async with slots:
+                await collect_item(cid)
+
+        await asyncio.gather(*(bounded_item(cid) for cid in ids))
         if (
             receipt["discovery_complete"]
             and not receipt["counts"]["failed"]
