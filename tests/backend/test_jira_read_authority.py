@@ -53,6 +53,8 @@ def account(monkeypatch):
 
     async def call(tool, arguments):
         state["calls"].append((tool, arguments))
+        if tool == "jira_get_project_issue_types":
+            return {"success": True, "available_issue_type_names": ["Task"]}
         return {"issues": [], "key": "PROJ-1", "comments": []}
 
     monkeypatch.setattr(proxy._client, "call_tool", call)
@@ -269,3 +271,94 @@ def test_local_stdio_jira_reads_reach_account_rpc(account, name, arguments):
     result = json.loads(blocks[0].text)
     assert result.get("success") is not False
     assert account["calls"] == [(name, arguments)]
+
+
+def test_local_stdio_create_preserves_authority_through_preflight(account, monkeypatch):
+    import json
+    from src.backend.mcp_server import mcp_stdio_server as stdio
+    from src.backend.integrations.internal_mcp import catalogue
+
+    monkeypatch.setattr(catalogue, "_jira_project_allow_list", lambda: ["PROJ"])
+    result = json.loads(
+        asyncio.run(
+            stdio.call_tool(
+                "jira_create_issue",
+                {
+                    "project_key": "PROJ",
+                    "issue_type": "Task",
+                    "summary": "Authority regression",
+                    "approved": True,
+                    "dry_run": False,
+                },
+            )
+        )[0].text
+    )
+    assert result.get("success") is not False, result
+    assert [name for name, _ in account["calls"]] == [
+        "jira_get_project_issue_types",
+        "jira_create_issue",
+    ]
+
+
+@pytest.mark.parametrize("actor", [OTHER, None])
+def test_stdio_create_never_promotes_existing_untrusted_context(
+    account, monkeypatch, actor
+):
+    import json
+    from src.backend.mcp_server import mcp_stdio_server as stdio
+    from src.backend.integrations.internal_mcp import catalogue
+    from src.backend.integrations.internal_mcp.gateway import (
+        bind_internal_mcp_actor_context_source,
+    )
+
+    monkeypatch.setattr(catalogue, "_jira_project_allow_list", lambda: ["PROJ"])
+    with (
+        override_current_actor(actor, None),
+        bind_internal_mcp_actor_context_source("tool_payload_fallback"),
+    ):
+        result = json.loads(
+            asyncio.run(
+                stdio.call_tool(
+                    "jira_create_issue",
+                    {
+                        "project_key": "PROJ",
+                        "issue_type": "Task",
+                        "summary": "Must fail",
+                        "approved": True,
+                        "dry_run": False,
+                        "user_concept_id": OWNER,
+                    },
+                )
+            )[0].text
+        )
+    assert result["success"] is False
+    assert account["calls"] == []
+
+
+def test_local_stdio_create_still_requires_write_intent_and_project_allowlist(
+    account, monkeypatch
+):
+    import json
+    from src.backend.mcp_server import mcp_stdio_server as stdio
+    from src.backend.integrations.internal_mcp import catalogue
+
+    monkeypatch.setattr(catalogue, "_jira_project_allow_list", lambda: ["PROJ"])
+    for fields, expected in [
+        ({"project_key": "OTHER", "approved": True}, "project_not_allowlisted"),
+        ({"project_key": "PROJ", "approved": False}, "approval_required"),
+    ]:
+        result = json.loads(
+            asyncio.run(
+                stdio.call_tool(
+                    "jira_create_issue",
+                    {
+                        "issue_type": "Task",
+                        "summary": "Must fail",
+                        "dry_run": False,
+                        **fields,
+                    },
+                )
+            )[0].text
+        )
+        assert result["error_code"] == expected
+    assert account["calls"] == []
