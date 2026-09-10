@@ -3564,6 +3564,54 @@ def test_workflow_bind_event_and_list_event_bindings_gateway_paths(monkeypatch):
     assert listed.get("has_conflicts") is False
 
 
+def test_ordinary_turn_can_bind_and_disable_events_as_live_administrator(monkeypatch):
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.services.adaptive_turn_service import (
+        ordinary_turn_capability_delegation,
+    )
+
+    manager = _StubWorkflowManager()
+    _patch_read_only_registry(monkeypatch, "#V#meeting_workflow")
+    monkeypatch.setattr(
+        "src.backend.workflows.durable.WorkflowInstanceManager", lambda: manager
+    )
+    monkeypatch.setattr(
+        "src.backend.workflows.workflow_listing_service.filter_workflow_ids_for_current_actor",
+        lambda workflow_ids: list(workflow_ids),
+    )
+    monkeypatch.setattr(
+        "src.backend.services.von_operational_administrator_service."
+        "is_live_von_operational_administrator",
+        lambda actor: actor == "#V#workflow_admin",
+    )
+    gateway = _build_gateway()
+    operations = {"workflow_bind_event", "workflow_set_event_binding_enabled"}
+    assert operations <= set(
+        ordinary_turn_capability_delegation(
+            gateway, user_concept_id="#V#workflow_admin"
+        )
+    )
+    assert not operations.intersection(
+        ordinary_turn_capability_delegation(gateway, user_concept_id=None)
+    )
+    with override_current_actor("#V#workflow_admin", None):
+        created = gateway.invoke(
+            "workflow_bind_event",
+            {
+                "event_type": "otter.meeting_collected",
+                "workflow_id": "#V#meeting_workflow",
+            },
+        ).payload
+        assert created["success"] is True, created
+        binding_id = created["binding"]["binding_id"]
+        disabled = gateway.invoke(
+            "workflow_set_event_binding_enabled",
+            {"binding_id": binding_id, "enabled": False},
+        ).payload
+        assert disabled["success"] is True
+    assert manager.get_event_binding(binding_id).enabled is False
+
+
 def test_workflow_bind_event_conflict_requires_replace(monkeypatch):
     manager = _StubWorkflowManager()
     _patch_read_only_registry(monkeypatch, "#V#enrichment_workflow")

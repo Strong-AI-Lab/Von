@@ -45722,6 +45722,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 description="Binding write result.",
             ),
             category="write",
+            ordinary_turn_effect=True,
             description=(
                 "Register or update an event-to-workflow binding with optional input mapping and represented condition metadata. "
                 "Set replace_existing=true to overwrite an existing conflicting binding."
@@ -45780,6 +45781,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 description="Event binding enabled/disabled result.",
             ),
             category="write",
+            ordinary_turn_effect=True,
             description=(
                 "Enable or disable an existing event binding without deleting it. "
                 "Use workflow_list_event_bindings first to identify binding_id values."
