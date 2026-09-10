@@ -17,6 +17,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..db.repositories.text_value_repository import (
@@ -26,7 +27,12 @@ from ..db.repositories.text_value_repository import (
 from ..utils.jira_issue_key_utils import normalise_jira_issue_key
 from ..utils.concept_id_utils import canonicalise_vontology_concept_id, ensure_v_concept_prefix
 from .concept_resolution_service import resolve_concept_by_name
-from .concept_service import create_concept, get_concept_by_concept_id
+from .concept_service import (
+    create_concept,
+    get_concept_by_concept_id,
+    get_concept_by_concept_id_exact,
+    ConceptNotFoundError,
+)
 from .text_value_service import upsert_text_for_concept
 from .task_management_service import (
     InvalidTaskDataError,
@@ -39,6 +45,7 @@ from .task_management_service import (
     build_jira_migration_bulk_task_collection,
     create_task,
     find_task_by_external_reference,
+    get_task,
     link_tasks,
     record_task_history_event,
     set_task_epic,
@@ -47,6 +54,7 @@ from .task_management_service import (
     upsert_task_external_reference,
 )
 from .task_ontology_service import JIRA_IMPORTED_TASK_SOURCE_ID
+from .feature_flags import suppress_event_workflow_launches
 
 _normalise_issue_key = normalise_jira_issue_key
 
@@ -168,13 +176,22 @@ def _extract_priority_name(fields: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _map_status(status_name: str | None) -> tuple[str, str | None]:
+def _map_status(
+    status_name: str | None, category_key: str | None = None
+) -> tuple[str, str | None]:
     if not isinstance(status_name, str) or not status_name.strip():
         return _DEFAULT_STATUS, "jira_status_missing_defaulted_to_pending"
     normalised = status_name.strip().lower()
     mapped = _JIRA_STATUS_TO_VON_STATUS.get(normalised)
     if mapped:
         return mapped, None
+    category_status = {
+        "new": "pending",
+        "indeterminate": "in_progress",
+        "done": "completed",
+    }.get(category_key)
+    if category_status:
+        return category_status, None
     return _DEFAULT_STATUS, f"jira_status_unmapped:{status_name}"
 
 
@@ -833,6 +850,7 @@ def _ensure_jira_participant_concept(
     organisation_concept_id: str | None,
     allow_lookup: bool,
     allow_create: bool,
+    allow_alias_writes: bool = True,
 ) -> Dict[str, Any]:
     participant = _extract_jira_participant(raw_participant)
     if participant is None:
@@ -863,6 +881,21 @@ def _ensure_jira_participant_concept(
             mapped_concept_id = cached_email
             resolution = "mapped_from_email_cache"
 
+    if mapped_concept_id is None and allow_lookup and not allow_alias_writes:
+        candidate = _build_jira_person_concept_id(
+            account_id=account_id,
+            email_address=email_address,
+            display_name=display_name,
+        )
+        try:
+            existing = get_concept_by_concept_id_exact(candidate)
+            if existing:
+                mapped_concept_id, resolution = (
+                    existing["concept_id"],
+                    "mapped_existing_candidate_concept",
+                )
+        except ConceptNotFoundError:
+            pass
     if mapped_concept_id is None and allow_lookup:
         resolved = _resolve_existing_person_concept_id(
             account_id=account_id if isinstance(account_id, str) else None,
@@ -901,6 +934,14 @@ def _ensure_jira_participant_concept(
                 create_as_instance=True,
                 created_by_concept_id=actor_concept_id,
                 organisation_concept_id=organisation_concept_id,
+                **(
+                    {
+                        "visibility_scope_mode": "user_only_default",
+                        "maintain_relationship_inverses": False,
+                    }
+                    if not allow_alias_writes
+                    else {}
+                ),
             )
             created_concept_id = created.get("concept_id") if isinstance(created, Mapping) else None
             if isinstance(created_concept_id, str) and created_concept_id.strip():
@@ -910,7 +951,10 @@ def _ensure_jira_participant_concept(
             created_concept = True
             resolution = "created_new_concept"
         except Exception:
-            existing = get_concept_by_concept_id(candidate_concept_id)
+            try:
+                existing = get_concept_by_concept_id_exact(candidate_concept_id)
+            except ConceptNotFoundError:
+                existing = None
             existing_concept_id = existing.get("concept_id") if isinstance(existing, Mapping) else None
             if isinstance(existing_concept_id, str) and existing_concept_id.strip():
                 mapped_concept_id = existing_concept_id.strip()
@@ -919,13 +963,16 @@ def _ensure_jira_participant_concept(
     if isinstance(mapped_concept_id, str) and mapped_concept_id:
         mapped_concept_id = ensure_v_concept_prefix(mapped_concept_id) or mapped_concept_id
         try:
-            _upsert_jira_participant_aliases(
-                concept_id=mapped_concept_id,
-                account_id=account_id if isinstance(account_id, str) else None,
-                email_address=(
-                    email_address if isinstance(email_address, str) and email_address else None
-                ),
-            )
+            if allow_alias_writes and resolution != "mapped_from_account_cache":
+                _upsert_jira_participant_aliases(
+                    concept_id=mapped_concept_id,
+                    account_id=account_id if isinstance(account_id, str) else None,
+                    email_address=(
+                        email_address
+                        if isinstance(email_address, str) and email_address
+                        else None
+                    ),
+                )
         except Exception:
             # Alias persistence is best-effort; mapping should still proceed.
             pass
@@ -1010,6 +1057,8 @@ def _issue_reference_payload(
         "status_history": status_history,
         "imported_at": _iso_now(),
     }
+    if isinstance(issue.get("_von_source_archive"), Mapping):
+        payload["source_archive"] = dict(issue["_von_source_archive"])
 
     assignee_payload = _participant_reference_payload(
         participant=assignee,
@@ -1054,6 +1103,35 @@ def _issue_reference_payload(
         payload["watchers"] = watcher_payloads
 
     return payload
+
+
+def _legacy_import_projection(reference):
+    """Recover only projections actually recorded by earlier importer releases."""
+    baseline = {}
+    for source, target in (
+        ("labels", "labels"),
+        ("components", "components"),
+        ("fix_versions", "fix_versions"),
+        ("sprint_values", "sprint_values"),
+        ("backlog_rank", "backlog_rank"),
+        ("due_date", "due_date"),
+        (_JIRA_PARTICIPANT_REPORTER_METADATA_KEY, "reporter_concept_id"),
+        (_JIRA_PARTICIPANT_WATCHERS_METADATA_KEY, "watcher_concept_ids"),
+    ):
+        if source in reference:
+            baseline[target] = reference[source]
+    if "status_name" in reference:
+        baseline["status"] = _map_status(reference["status_name"])[0]
+    if "priority_name" in reference:
+        baseline["priority"] = _map_priority(reference["priority_name"])[0]
+    for source, target in (
+        ("assignee", "assignee_concept_id"),
+        ("creator", "created_by_concept_id"),
+    ):
+        participant = reference.get(source)
+        if isinstance(participant, Mapping) and "concept_id" in participant:
+            baseline[target] = participant["concept_id"]
+    return baseline
 
 
 def _existing_imported_activity_checkpoint(
@@ -1150,6 +1228,7 @@ def _materialise_jira_issue_activity(
             actor_concept_id=actor_concept_id,
             organisation_concept_id=organisation_concept_id,
             allow_lookup=bool(auto_resolve_participants),
+            allow_alias_writes=not dry_run and not raw_issue.get("_von_source_archive"),
             allow_create=(
                 bool(auto_resolve_participants)
                 and bool(create_missing_participant_concepts)
@@ -1514,6 +1593,44 @@ def _materialise_jira_issue_activity(
     return imported_activity, mapped_fields, dropped_fields
 
 
+def _projection_value(field_name, value):
+    """Compare stored ISO dates and source datetimes without spurious conflicts."""
+    if field_name in {"due_date", "start_date"} and value:
+        parsed = (
+            value
+            if isinstance(value, datetime)
+            else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        )
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    return value
+
+
+def _find_task_by_jira_source_identity(issue, organisation_concept_id):
+    """A moved/renamed Jira key must keep the original task identity."""
+    issue_id = issue.get("id")
+    if not issue_id:
+        return None
+    query = {
+        "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID,
+        "metadata.external_references.jira.issue_id": str(issue_id),
+    }
+    site = urlsplit(issue.get("self") or "").netloc
+    if site:
+        query["metadata.external_references.jira.issue_url"] = {
+            "$regex": r"^https?://" + re.escape(site) + "/"
+        }
+    if organisation_concept_id:
+        query["metadata.organisation_concept_id"] = {
+            "$in": [organisation_concept_id, None]
+        }
+    docs = list(ConceptsRepository.find(query, projection={"concept_id": 1}, limit=2))
+    if len(docs) > 1:
+        raise InvalidTaskDataError("Duplicate tasks for the same Jira source issue ID")
+    return get_task(docs[0]["concept_id"]) if docs else None
+
+
 def _resolve_existing_task_id(
     *,
     jira_issue_key: str,
@@ -1866,6 +1983,7 @@ def _build_pilot_validation_report(
     }
 
 
+@suppress_event_workflow_launches("jira_source_import")
 def import_jira_issues_to_tasks(
     *,
     issues: Sequence[Mapping[str, Any]],
@@ -1921,6 +2039,7 @@ def import_jira_issues_to_tasks(
 
     issue_results: list[Dict[str, Any]] = []
     existing_cache: dict[str, str | None] = {}
+    project_writer_cache = {}
     task_id_by_issue_key: dict[str, str] = {}
     project_observations: dict[str, Dict[str, Any]] = {}
 
@@ -2001,7 +2120,10 @@ def import_jira_issues_to_tasks(
             )
 
         jira_status_name = _extract_status_name(fields)
-        mapped_status, status_warning = _map_status(jira_status_name)
+        mapped_status, status_warning = _map_status(
+            jira_status_name,
+            (fields.get("status") or {}).get("statusCategory", {}).get("key"),
+        )
         if jira_status_name:
             project_observation["status_names"].add(jira_status_name)
             if status_warning and status_warning.startswith("jira_status_unmapped"):
@@ -2061,6 +2183,7 @@ def import_jira_issues_to_tasks(
             actor_concept_id=actor_concept_id,
             organisation_concept_id=organisation_concept_id,
             allow_lookup=bool(auto_resolve_participants),
+            allow_alias_writes=not dry_run and not raw_issue.get("_von_source_archive"),
             allow_create=(
                 bool(auto_resolve_participants)
                 and bool(create_missing_participant_concepts)
@@ -2075,6 +2198,7 @@ def import_jira_issues_to_tasks(
             actor_concept_id=actor_concept_id,
             organisation_concept_id=organisation_concept_id,
             allow_lookup=bool(auto_resolve_participants),
+            allow_alias_writes=not dry_run and not raw_issue.get("_von_source_archive"),
             allow_create=(
                 bool(auto_resolve_participants)
                 and bool(create_missing_participant_concepts)
@@ -2089,6 +2213,7 @@ def import_jira_issues_to_tasks(
             actor_concept_id=actor_concept_id,
             organisation_concept_id=organisation_concept_id,
             allow_lookup=bool(auto_resolve_participants),
+            allow_alias_writes=not dry_run and not raw_issue.get("_von_source_archive"),
             allow_create=(
                 bool(auto_resolve_participants)
                 and bool(create_missing_participant_concepts)
@@ -2123,6 +2248,8 @@ def import_jira_issues_to_tasks(
                 actor_concept_id=actor_concept_id,
                 organisation_concept_id=organisation_concept_id,
                 allow_lookup=bool(auto_resolve_participants),
+                allow_alias_writes=not dry_run
+                and not raw_issue.get("_von_source_archive"),
                 allow_create=(
                     bool(auto_resolve_participants)
                     and bool(create_missing_participant_concepts)
@@ -2234,6 +2361,10 @@ def import_jira_issues_to_tasks(
             external_id=issue_key,
             organisation_concept_id=organisation_concept_id,
         )
+        if not existing_task and raw_issue.get("_von_source_archive"):
+            existing_task = _find_task_by_jira_source_identity(
+                raw_issue, organisation_concept_id
+            )
         existing_task_id = (
             existing_task.get("task_concept_id")
             if isinstance(existing_task, Mapping)
@@ -2260,6 +2391,51 @@ def import_jira_issues_to_tasks(
             "task_source_id": JIRA_IMPORTED_TASK_SOURCE_ID,
             "reference_code": issue_key,
         }
+        source_projection = None
+        sync_conflicts = []
+        previous_reference = (
+            (existing_task or {}).get("external_references", {}).get("jira", {})
+        )
+        # After cutover every import path (including old schedules) must honour
+        # the canonical project's writer, even if this call has no new archive.
+        writer_project_id = (existing_task or {}).get("project_concept_id") or (
+            raw_issue.get("_von_project_context") or {}
+        ).get("project_concept_id")
+        if not writer_project_id:
+            from .task_project_service import find_jira_task_project
+
+            cache_key = (project_key, organisation_concept_id)
+            if cache_key not in project_writer_cache:
+                project_writer_cache[cache_key] = find_jira_task_project(
+                    project_key=project_key,
+                    source_site=urlsplit(raw_issue.get("self") or "").netloc or None,
+                    organisation_concept_id=organisation_concept_id,
+                )
+            writer_project_id = (project_writer_cache[cache_key] or {}).get(
+                "concept_id"
+            )
+        if writer_project_id:
+            from .task_project_service import get_task_project
+
+            if get_task_project(writer_project_id).get("writer") == "von":
+                issue_results.append(
+                    {
+                        "jira_issue_key": issue_key,
+                        "task_concept_id": existing_task_id_str,
+                        "action": "skipped_von_authoritative",
+                        "relation_results": [],
+                    }
+                )
+                task_id_by_issue_key[issue_key] = existing_task_id_str
+                continue
+        project_context = raw_issue.get("_von_project_context")
+        if isinstance(project_context, Mapping):
+            update_fields_payload.update(
+                {
+                    key: project_context[key]
+                    for key in ("project_concept_id", "collection_concept_ids")
+                }
+            )
         if mark_bulk_migration_collection:
             update_fields_payload["bulk_task_collections"] = [
                 build_jira_migration_bulk_task_collection()
@@ -2288,6 +2464,68 @@ def import_jira_issues_to_tasks(
         if rank_value:
             update_fields_payload["backlog_rank"] = rank_value
 
+        if raw_issue.get("_von_source_archive"):
+            update_fields_payload.update(title=title, description=description)
+            # Additional native collection membership survives source refreshes.
+            if existing_task and "collection_concept_ids" in update_fields_payload:
+                update_fields_payload["collection_concept_ids"] = sorted(
+                    set(update_fields_payload["collection_concept_ids"])
+                    | set(existing_task.get("collection_concept_ids") or [])
+                )
+            source_projection = {
+                key: _projection_value(key, value)
+                for key, value in update_fields_payload.items()
+            }
+            if (
+                existing_task_id_str
+                and previous_reference.get("import_phase") != "initialising"
+            ):
+                baseline = previous_reference.get("last_import_projection", {})
+                # Legacy imports retained some original projections. Unknown
+                # baselines stay conflicts; do not assume native edits are stale.
+                if not baseline:
+                    baseline = _legacy_import_projection(previous_reference)
+                for field_name, incoming in list(update_fields_payload.items()):
+                    if field_name in {
+                        "project_concept_id",
+                        "collection_concept_ids",
+                        "bulk_task_collections",
+                        "task_source_id",
+                        "reference_code",
+                    }:
+                        continue
+                    current = _projection_value(
+                        field_name, existing_task.get(field_name)
+                    )
+                    incoming = _projection_value(field_name, incoming)
+                    previous = _projection_value(field_name, baseline.get(field_name))
+                    if current != incoming and (
+                        field_name not in baseline or current != previous
+                    ):
+                        unresolved = any(
+                            row.get("field") == field_name
+                            for row in previous_reference.get("sync_conflicts", [])
+                        )
+                        if (
+                            field_name not in baseline
+                            or incoming != previous
+                            or unresolved
+                        ):
+                            sync_conflicts.append(
+                                {
+                                    "field": field_name,
+                                    "resolution": "preserved_von_value",
+                                }
+                            )
+                        del update_fields_payload[field_name]
+            if existing_task:
+                update_fields_payload = {
+                    key: value
+                    for key, value in update_fields_payload.items()
+                    if _projection_value(key, existing_task.get(key))
+                    != _projection_value(key, value)
+                }
+
         try:
             if existing_task_id_str is not None:
                 task_id = existing_task_id_str
@@ -2295,11 +2533,15 @@ def import_jira_issues_to_tasks(
                     action = "would_update"
                     summary["would_update"] += 1
                 elif update_existing:
-                    update_task_fields(
-                        task_id,
-                        fields=update_fields_payload,
-                        actor_concept_id=actor_concept_id,
-                    )
+                    if update_fields_payload:
+                        update_task_fields(
+                            task_id,
+                            fields=update_fields_payload,
+                            actor_concept_id=actor_concept_id,
+                            preserve_visibility=bool(
+                                raw_issue.get("_von_source_archive")
+                            ),
+                        )
                     action = "updated"
                     summary["updated"] += 1
                 else:
@@ -2310,14 +2552,57 @@ def import_jira_issues_to_tasks(
                     action = "would_create"
                     summary["would_create"] += 1
                 else:
+                    create_fields = {}
+                    if raw_issue.get("_von_source_archive"):
+                        create_fields = {
+                            key: update_fields_payload[key]
+                            for key in (
+                                "priority",
+                                "start_date",
+                                "due_date",
+                                "components",
+                                "fix_versions",
+                                "sprint_values",
+                                "backlog_rank",
+                                "project_concept_id",
+                                "collection_concept_ids",
+                            )
+                            if key in update_fields_payload
+                        }
                     created = create_task(
+                        **create_fields,
                         title=title,
                         description=description,
                         assignee_concept_id=assignee_concept_id,
-                        created_by_concept_id=creator_concept_id or actor_concept_id,
+                        created_by_concept_id=actor_concept_id or creator_concept_id,
                         organisation_concept_id=organisation_concept_id,
                         task_source_id=JIRA_IMPORTED_TASK_SOURCE_ID,
                         reference_code=issue_key,
+                        visibility_owner_concept_id=(
+                            actor_concept_id
+                            if raw_issue.get("_von_source_archive")
+                            else None
+                        ),
+                        agent_creation_fingerprint=(
+                            f"jira_import:{actor_concept_id}:{organisation_concept_id}:{raw_issue.get('self')}:{raw_issue.get('id')}"
+                            if raw_issue.get("_von_source_archive")
+                            else None
+                        ),
+                        initial_external_references=(
+                            {
+                                "jira": {
+                                    "external_id": issue_key,
+                                    "issue_key": issue_key,
+                                    "issue_id": raw_issue.get("id"),
+                                    "issue_url": raw_issue.get("self"),
+                                    "project_key": project_key,
+                                    "source_archive": raw_issue["_von_source_archive"],
+                                    "import_phase": "initialising",
+                                }
+                            }
+                            if raw_issue.get("_von_source_archive")
+                            else None
+                        ),
                     )
                     created_task_id = created.get("task_concept_id")
                     if not isinstance(created_task_id, str) or not created_task_id.strip():
@@ -2325,11 +2610,22 @@ def import_jira_issues_to_tasks(
                             f"create_task did not return task_concept_id for {issue_key}"
                         )
                     task_id = created_task_id.strip()
-                    update_task_fields(
-                        task_id,
-                        fields=update_fields_payload,
-                        actor_concept_id=actor_concept_id,
-                    )
+                    if raw_issue.get("_von_source_archive"):
+                        update_fields_payload = {
+                            key: value
+                            for key, value in update_fields_payload.items()
+                            if _projection_value(key, created.get(key))
+                            != _projection_value(key, value)
+                        }
+                    if update_fields_payload:
+                        update_task_fields(
+                            task_id,
+                            fields=update_fields_payload,
+                            actor_concept_id=actor_concept_id,
+                            preserve_visibility=bool(
+                                raw_issue.get("_von_source_archive")
+                            ),
+                        )
                     action = "created"
                     summary["created"] += 1
                     existing_cache[issue_key] = task_id
@@ -2400,6 +2696,31 @@ def import_jira_issues_to_tasks(
                     watcher_concept_ids=watcher_concept_ids,
                 )
                 reference_payload["imported_activity"] = imported_activity
+                aliases = set(previous_reference.get("previous_issue_keys") or [])
+                old_key = previous_reference.get("issue_key") or previous_reference.get(
+                    "external_id"
+                )
+                if old_key and old_key != issue_key:
+                    aliases.add(old_key)
+                reference_payload["previous_issue_keys"] = sorted(aliases)
+                if source_projection is not None:
+                    reference_payload["last_import_projection"] = source_projection
+                    reference_payload["sync_conflicts"] = sync_conflicts
+                    previous_archives = list(
+                        previous_reference.get("source_archive_history") or []
+                    )
+                    previous_archive = previous_reference.get("source_archive")
+                    current_archive = reference_payload.get("source_archive")
+                    if previous_archive and previous_archive.get("content_sha256") != (
+                        current_archive or {}
+                    ).get("content_sha256"):
+                        if not any(
+                            item.get("content_sha256")
+                            == previous_archive.get("content_sha256")
+                            for item in previous_archives
+                        ):
+                            previous_archives.append(previous_archive)
+                    reference_payload["source_archive_history"] = previous_archives
                 upsert_task_external_reference(
                     task_id,
                     source_system=_JIRA_SOURCE_SYSTEM,
@@ -2436,12 +2757,97 @@ def import_jira_issues_to_tasks(
                 "participant_mappings": participant_resolution,
                 "project_key": project_key,
                 "project_name": project_name,
+                "sync_conflicts": sync_conflicts,
+                "guard_existing_hierarchy": bool(
+                    raw_issue.get("_von_source_archive")
+                    and existing_task
+                    and previous_reference.get("import_phase") != "initialising"
+                ),
+                "hierarchy_baseline": {
+                    "parent": previous_reference.get("parent_issue_key"),
+                    "epic": previous_reference.get("epic_issue_key"),
+                },
             }
         )
 
+    relation_summary = repair_jira_task_relations(
+        issue_results,
+        actor_concept_id=actor_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        dry_run=dry_run,
+    )
+    summary["mapped_relations"] += relation_summary["mapped_relations"]
+    summary["dropped_relations"] += relation_summary["dropped_relations"]
+
+    project_parity_report = _build_project_parity_report(project_observations)
+    pilot_validation = _build_pilot_validation_report(
+        project_parity=project_parity_report,
+        summary=summary,
+    )
+
+    return {
+        "success": True,
+        "source_system": _JIRA_SOURCE_SYSTEM,
+        "dry_run": bool(dry_run),
+        "update_existing": bool(update_existing),
+        "summary": summary,
+        "issues": issue_results,
+        "project_parity": project_parity_report,
+        "pilot_validation": pilot_validation,
+    }
+
+
+def _check_imported_hierarchy_update(
+    row, kind, target_id, *, organisation_concept_id, cache, task_id_by_issue_key
+):
+    if not row.get("guard_existing_hierarchy"):
+        return
+    current = get_task(row["task_concept_id"]).get(f"{kind}_task_concept_id")
+    if current == target_id:
+        return
+    previous_key = row.get("hierarchy_baseline", {}).get(kind)
+    previous_id = (
+        (
+            task_id_by_issue_key.get(previous_key)
+            or _resolve_existing_task_id(
+                jira_issue_key=previous_key,
+                organisation_concept_id=organisation_concept_id,
+                cache=cache,
+            )
+        )
+        if previous_key
+        else None
+    )
+    if current != previous_id:
+        raise InvalidTaskDataError(
+            f"Native {kind} edit preserved; source hierarchy requires reconciliation"
+        )
+
+
+def repair_jira_task_relations(
+    issue_results,
+    *,
+    actor_concept_id,
+    organisation_concept_id=None,
+    dry_run=False,
+    only_unresolved=False,
+):
+    """Repair cross-batch references from retained import rows without refetching Jira."""
+    summary = {"mapped_relations": 0, "dropped_relations": 0}
+    existing_cache = {}
+    task_id_by_issue_key = {
+        row["jira_issue_key"]: row["task_concept_id"]
+        for row in issue_results
+        if row.get("task_concept_id") and row.get("jira_issue_key")
+    }
     # Pass 2: apply hierarchy and link relationships once task IDs are known.
     seen_links: set[tuple[str, str, str]] = set()
     for issue_row in issue_results:
+        if only_unresolved and not any(
+            row.get("status") == "dropped"
+            for row in issue_row.get("relation_results", [])
+        ):
+            continue
         issue_key = issue_row.get("jira_issue_key")
         if not isinstance(issue_key, str):
             continue
@@ -2454,6 +2860,9 @@ def import_jira_issues_to_tasks(
             # Dry-run still reports relation intent, but does not mutate.
             pass
 
+        if issue_row.get("action") == "skipped_von_authoritative":
+            continue
+        issue_row["relation_results"] = []
         relation_results_raw = issue_row.get("relation_results")
         if isinstance(relation_results_raw, list):
             relation_results_list: list[Dict[str, Any]] = relation_results_raw
@@ -2471,6 +2880,14 @@ def import_jira_issues_to_tasks(
             if isinstance(target_task_id, str) and target_task_id:
                 try:
                     if not dry_run and not source_task_id.startswith("planned:"):
+                        _check_imported_hierarchy_update(
+                            issue_row,
+                            "parent",
+                            target_task_id,
+                            organisation_concept_id=organisation_concept_id,
+                            cache=existing_cache,
+                            task_id_by_issue_key=task_id_by_issue_key,
+                        )
                         set_task_parent(
                             source_task_id,
                             target_task_id,
@@ -2516,6 +2933,14 @@ def import_jira_issues_to_tasks(
             if isinstance(target_task_id, str) and target_task_id:
                 try:
                     if not dry_run and not source_task_id.startswith("planned:"):
+                        _check_imported_hierarchy_update(
+                            issue_row,
+                            "epic",
+                            target_task_id,
+                            organisation_concept_id=organisation_concept_id,
+                            cache=existing_cache,
+                            task_id_by_issue_key=task_id_by_issue_key,
+                        )
                         set_task_epic(
                             source_task_id,
                             target_task_id,
@@ -2635,19 +3060,4 @@ def import_jira_issues_to_tasks(
                 )
                 summary["dropped_relations"] += 1
 
-    project_parity_report = _build_project_parity_report(project_observations)
-    pilot_validation = _build_pilot_validation_report(
-        project_parity=project_parity_report,
-        summary=summary,
-    )
-
-    return {
-        "success": True,
-        "source_system": _JIRA_SOURCE_SYSTEM,
-        "dry_run": bool(dry_run),
-        "update_existing": bool(update_existing),
-        "summary": summary,
-        "issues": issue_results,
-        "project_parity": project_parity_report,
-        "pilot_validation": pilot_validation,
-    }
+    return summary

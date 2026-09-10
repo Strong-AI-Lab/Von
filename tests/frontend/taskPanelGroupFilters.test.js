@@ -57,6 +57,62 @@ describe('task panel ontology-backed groups', () => {
         jest.restoreAllMocks();
     });
 
+    test('project changes replace in-flight loads and ignore late project details', async () => {
+        const { getJson, patchJson } = require(apiServiceModulePath);
+        let finishOldTasks;
+        let finishOldProject;
+        const oldTasks = new Promise((resolve) => { finishOldTasks = resolve; });
+        const oldProject = new Promise((resolve) => { finishOldProject = resolve; });
+        getJson.mockImplementation((url) => {
+            if (url === '/api/tasks/taxonomy') return Promise.resolve(buildTaxonomyResponse());
+            if (url === '/api/tasks/projects') return Promise.resolve({ projects: [
+                { concept_id: '#V#project_a', key: 'A', name: 'First project' },
+                { concept_id: '#V#project_b', key: 'B', name: 'Second project' },
+            ] });
+            if (url === '/api/tasks/projects/%23V%23project_a') return oldProject;
+            if (url === '/api/tasks/projects/%23V%23project_b') return Promise.resolve({ collections: [
+                { concept_id: '#V#collection_b', name: 'Second collection' },
+            ] });
+            if (url.startsWith('/api/tasks/?')) return oldTasks;
+            if (url.startsWith('/api/tasks/search?')) {
+                const params = new URL(url, 'https://von.test').searchParams;
+                expect(params.get('project_concept_id')).toBe('#V#project_b');
+                expect(params.get('bulk_visibility')).toBe('include');
+                return Promise.resolve({ tasks: [{ task_concept_id: '#V#new_task', title: 'Second project task', status: 'pending' }], has_more: false });
+            }
+            return Promise.resolve({});
+        });
+        const { showGlobalTasks, setCurrentSession } = require(taskPanelModulePath);
+        const opening = showGlobalTasks();
+        await flushRenderQueue();
+        function selectProject(value) {
+            const select = document.querySelector('#globalTaskProjectFilter');
+            select.value = value;
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        selectProject('#V#project_a');
+        selectProject('#V#project_b');
+        await flushRenderQueue();
+        finishOldProject({ collections: [{ concept_id: '#V#collection_a', name: 'Wrong collection' }] });
+        finishOldTasks({ tasks: [{ task_concept_id: '#V#old_task', title: 'Wrong project task', status: 'pending' }] });
+        await opening;
+        await flushRenderQueue();
+        expect(document.querySelector('#globalTaskProjectFilter').value).toBe('#V#project_b');
+        expect(document.querySelector('#globalTaskCollectionFilter').textContent).toContain('Second collection');
+        expect(document.querySelector('#globalTaskCollectionFilter').textContent).not.toContain('Wrong collection');
+        expect(Array.from(document.querySelectorAll('.task-item .task-title')).map((el) => el.textContent.trim())).toEqual(['Second project task']);
+        await setCurrentSession('background-conversation');
+        patchJson.mockResolvedValue({ success: true });
+        const status = document.querySelector('.task-status-select');
+        status.value = 'in_progress';
+        status.dispatchEvent(new Event('change', { bubbles: true }));
+        await flushRenderQueue();
+        expect(patchJson).toHaveBeenCalledWith('/api/tasks/%23V%23new_task', { status: 'in_progress' });
+        expect(getJson.mock.calls.some(([url]) => url.startsWith('/api/tasks/my'))).toBe(false);
+        expect(getJson.mock.calls.some(([url]) => url.includes('session_id=background-conversation'))).toBe(false);
+        expect(document.querySelector('.task-item .task-title').textContent.trim()).toBe('Second project task');
+    });
+
     test('derives groups from ontology-linked task parents and filters visible tasks', async () => {
         const { getJson } = require(apiServiceModulePath);
         getJson.mockImplementation((url) => {

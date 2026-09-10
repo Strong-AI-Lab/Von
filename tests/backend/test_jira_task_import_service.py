@@ -761,3 +761,173 @@ def test_import_jira_issues_materialises_activity_and_blob_backed_attachments(mo
     assert imported_activity["attachment_ids"] == ["20001"]
     assert imported_activity["worklog_ids"] == ["30001"]
     assert len(imported_activity["status_history_signatures"]) == 1
+
+
+def test_retention_sync_preserves_conflicting_von_edits_and_originals(monkeypatch):
+    existing = {
+        "task_concept_id": "#V#task",
+        "title": "Native edit",
+        "description": "Example description",
+        "status": "pending",
+        "priority": "medium",
+        "labels": [],
+        "external_references": {
+            "jira": {
+                "last_import_projection": {
+                    "title": "Earlier source",
+                    "description": "Example description",
+                    "status": "pending",
+                    "priority": "medium",
+                    "labels": [],
+                },
+                "source_archive": {
+                    "content_sha256": "old",
+                    "file_copy_concept_id": "#V#old",
+                },
+            }
+        },
+    }
+    updates, references = [], []
+    monkeypatch.setattr(
+        import_service, "find_task_by_external_reference", lambda **kw: existing
+    )
+    monkeypatch.setattr(
+        import_service,
+        "update_task_fields",
+        lambda task, **kw: updates.append(kw["fields"]),
+    )
+    monkeypatch.setattr(
+        import_service, "_materialise_jira_issue_activity", lambda **kw: ({}, [], [])
+    )
+    monkeypatch.setattr(
+        import_service,
+        "upsert_task_external_reference",
+        lambda task, **kw: references.append(kw["reference_payload"]),
+    )
+    issue = _jira_issue("KKAT-1", summary="New source", status="Done")
+    issue["_von_source_archive"] = {
+        "content_sha256": "new",
+        "file_copy_concept_id": "#V#new",
+    }
+    result = import_service.import_jira_issues_to_tasks(issues=[issue], dry_run=False)
+    assert "title" not in updates[0]
+    assert updates[0]["status"] == "completed"
+    assert result["issues"][0]["sync_conflicts"] == [
+        {"field": "title", "resolution": "preserved_von_value"}
+    ]
+    assert references[0]["source_archive_history"][0]["content_sha256"] == "old"
+    assert references[0]["source_archive"]["content_sha256"] == "new"
+
+
+def test_legacy_recorded_watcher_projection_allows_source_refresh(monkeypatch):
+    existing = {
+        "task_concept_id": "#V#task",
+        "title": "Example summary",
+        "description": "Example description",
+        "status": "pending",
+        "priority": "medium",
+        "labels": [],
+        "watcher_concept_ids": [],
+        "external_references": {
+            "jira": {
+                "status_name": "To Do",
+                "priority_name": "Medium",
+                "labels": [],
+                "jira_watcher_concept_ids": [],
+            }
+        },
+    }
+    updates = []
+    monkeypatch.setattr(
+        import_service, "find_task_by_external_reference", lambda **kw: existing
+    )
+    monkeypatch.setattr(
+        import_service,
+        "update_task_fields",
+        lambda task, **kw: updates.append(kw["fields"]),
+    )
+    monkeypatch.setattr(
+        import_service, "_materialise_jira_issue_activity", lambda **kw: ({}, [], [])
+    )
+    monkeypatch.setattr(
+        import_service, "upsert_task_external_reference", lambda *args, **kw: None
+    )
+    issue = _jira_issue("KKAT-1", watcher_account_ids=["watcher"])
+    issue["_von_source_archive"] = {
+        "content_sha256": "new",
+        "file_copy_concept_id": "#V#new",
+    }
+    result = import_service.import_jira_issues_to_tasks(
+        issues=[issue],
+        dry_run=False,
+        jira_account_id_to_concept_id={"watcher": "#V#watcher"},
+    )
+    assert updates[0]["watcher_concept_ids"] == ["#V#watcher"]
+    assert not result["issues"][0]["sync_conflicts"]
+
+
+def test_jira_refresh_cannot_write_von_authoritative_task(monkeypatch):
+    from src.backend.services import task_project_service
+
+    existing = {"task_concept_id": "#V#task", "project_concept_id": "#V#project"}
+    monkeypatch.setattr(
+        import_service, "find_task_by_external_reference", lambda **kw: existing
+    )
+    monkeypatch.setattr(
+        task_project_service, "get_task_project", lambda key: {"writer": "von"}
+    )
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError(
+            "Von-authoritative task must not be changed by Jira refresh"
+        )
+
+    for name in (
+        "update_task_fields",
+        "create_task",
+        "upsert_task_external_reference",
+        "set_task_parent",
+        "_materialise_jira_issue_activity",
+    ):
+        monkeypatch.setattr(import_service, name, unexpected)
+    report = import_service.import_jira_issues_to_tasks(
+        issues=[_jira_issue("KKAT-1", parent_key="KKAT-2")], dry_run=False
+    )
+    assert report["issues"][0]["action"] == "skipped_von_authoritative"
+
+
+def test_participant_preview_and_repeated_cache_resolution_do_not_write_aliases(
+    monkeypatch,
+):
+    writes = []
+    monkeypatch.setattr(
+        import_service,
+        "_upsert_jira_participant_aliases",
+        lambda **kw: writes.append(kw),
+    )
+    kwargs = dict(
+        raw_participant={"accountId": "jira-person", "displayName": "Person"},
+        account_id_to_concept_id={"jira-person": "#V#person"},
+        account_cache={},
+        email_cache={},
+        actor_concept_id="#V#owner",
+        organisation_concept_id=None,
+        allow_lookup=False,
+        allow_create=False,
+    )
+    import_service._ensure_jira_participant_concept(**kwargs, allow_alias_writes=False)
+    assert not writes
+    kwargs["account_id_to_concept_id"] = {}
+    import_service._ensure_jira_participant_concept(**kwargs)
+    assert not writes
+
+
+def test_custom_status_retains_source_name_and_uses_jira_category():
+    assert import_service._map_status("Candidate declined", "done") == (
+        "completed",
+        None,
+    )
+    assert import_service._map_status("Interviewing", "indeterminate") == (
+        "in_progress",
+        None,
+    )

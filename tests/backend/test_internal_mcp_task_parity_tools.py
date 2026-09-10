@@ -977,6 +977,8 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
         reference_code=None,
         agent_creation_fingerprint=None,
         agent_creation_request_id=None,
+        project_concept_id=None,
+        collection_concept_ids=None,
     ):
         return {
             "task_concept_id": "#V#task_123",

@@ -1,6 +1,137 @@
-# JVNAUTOSCI-1223 Workflow-First Jira -> Von Migration
+# Jira to Von task migration and project cutover
 
-Date: 2026-02-21
+Last updated: 10 September 2026. Current delivery decision:
+[JVNAUTOSCI-2737](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2737).
+
+## Full source retention and project cutover
+
+The ordinary task projection and the retained Jira original serve different
+purposes. A task count or a successful import does not establish full content
+retention. `--preserve-source` keeps complete source documents, rendered fields,
+field schemas/names, paginated comments, worklogs, history, properties, remote
+links, votes/watchers, and original attachment bytes in immutable, hashed Von
+file copies. Native task fields support day-to-day work; unsupported fields
+remain retrievable in the original. Capture errors remain explicit and block a
+full retention claim.
+
+Each source project has a stable Von project record and an associated primary
+task collection. Board and saved-filter snapshots can be associated with every
+project they cover. Collections preserve their source definitions and selected
+issue keys; native additions use explicit membership. They do not execute JQL
+or reproduce Jira board automation. Project descriptions, properties, roles,
+components, versions, workflow/status and security configuration are retained
+as source information. Source sharing settings do not grant access in Von.
+
+### Run and recover an import
+
+Use the canonical runner with an explicitly configured local operator:
+
+```sh
+pdm run python scripts/run_jira_task_migration.py \
+  --project-key PROJECT --actor-concept-id '#V#operator' \
+  --preserve-source --include-done --passes 1 --batch-size 25 \
+  --resume --report-path /private/audit/PROJECT.json
+```
+
+Supply `--organisation-concept-id` only for the intended organisational project.
+Other projects can remain private to the operator. Source project IDs and site
+identity distinguish projects; stable issue IDs and previous keys preserve
+lookup after source moves. All issue types and terminal statuses are included
+by this command. Do not use `--only-missing` when existing projections still
+need original-content retention.
+
+For attachments above the Jira proxy's default 10 MiB retrieval limit, set
+`VON_INTERNAL_MCP_JIRA_ATTACHMENT_MAX_SIZE_BYTES=104857600` in the migration
+process environment. This explicitly permits retrieval up to 100 MiB; larger
+files remain reported gaps requiring a separate bounded capture.
+
+Completed batches are checkpointed atomically. Repeating the command resumes a
+matching source snapshot. If Jira has changed, use a fresh report path for the
+delta and reconcile it against fresh full discovery. Reruns retain native edits
+using the previous import projection, report conflicts, preserve prior source
+archives, and deduplicate source activity. Unresolved hierarchy/link targets
+can be repaired from retained import rows after all projects have imported.
+Never infer deletion authority from a missing source issue.
+
+`scripts/capture_jira_project_sources.py` captures project and site source
+configuration through named Jira MCP resources and associates board/filter
+collections. Inspect its report for unsupported or inaccessible resources.
+Automation exports, cloud exports, app-owned data, forms and linked external
+documents require explicit capture or an evidence-backed scope disposition;
+REST access failures are not proof that a resource is empty. Keep these private
+source artefacts outside the repository.
+
+### Native use and actor binding
+
+The Tasks panel supports project/collection selection, ordinary task edits,
+hierarchy, comments, attachments, worklogs and transitions. Imported tasks link
+to their retained original without needing Jira. Native MCP tools expose the
+same canonical services, including `task_list_projects`, `task_get_project`,
+`task_get_collection`, `task_get`, `task_search` and `task_get_source_archive`.
+`task_get` accepts legacy Jira keys as well as Von task concept IDs.
+
+A local stdio connection can bind the trusted operator once in its server
+environment:
+
+```toml
+[mcp_servers.vontology.env]
+VON_MCP_TASK_ACTOR_CONCEPT_ID = "#V#operator"
+VON_MCP_TASK_ORGANISATION_CONCEPT_ID = "#V#organisation"
+```
+
+The organisation is optional. This is local operator configuration, not a
+client-supplied identity claim. It applies only to task tools, retains canonical
+access checks and the configured write profile, rejects a conflicting actor
+payload, and never replaces an inherited actor context. Browser and internal
+workflow calls continue to derive identity from their trusted session context.
+
+### Reconciliation, backup and writer selection
+
+`reconcile_retained_project` compares fresh source IDs, keys, types and versions
+with task membership, source relations, project originals and attachment hashes.
+Keep its missing counts and discrepancy list alongside the import report. A
+successful result proves the checked retention scope; it does not itself prove
+the project is ready for cutover.
+
+Run cross-project reconciliation in the operator's normal organisation context
+so accessible organisational relation targets are included alongside private
+projects. A narrower context can report a target as unavailable without proving
+that it is absent.
+
+Database backups do not include separately stored file bytes. Pair the encrypted
+database backup with `scripts/backup_task_project_files.py`: export file copies
+against the restored snapshot, then restore those bytes into an isolated blob
+directory beside the restored database. The manifest binds the database receipt,
+projects, tasks, file identities, sizes and hashes. File restore refuses the
+source database and verifies every restored file through canonical reads. Check
+that representative restored tasks can still retrieve their original content
+and attachments without Jira.
+
+Take the final paired snapshot after migration writes have settled. A database
+dump spanning an in-progress file-copy creation can contain its concept before
+its locator relations; a successful document restore alone does not establish
+a usable content restore.
+
+`set_task_project_writer` records a reversible, per-project writer decision and
+its evidence. Moving to `von` requires successful project reconciliation plus
+site-retention, normal-use, restore and final-delta receipts. The smallest
+delivery evidence includes ordinary browser/MCP operations for the affected
+project, no unexplained missing issues or broken source relations, retrievable
+original content, and a verified final delta. Missing source bytes, incorrect
+visibility, lost native edits, duplicate identity, or an unverified recovery
+path block the corresponding cutover claim. Merely wanting broader analytics,
+typed sprint modelling or Jira UI parity does not.
+
+Until that decision is recorded, Jira remains the writer. Once it is `von`,
+source importers refuse to overwrite or create task projections in that project;
+coding agents use native task tracking and preserve Jira keys as aliases. Jira
+access and retained archives remain available. Do not cancel Jira, delete its
+data, or silently change collaborators' workflows as part of the writer switch.
+
+## Historical implementation slices
+
+The following records describe earlier bounded deliveries. Their completion
+does not certify the current all-project migration.
 
 ## Scope
 

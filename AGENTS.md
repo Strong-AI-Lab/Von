@@ -407,6 +407,13 @@ mechanism, or grant of merge authority.
 
 ## 8. Task and repository discipline
 
+- For a project represented in Von, read its task-project `writer` before
+  choosing the tracking surface. When it is `von`, use native task tools and
+  the associated collections for creation, updates and completion; legacy Jira
+  keys remain lookup aliases. When it is `jira`, keep Jira authoritative and
+  treat imported tasks as migration copies. Keep Jira access available for
+  provenance and migration recovery. See the
+  [Jira migration guide](docs/engineering/workflow_first_jira_to_von_migration_jvnautosci_1223.md).
 - Use New Zealand English spelling by default.
 - Use the native shell for the host: PowerShell on Windows; `zsh`/`sh` on
   macOS and Linux, except when deliberately invoking or testing another shell.

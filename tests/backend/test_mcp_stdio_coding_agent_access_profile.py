@@ -156,7 +156,7 @@ def test_stdio_write_tool_is_allowed_on_noncanonical_local_db(monkeypatch) -> No
             mcp_stdio_server._json_text(
                 {
                     "success": True,
-                    "tool": "upsert_text_relation",
+                    "tool": "assign_task",
                     "arguments": arguments,
                 }
             )
@@ -164,13 +164,13 @@ def test_stdio_write_tool_is_allowed_on_noncanonical_local_db(monkeypatch) -> No
 
     monkeypatch.setitem(
         mcp_stdio_server._TOOL_HANDLERS,
-        "upsert_text_relation",
+        "assign_task",
         _stub_handler,
     )
 
     async def _runner():
         result = await mcp_stdio_server.call_tool(
-            "upsert_text_relation",
+            "assign_task",
             {"concept_id": "#V#x", "predicate": "#V#hasNote", "text": "hello"},
         )
         return _decode_text_payload(result)
@@ -178,7 +178,7 @@ def test_stdio_write_tool_is_allowed_on_noncanonical_local_db(monkeypatch) -> No
     payload = asyncio.run(_runner())
 
     assert payload["success"] is True
-    assert payload["tool"] == "upsert_text_relation"
+    assert payload["tool"] == "assign_task"
     assert payload["arguments"]["text"] == "hello"
 
 
@@ -197,7 +197,7 @@ def test_stdio_write_tool_is_allowed_in_test_isolated_mode(monkeypatch) -> None:
             mcp_stdio_server._json_text(
                 {
                     "success": True,
-                    "tool": "upsert_text_relation",
+                    "tool": "assign_task",
                     "arguments": arguments,
                 }
             )
@@ -205,13 +205,13 @@ def test_stdio_write_tool_is_allowed_in_test_isolated_mode(monkeypatch) -> None:
 
     monkeypatch.setitem(
         mcp_stdio_server._TOOL_HANDLERS,
-        "upsert_text_relation",
+        "assign_task",
         _stub_handler,
     )
 
     async def _runner():
         result = await mcp_stdio_server.call_tool(
-            "upsert_text_relation",
+            "assign_task",
             {"concept_id": "#V#x", "predicate": "#V#hasNote", "text": "hello"},
         )
         return _decode_text_payload(result)
@@ -219,4 +219,4 @@ def test_stdio_write_tool_is_allowed_in_test_isolated_mode(monkeypatch) -> None:
     payload = asyncio.run(_runner())
 
     assert payload["success"] is True
-    assert payload["tool"] == "upsert_text_relation"
+    assert payload["tool"] == "assign_task"

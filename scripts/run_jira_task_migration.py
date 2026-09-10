@@ -51,6 +51,16 @@ def _parse_args() -> JiraTaskMigrationOptions:
     parser.add_argument("--source-migrated-label", default="migrated")
     parser.add_argument("--updated-within-hours", type=int)
     parser.add_argument("--include-done", action="store_true")
+    parser.add_argument(
+        "--preserve-source",
+        action="store_true",
+        help="Retain original issue/project content and complete activity/binaries in Von file copies.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume matching completed batches; changed source versions require a fresh delta run.",
+    )
     parser.add_argument("--min-issue-number", type=int)
     parser.add_argument("--max-issue-number", type=int)
     parser.add_argument(
@@ -73,7 +83,11 @@ def _parse_args() -> JiraTaskMigrationOptions:
             else None
         ),
         project_key=str(args.project_key).strip().upper(),
-        jql=(str(args.jql).strip() if isinstance(args.jql, str) and args.jql.strip() else None),
+        jql=(
+            str(args.jql).strip()
+            if isinstance(args.jql, str) and args.jql.strip()
+            else None
+        ),
         batch_size=int(args.batch_size),
         page_size=int(args.page_size),
         passes=int(args.passes),
@@ -89,6 +103,8 @@ def _parse_args() -> JiraTaskMigrationOptions:
             else None
         ),
         include_done=bool(args.include_done),
+        preserve_source=bool(args.preserve_source),
+        resume=bool(args.resume),
         min_issue_number=(
             int(args.min_issue_number)
             if isinstance(args.min_issue_number, int)
@@ -109,13 +125,32 @@ def main() -> None:
     )
 
     options = _parse_args()
+    from src.backend.security.access_control import (
+        override_current_actor,
+        force_access_control_enforcement,
+    )
+
     # This explicit local CLI is an operator entry point. Keep this authority
     # here, not in the runner also called by actor-bound durable workflows.
-    with bind_internal_mcp_actor_context_source(
-        INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE
+    with (
+        bind_internal_mcp_actor_context_source(
+            INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE,
+            preexisting_actor_context=(
+                options.actor_concept_id,
+                options.organisation_concept_id,
+            ),
+        ),
+        override_current_actor(
+            options.actor_concept_id, options.organisation_concept_id
+        ),
+        force_access_control_enforcement(),
     ):
         report = run_jira_task_migration_sync(options)
-    print(json.dumps({"report_path": str(options.report_path), "summary": report}, indent=2))
+    print(
+        json.dumps(
+            {"report_path": str(options.report_path), "summary": report}, indent=2
+        )
+    )
 
 
 if __name__ == "__main__":

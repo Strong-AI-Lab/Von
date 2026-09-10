@@ -246,12 +246,21 @@ def test_operator_migration_cli_binds_authority_only_around_its_runner(
     )
 
     monkeypatch.setattr(
-        cli, "_parse_args", lambda: SimpleNamespace(report_path=Path("unused.json"))
+        cli,
+        "_parse_args",
+        lambda: SimpleNamespace(
+            report_path=Path("unused.json"),
+            actor_concept_id="#V#operator",
+            organisation_concept_id=None,
+        ),
     )
     calls = []
 
     def run(_options):
+        from src.backend.security.access_control import get_effective_user_concept_id
+
         assert internal_mcp_actor_context_is_trusted_local_operator()
+        assert get_effective_user_concept_id() == "#V#operator"
         calls.append(True)
         return {"dry_run": True}
 

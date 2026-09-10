@@ -231,3 +231,27 @@ def test_dry_run_from_encrypted_zip_uses_fernet_key(
     exit_code = restore_von_db.main(["--backup-path", str(encrypted_path)])
 
     assert exit_code == 0
+
+
+def test_legacy_von_prelude_does_not_shadow_mongodb_metadata(tmp_path, monkeypatch):
+    backup_root = _make_dump_tree(tmp_path)
+    original = json.dumps(
+        {"db_name": "von_db", "mongo_uri_redacted": "mongodb://example"}
+    )
+    (backup_root / "prelude.json").write_text(original)
+
+    def restore(command, **kwargs):
+        staged = Path(command[command.index("--dir") + 1])
+        assert not (staged / "prelude.json").exists()
+        assert (staged / "von_db" / "papers.bson").read_bytes() == b"paper-data"
+        assert command[command.index("--nsTo") + 1] == "scratch.*"
+
+    monkeypatch.setattr(restore_von_db.subprocess, "run", restore)
+    restore_von_db._run_mongorestore(
+        mongo_uri="mongodb://localhost/",
+        dump_root=backup_root,
+        source_db_name="von_db",
+        target_db_name="scratch",
+        drop_target=False,
+    )
+    assert (backup_root / "prelude.json").read_text() == original

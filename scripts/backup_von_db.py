@@ -522,7 +522,8 @@ def main(argv: list[str] | None = None) -> int:
     _ensure_dir(backup_root)
 
     # Write a prelude file at the backup root (helpful provenance when copying around).
-    (backup_root / "prelude.json").write_text(
+    # prelude.json is reserved by MongoDB Database Tools for server metadata.
+    (backup_root / "von_backup_prelude.json").write_text(
         json.dumps(asdict(prelude), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )

@@ -434,6 +434,7 @@ def create_computer_file_copy_instance(
     blob_uri: str,
     visibility_scope_mode: str | None = None,
     metadata_in_attributes: bool = False,
+    maintain_relationship_inverses: bool = True,
     metadata: Mapping[str, Any] | None = None,
     logger: Any | None = None,
 ) -> ComputerFileCopyRecord:
@@ -528,6 +529,7 @@ def create_computer_file_copy_instance(
         organisation_concept_id=effective_organisation_concept_id,
         event_namespace=canonical_namespace,
         visibility_scope_mode=visibility_scope_mode,
+        maintain_relationship_inverses=maintain_relationship_inverses,
     )
 
     if metadata_in_attributes:
@@ -1193,6 +1195,10 @@ def import_bytes_file_copy(
     source_uri: str | None = None,
     blob_key: str | None = None,
     metadata: Mapping[str, Any] | None = None,
+    metadata_in_attributes: bool = False,
+    infer_typing: bool = True,
+    maintain_relationship_inverses: bool = True,
+    visibility_scope_mode: str | None = None,
 ) -> dict[str, Any]:
     """Persist bytes durably and register a blob-backed file-copy concept.
 
@@ -1349,6 +1355,9 @@ def import_bytes_file_copy(
             blob_key=stored.ref.key,
             blob_uri=stored.ref.uri,
             metadata=persisted_metadata,
+            metadata_in_attributes=metadata_in_attributes,
+            maintain_relationship_inverses=maintain_relationship_inverses,
+            visibility_scope_mode=visibility_scope_mode,
         )
     except Exception as exc:
         return {
@@ -1375,14 +1384,26 @@ def import_bytes_file_copy(
             persist_file_copy_typing,
         )
 
-        typing_result = infer_file_copy_typing(
-            content_type=content_type,
-            original_filename=original_filename,
-            size_bytes=size_bytes,
+        typing_result = (
+            infer_file_copy_typing(
+                content_type=content_type,
+                original_filename=original_filename,
+                size_bytes=size_bytes,
+            )
+            if infer_typing
+            else None
         )
-        typing_persist_result = persist_file_copy_typing(
-            file_copy_concept_id=created.concept_id,
-            typing_result=typing_result,
+        typing_persist_result = (
+            persist_file_copy_typing(
+                file_copy_concept_id=created.concept_id,
+                typing_result=typing_result,
+            )
+            if infer_typing
+            else {
+                "success": True,
+                "typing_persisted": False,
+                "status": "declared_file_type",
+            }
         )
     except Exception as exc:
         typing_persist_result = {

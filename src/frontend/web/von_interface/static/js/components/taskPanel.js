@@ -5,7 +5,7 @@
  * Tasks are stored as Vontology concepts and accessed via REST API.
  */
 
-import { deleteJson, getJson, patchJson, postJson, getUserContext } from '../apiService.js';
+import { deleteJson, getJson, patchJson, postJson, getUserContext, ensureUniqueWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
 import { activateTab } from '../tabNavigation.js';
 import { showToast } from '../utils/toast.js';
 import { renderMarkdownViaServer } from '../markdownUtils.js';
@@ -31,6 +31,10 @@ let _taskDetailState = {};  // taskId -> detail panel state
 let _selectedTaskId = '';
 let _bulkTaskVisibility = 'exclude';
 let _bulkTaskCollectionId = '';
+let _taskProjects = [];
+let _selectedProjectId = '';
+let _selectedCollectionId = '';
+let _projectCollections = [];
 let _hiddenBulkTaskTotal = 0;
 let _hiddenBulkTaskCollections = [];
 let _lastTaskLoadTelemetry = null;
@@ -176,6 +180,10 @@ function resetTaskPanelScopedState(activeOrganisationConceptId, { actorChanged =
     _globalTaskLoadGeneration += 1;
     _isLoading = false;
     _tasks = [];
+    _taskProjects = [];
+    _selectedProjectId = "";
+    _selectedCollectionId = "";
+    _projectCollections = [];
     _taskDetailState = {};
     _selectedTaskId = '';
     _globalTaskNextOffset = 0;
@@ -194,6 +202,18 @@ function resetTaskPanelScopedState(activeOrganisationConceptId, { actorChanged =
     loadTaskGroupSelectionFromStorage();
 }
 
+function invalidateTaskSelectionPage() {
+    _globalTaskLoadGeneration += 1;
+    _isLoading = false;
+    _tasks = [];
+    _taskDetailState = {};
+    _selectedTaskId = '';
+    _globalTaskNextOffset = 0;
+    _globalTaskHasMore = false;
+    _globalTaskTotal = null;
+    return _globalTaskLoadGeneration;
+}
+
 function refreshTaskPanelAfterScopeChange({ allowLoads = true } = {}) {
     renderTaskList();
     renderTaskQueueActivity();
@@ -203,7 +223,13 @@ function refreshTaskPanelAfterScopeChange({ allowLoads = true } = {}) {
     if (!allowLoads) return;
 
     if (_isGlobalTabMode) {
-        void Promise.all([loadGlobalTasks(), loadTaskQueueActivity()]);
+        const generation = _globalTaskLoadGeneration;
+        void (async () => {
+            await ensureTaskTaxonomyLoaded();
+            if (generation !== _globalTaskLoadGeneration) return;
+            renderGlobalTasksTabContent();
+            await Promise.all([loadGlobalTasks(), loadTaskQueueActivity()]);
+        })();
     } else if (_isVisible) {
         void refreshTasks();
     }
@@ -317,6 +343,8 @@ function getTaskSourceOptions() {
 }
 
 function getTaskPrimaryType(task) {
+    const sourceType = task?.external_references?.jira?.issue_type;
+    if (sourceType) return { label: sourceType, concept_id: null };
     if (task?.primary_task_type_id) {
         return {
             concept_id: task.primary_task_type_id,
@@ -494,7 +522,12 @@ function finishTaskLoadTelemetry(telemetry, status, label, metadata = {}) {
 
 function startTaskLoadProgressTicker(telemetry) {
     if (typeof setInterval !== 'function') return () => {};
+    const generation = _globalTaskLoadGeneration;
     const intervalId = setInterval(() => {
+        if (generation !== _globalTaskLoadGeneration) {
+            clearInterval(intervalId);
+            return;
+        }
         if (!telemetry || telemetry.status !== 'loading') return;
         updateTaskLoadElapsed(telemetry);
         renderTaskLoadProgress(telemetry.current_label, telemetry);
@@ -588,6 +621,12 @@ function buildGlobalTasksUrl({ offset = 0, includeBulkSummary = true } = {}) {
     } else if (_globalTaskScope === 'created_by_me' && currentUserId) {
         params.set('created_by_concept_id', currentUserId);
     }
+    if (_selectedProjectId) {
+        params.set('project_concept_id', _selectedProjectId);
+        params.set('bulk_visibility', 'include');
+        if (_selectedCollectionId) params.set('collection_concept_id', _selectedCollectionId);
+        return `/api/tasks/search?${params.toString()}`;
+    }
     return `/api/tasks/?${params.toString()}`;
 }
 
@@ -606,6 +645,14 @@ function buildMyTasksUrl(statusFilter = null) {
 }
 
 async function ensureTaskTaxonomyLoaded() {
+    const generation = _globalTaskLoadGeneration;
+    try {
+        const projectResponse = await getJson('/api/tasks/projects');
+        if (generation !== _globalTaskLoadGeneration) return;
+        _taskProjects = Array.isArray(projectResponse?.projects) ? projectResponse.projects : [];
+    } catch (err) {
+        console.debug('[taskPanel] Failed to load projects:', err);
+    }
     try {
         const taxonomy = await getJson('/api/tasks/taxonomy');
         if (taxonomy && typeof taxonomy === 'object') {
@@ -666,6 +713,7 @@ function getTaskDetailState(taskId) {
             task: null,
             comments: [],
             attachments: [],
+            worklog: [],
             history: [],
         };
     }
@@ -880,6 +928,14 @@ function renderGlobalTasksTabContent() {
                     <p class="global-tasks-subtitle">Board lanes, Vontology-backed task categories, and a richer detail view live together here.</p>
                 </div>
                 <div class="global-tasks-controls">
+                    <select id="globalTaskProjectFilter" class="task-filter-select" aria-label="Project">
+                        <option value="">All projects</option>
+                        ${_taskProjects.map((project) => `<option value="${escapeHtml(project.concept_id)}" ${_selectedProjectId === project.concept_id ? 'selected' : ''}>${escapeHtml(project.key)} · ${escapeHtml(project.name)}</option>`).join('')}
+                    </select>
+                    <select id="globalTaskCollectionFilter" class="task-filter-select" aria-label="Task collection" ${_selectedProjectId ? '' : 'hidden'}>
+                        <option value="">All project tasks</option>
+                        ${_projectCollections.map((collection) => `<option value="${escapeHtml(collection.concept_id)}" ${_selectedCollectionId === collection.concept_id ? 'selected' : ''}>${escapeHtml(collection.name)}</option>`).join('')}
+                    </select>
                     <select id="globalTaskScopeFilter" class="task-filter-select" title="Task scope">
                         ${TASK_SCOPE_OPTIONS.map((option) => `
                             <option value="${option.value}" ${_globalTaskScope === option.value ? 'selected' : ''}>
@@ -927,6 +983,7 @@ function renderGlobalTasksTabContent() {
                 </div>
             </div>
             <div id="globalTaskSummary" class="global-task-summary" aria-live="polite"></div>
+            <div id="globalTaskProjectInfo" class="global-task-summary">${escapeHtml(_taskProjects.find((project) => project.concept_id === _selectedProjectId)?.description || '')}</div>
             <div id="globalBulkTaskVisibilityControl" class="bulk-task-visibility-control hidden" aria-live="polite"></div>
             <div id="globalTaskLoadProgress" class="task-load-progress" aria-live="polite"></div>
             <section id="globalTaskQueueActivity" class="task-detail-section" aria-live="polite"></section>
@@ -1004,6 +1061,45 @@ function renderGlobalTasksTabContent() {
     }
 
     const sourceFilter = _globalTasksContainer.querySelector('#globalTaskSourceFilter');
+    _globalTasksContainer.querySelector('#globalTaskProjectFilter')?.addEventListener('change', async (event) => {
+        _selectedProjectId = event.target.value;
+        _selectedCollectionId = '';
+        _projectCollections = [];
+        const generation = invalidateTaskSelectionPage();
+        renderGlobalTasksTabContent();
+        if (_selectedProjectId) {
+            try {
+                const details = await getJson(`/api/tasks/projects/${encodeURIComponent(_selectedProjectId)}`);
+                if (generation !== _globalTaskLoadGeneration) return;
+                _projectCollections = details.collections || [];
+            } catch (error) {
+                if (generation !== _globalTaskLoadGeneration) return;
+                showToast('Could not load project collections', 'error');
+            }
+        }
+        renderGlobalTasksTabContent();
+        await loadGlobalTasks();
+    });
+    _globalTasksContainer.querySelector('#globalTaskCollectionFilter')?.addEventListener('change', async (event) => {
+        _selectedCollectionId = event.target.value;
+        const generation = invalidateTaskSelectionPage();
+        renderTaskList();
+        if (_selectedCollectionId) {
+            try {
+                const result = await getJson(`/api/tasks/collections/${encodeURIComponent(_selectedCollectionId)}`);
+                if (generation !== _globalTaskLoadGeneration) return;
+                if (!result.collection?.project_concept_ids?.includes(_selectedProjectId)) {
+                    showToast('Collection does not belong to this project', 'error');
+                    return;
+                }
+            } catch (error) {
+                if (generation !== _globalTaskLoadGeneration) return;
+                showToast('Could not load task collection', 'error');
+                return;
+            }
+        }
+        await loadGlobalTasks();
+    });
     if (sourceFilter) {
         sourceFilter.value = _filterTaskSourceId;
         sourceFilter.addEventListener('change', (e) => {
@@ -1076,6 +1172,8 @@ async function handleGlobalCreateTask() {
         const payload = {
             title,
             description,
+            project_concept_id: _selectedProjectId || null,
+            collection_concept_ids: _selectedProjectId ? (_selectedCollectionId ? [_selectedCollectionId] : _projectCollections.filter((collection) => collection.selection?.kind === 'project_membership').map((collection) => collection.concept_id)) : [],
             priority: prioritySelect?.value || 'medium',
             task_type_ids: typeSelect?.value ? [typeSelect.value] : [],
             due_date: localInputValueToIso(dueInput?.value || ''),
@@ -1109,7 +1207,7 @@ export function isTaskPanelVisible() {
  */
 export async function setCurrentSession(sessionId) {
     _currentSessionId = sessionId;
-    if (_isVisible && sessionId) {
+    if (_isVisible && !_isGlobalTabMode && sessionId) {
         await loadTasks(sessionId);
     }
 }
@@ -1418,7 +1516,7 @@ function renderGlobalTaskSummary(filteredTasks = getFilteredTasks()) {
         <span class="task-summary-chip"><strong>${activeCount}</strong> active</span>
         <span class="task-summary-chip"><strong>${typedCount}</strong> typed</span>
         <span class="task-summary-chip"><strong>${sourcedCount}</strong> sourced</span>
-        ${_hiddenBulkTaskTotal > 0 ? `<span class="task-summary-chip task-summary-chip-bulk"><strong>${_hiddenBulkTaskTotal}</strong> bulk hidden</span>` : ''}
+        ${!_selectedProjectId && _hiddenBulkTaskTotal > 0 ? `<span class="task-summary-chip task-summary-chip-bulk"><strong>${_hiddenBulkTaskTotal}</strong> bulk hidden</span>` : ''}
         <span class="task-summary-chip task-summary-chip-soft">${escapeHtml(selectedTask?.title || 'No task selected')}</span>
     `;
 }
@@ -1606,7 +1704,7 @@ function renderBulkTaskVisibilityControls() {
     const controlElements = getBulkTaskVisibilityControlElements();
     if (controlElements.length === 0) return;
 
-    if (_hiddenBulkTaskTotal <= 0 && _hiddenBulkTaskCollections.length === 0) {
+    if (_selectedProjectId || (_hiddenBulkTaskTotal <= 0 && _hiddenBulkTaskCollections.length === 0)) {
         controlElements.forEach((controlEl) => {
             controlEl.classList.add('hidden');
             controlEl.innerHTML = '';
@@ -2473,6 +2571,19 @@ function renderTaskAttachmentRows(attachments) {
     }).join('');
 }
 
+function renderRetainedSourceAndWorklog(taskId, detailState) {
+    const archive = detailState?.task?.external_references?.jira?.source_archive;
+    const archiveLink = archive?.file_copy_concept_id
+        ? `<a href="/von/api/files/${encodeURIComponent(archive.file_copy_concept_id)}/download">Download retained Jira original and files</a>`
+        : '';
+    const rows = (detailState?.worklog || []).map((row) => `<li>${escapeHtml(row.time_spent_minutes)} minutes · ${escapeHtml(formatDateTimeOrDash(row.started_at))}<p>${escapeHtml(row.comment || '')}</p></li>`).join('');
+    return `<div class="task-detail-section">${archiveLink}<h4>Work log</h4>
+        <ul class="task-detail-list">${rows || '<li>No time logged</li>'}</ul>
+        <label class="task-detail-label">Minutes <input class="task-worklog-minutes task-detail-input" type="number" min="1" step="1" /></label>
+        <label class="task-detail-label">Comment <input class="task-worklog-comment task-detail-input" type="text" /></label>
+        <button class="task-add-worklog-btn" data-task-id="${escapeHtml(taskId)}">Log time</button></div>`;
+}
+
 function renderTaskHistoryRows(history) {
     if (!Array.isArray(history) || history.length === 0) {
         return '<p class="task-detail-empty">No history events</p>';
@@ -2480,7 +2591,7 @@ function renderTaskHistoryRows(history) {
     return history.slice(0, 20).map((eventRow) => `
         <li class="task-detail-row">
             <div class="task-detail-row-main">${escapeHtml(eventRow.event_type || 'event')}</div>
-            <div class="task-detail-row-meta">${escapeHtml(formatDateTimeOrDash(eventRow.created_at))}</div>
+            <div class="task-detail-row-meta">${escapeHtml(formatDateTimeOrDash(eventRow.timestamp || eventRow.created_at))}</div>
         </li>
     `).join('');
 }
@@ -2757,6 +2868,7 @@ function renderTaskDetailsPanel(task, detailState) {
                         <input class="task-detail-input task-attachment-note-input" type="text" placeholder="Optional note" />
                     </label>
                 </div>
+                <label class="task-detail-label">Upload file<input class="task-attachment-file-input" type="file" /></label>
                 <button class="task-add-attachment-btn" data-task-id="${escapeHtml(taskId)}">Add attachment</button>
             </div>
 
@@ -2766,6 +2878,7 @@ function renderTaskDetailsPanel(task, detailState) {
                     ${renderTaskHistoryRows(detailState.history)}
                 </ul>
             </div>
+            ${renderRetainedSourceAndWorklog(taskId, detailState)}
         </div>
     `;
 }
@@ -2798,7 +2911,7 @@ function renderTaskTimeline(detailState, task) {
                 <div class="task-timeline-step ${index === 0 ? 'is-active' : ''}" role="listitem">
                     <span class="task-timeline-dot" aria-hidden="true"></span>
                     <span class="task-timeline-label">${escapeHtml((step?.event_type || 'event').replace(/_/g, ' '))}</span>
-                    <span class="task-timeline-time">${escapeHtml(formatDateTimeOrDash(step?.created_at))}</span>
+                    <span class="task-timeline-time">${escapeHtml(formatDateTimeOrDash(step?.timestamp || step?.created_at))}</span>
                 </div>
             `).join('')}
         </div>
@@ -3061,6 +3174,7 @@ function renderTaskInspector(task, detailState) {
                         <input class="task-detail-input task-attachment-note-input" type="text" placeholder="Optional note" />
                     </label>
                 </div>
+                <label class="task-detail-label">Upload file<input class="task-attachment-file-input" type="file" /></label>
                 <button class="task-add-attachment-btn" data-task-id="${escapeHtml(taskId)}">Add attachment</button>
             </div>
 
@@ -3070,6 +3184,7 @@ function renderTaskInspector(task, detailState) {
                     ${renderTaskHistoryRows(detailState?.history)}
                 </ul>
             </div>
+            ${renderRetainedSourceAndWorklog(taskId, detailState)}
         </div>
     `;
 }
@@ -3299,17 +3414,19 @@ async function loadTaskDetails(taskId, { refreshList = false } = {}) {
     renderTaskList();
 
     try {
-        const [task, commentsResult, attachmentsResult, historyResult] = await Promise.all([
+        const [task, commentsResult, attachmentsResult, historyResult, worklogResult] = await Promise.all([
             getJson(`/api/tasks/${encodeURIComponent(taskId)}`),
             getJson(`/api/tasks/${encodeURIComponent(taskId)}/comments?limit=100`),
             getJson(`/api/tasks/${encodeURIComponent(taskId)}/attachments?limit=100`),
             getJson(`/api/tasks/${encodeURIComponent(taskId)}/history?limit=200`),
+            getJson(`/api/tasks/${encodeURIComponent(taskId)}/worklog?limit=200`),
         ]);
         if (scopeGenerationAtStart !== _taskQueueActivityGeneration) return;
         detailState.task = task;
         detailState.comments = commentsResult.comments || [];
         detailState.attachments = attachmentsResult.attachments || [];
         detailState.history = historyResult.history || [];
+        detailState.worklog = worklogResult.worklog || [];
         replaceCachedTask(task);
         if (refreshList) {
             updateTaskCountBadge();
@@ -3435,8 +3552,26 @@ async function addTaskAttachment(taskId, panelEl) {
     const uri = (panelEl.querySelector('.task-attachment-uri-input')?.value || '').trim();
     const note = (panelEl.querySelector('.task-attachment-note-input')?.value || '').trim();
 
+    const file = panelEl.querySelector('.task-attachment-file-input')?.files?.[0];
+    if (file) {
+        if (file.size > 100 * 1024 * 1024) {
+            showToast('Files must be no larger than 100 MiB', 'warning');
+            return;
+        }
+        const form = new FormData();
+        form.append('file', file);
+        form.append('note', note);
+        const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/attachments`, {
+            method: 'POST', body: form,
+            headers: { [WINDOW_SESSION_HEADER]: await ensureUniqueWindowSessionId() },
+        });
+        if (!response.ok) throw new Error('Attachment upload failed');
+        await loadTaskDetails(taskId, { refreshList: true });
+        showToast('Attachment uploaded', 'success');
+        return;
+    }
     if (!filename || !uri) {
-        showToast('Filename and URI are required', 'warning');
+        showToast('Choose a file, or enter a filename and URI', 'warning');
         return;
     }
 
@@ -3591,6 +3726,28 @@ function attachTaskEventListeners() {
                 } catch (err) {
                     console.error('[taskPanel] Failed to add task comment:', err);
                     showToast('Failed to add comment', 'error');
+                }
+            });
+        });
+
+        root.querySelectorAll('.task-add-worklog-btn').forEach((button) => {
+            button.addEventListener('click', async () => {
+                const panel = button.closest('.task-detail-panel') || button.closest('.task-inspector-card');
+                const minutes = Number(panel?.querySelector('.task-worklog-minutes')?.value);
+                if (!Number.isInteger(minutes) || minutes <= 0) {
+                    showToast('Enter a positive number of minutes', 'error');
+                    return;
+                }
+                button.disabled = true;
+                try {
+                    await postJson(`/api/tasks/${encodeURIComponent(button.dataset.taskId)}/worklog`, {
+                        time_spent_minutes: minutes,
+                        comment: panel.querySelector('.task-worklog-comment')?.value || '',
+                    });
+                    await loadTaskDetails(button.dataset.taskId);
+                } catch (err) {
+                    showToast('Could not save time entry', 'error');
+                    button.disabled = false;
                 }
             });
         });
@@ -3755,7 +3912,7 @@ async function updateTaskStatus(taskId, newStatus) {
     try {
         await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, { status: newStatus });
         showToast('Task updated', 'success');
-        await loadTasks(_currentSessionId);
+        await refreshTasks();
     } catch (err) {
         console.error('[taskPanel] Failed to update task:', err);
         showToast('Failed to update task', 'error');
@@ -3834,14 +3991,14 @@ export function getTasks() {
 
 /**
  * Refresh tasks for the current context.
- * If a conversation session is active, loads tasks for that conversation.
- * Otherwise, loads all tasks for the current user (global view).
+ * The visible global workspace takes precedence over a background conversation.
+ * Otherwise, refresh the conversation panel or current user's tasks.
  */
 export async function refreshTasks() {
-    if (_currentSessionId) {
-        await loadTasks(_currentSessionId);
-    } else if (_isGlobalTabMode) {
+    if (_isGlobalTabMode) {
         await loadGlobalTasks();
+    } else if (_currentSessionId) {
+        await loadTasks(_currentSessionId);
     } else {
         await loadMyTasks();
     }

@@ -189,3 +189,75 @@ def test_run_jira_task_migration_repairs_missing_referenced_targets(
     assert [item["key"] for item in gateway.calls[2]["payload"]["issue_keys"]] == [
         "JVNAUTOSCI-1407"
     ]
+
+
+def test_failed_batch_is_checkpointed_and_resume_reuses_completed_work(tmp_path):
+    import json
+    import pytest
+    from dataclasses import replace
+
+    docs = [
+        {"id": str(i), "key": f"KKAT-{i}", "fields": {"updated": "v1"}} for i in (1, 2)
+    ]
+    options = mod.JiraTaskMigrationOptions(
+        actor_concept_id="#V#owner",
+        project_key="KKAT",
+        batch_size=1,
+        passes=1,
+        preserve_source=True,
+        report_path=tmp_path / "report.json",
+    )
+    first = {"success": True, "summary": {"created": 1}, "issues": []}
+    failed = {
+        "success": False,
+        "fetch": {"fetch_errors": [{"issue_key": "KKAT-2", "error": "unavailable"}]},
+    }
+    with pytest.raises(RuntimeError, match="failed"):
+        mod._run_import_batches(
+            gateway=_FakeGateway([first, failed]),
+            issue_docs=docs,
+            options=options,
+            run_label="current_scope",
+        )
+    checkpoint = json.loads(
+        (tmp_path / "report.current_scope.checkpoint.json").read_text()
+    )
+    assert checkpoint["completed_batches"] == [first]
+    assert checkpoint["last_batch"] == failed
+    retry = _FakeGateway([first])
+    report = mod._run_import_batches(
+        gateway=retry,
+        issue_docs=docs,
+        options=replace(options, resume=True),
+        run_label="current_scope",
+    )
+    assert len(retry.calls) == 1
+    assert retry.calls[0]["payload"]["issue_keys"][0]["key"] == "KKAT-2"
+    assert report["summary"]["created"] == 2
+    changed = [{**docs[0], "fields": {"updated": "v2"}}, docs[1]]
+    with pytest.raises(ValueError, match="scope/source changed"):
+        mod._run_import_batches(
+            gateway=_FakeGateway([]),
+            issue_docs=changed,
+            options=replace(options, resume=True),
+            run_label="current_scope",
+        )
+
+
+def test_discovery_errors_cannot_be_reported_as_empty_project(monkeypatch):
+    import pytest
+
+    class Proxy:
+        async def search(self, **kwargs):
+            return {"success": False, "status_code": 403}
+
+    async def get_proxy():
+        return Proxy()
+
+    monkeypatch.setattr(mod, "get_jira_proxy", get_proxy)
+    with pytest.raises(RuntimeError, match="not an empty project"):
+        asyncio.run(
+            mod.discover_jira_issue_docs(
+                jql="project = KKAT", fields=["key"], page_size=100
+            )
+        )

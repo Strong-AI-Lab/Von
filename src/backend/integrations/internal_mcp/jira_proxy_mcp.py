@@ -203,6 +203,18 @@ class JiraMCPProxy:
             log_tag=_LOG_TAG,
         )
         self._client = MCPStdIOClient(client_config)
+        # Export downloads use the existing three 60-second HTTP attempts.
+        # Allow twice that declared inner bound for transfer and JSON encoding;
+        # ordinary issue reads retain their current operation budget.
+        self._export_client = MCPStdIOClient(
+            MCPServerConfig(
+                command=config.command,
+                args=config.args,
+                env=config.env,
+                timeout_sec=360.0,
+                log_tag=_LOG_TAG,
+            )
+        )
 
     async def _call(
         self,
@@ -219,7 +231,12 @@ class JiraMCPProxy:
                 resource_id=resource_id,
             )
         try:
-            result = await self._client.call_tool(tool_name, arguments)
+            client = (
+                self._export_client
+                if tool_name == "jira_get_migration_export"
+                else self._client
+            )
+            result = await client.call_tool(tool_name, arguments)
             if authority is not None and isinstance(result, dict):
                 result = {**result, "authority": authority}
             return result
@@ -285,6 +302,41 @@ class JiraMCPProxy:
 
     async def get_watchers(self, *, issue_key: str) -> Dict[str, Any]:
         return await self._call("jira_get_watchers", {"issue_key": issue_key})
+
+    async def get_migration_resource(
+        self,
+        *,
+        resource: str,
+        identifier: str = "",
+        secondary_id: str = "",
+        start_at: int = 0,
+        max_results: int = 100,
+        next_page_token: str | None = None,
+    ) -> Any:
+        """Read a named source resource through the existing account boundary."""
+        return await self._call(
+            "jira_get_migration_resource",
+            {
+                "resource": resource,
+                "identifier": identifier,
+                "secondary_id": secondary_id,
+                "start_at": start_at,
+                "max_results": max_results,
+                "next_page_token": next_page_token,
+            },
+        )
+
+    async def get_migration_export(
+        self, *, kind: str, export_id: str, cloud_id: str | None = None
+    ):
+        return await self._call(
+            "jira_get_migration_export",
+            {
+                "kind": kind,
+                "export_id": export_id,
+                "cloud_id": cloud_id,
+            },
+        )
 
     async def get_attachment_content(
         self,
