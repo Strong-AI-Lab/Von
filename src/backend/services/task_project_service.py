@@ -111,7 +111,7 @@ def ensure_jira_project(
         "source_id": str(project["id"]),
         "organisation_concept_id": organisation_concept_id,
         "source_url": project.get("self"),
-        "description": project.get("description", ""),
+        "description": project.get("description", old.get("description", "")),
         "collection_concept_ids": sorted(
             set(old.get("collection_concept_ids", [])) | {collection_id}
         ),
@@ -134,7 +134,36 @@ def ensure_jira_project(
     if existing_project_concept_id:
         record["domain_project_concept_id"] = existing_project_concept_id
     if prior:
-        update_concept(project_id, {f"attributes.{PROJECT_RECORD}": record})
+        # Issue responses carry a partial project object. Refresh only fields
+        # this source supplies, never a read/modify/write copy of the whole
+        # record: a concurrent archive publication or writer decision must not
+        # be replaced by the importer's older snapshot.
+        fields = {
+            "name",
+            "key",
+            "source_system",
+            "source_site",
+            "source_id",
+            "organisation_concept_id",
+            "source_url",
+        }
+        if "description" in project:
+            fields.add("description")
+        if collection_id not in old.get("collection_concept_ids", []):
+            fields.add("collection_concept_ids")
+        if archive_reference:
+            fields.add("source_archive")
+            if "source_archive_history" in record:
+                fields.add("source_archive_history")
+        if existing_project_concept_id:
+            fields.add("domain_project_concept_id")
+        updates = {
+            f"attributes.{PROJECT_RECORD}.{field}": record[field]
+            for field in fields
+            if old.get(field) != record[field]
+        }
+        if updates:
+            update_concept(project_id, updates)
     else:
         create_concept(
             name=record["name"],

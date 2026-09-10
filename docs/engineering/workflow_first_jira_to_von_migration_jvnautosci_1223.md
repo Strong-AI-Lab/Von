@@ -55,7 +55,13 @@ Never infer deletion authority from a missing source issue.
 
 `scripts/capture_jira_project_sources.py` captures project and site source
 configuration through named Jira MCP resources and associates board/filter
-collections. Inspect its report for unsupported or inaccessible resources.
+collections. It includes screen tabs and ordered fields, issue-type/screen
+scheme mappings, and paginated field-configuration items. The service's
+`capture_configuration_details` can supplement an existing site archive without
+recapturing boards; retain the previous archive reference when associating the
+supplement. Inspect the report for unsupported or inaccessible resources.
+Classic configuration APIs can return empty results for team-managed projects;
+that does not establish retention of their app-owned forms or configuration.
 Automation exports, cloud exports, app-owned data, forms and linked external
 documents require explicit capture or an evidence-backed scope disposition;
 REST access failures are not proof that a resource is empty. Keep these private

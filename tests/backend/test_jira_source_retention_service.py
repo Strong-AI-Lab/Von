@@ -151,6 +151,68 @@ def test_resource_paths_cannot_redirect_credentials():
         resource_request("project", "..")
 
 
+@pytest.mark.asyncio
+async def test_configuration_capture_retains_nested_layout_and_all_field_pages():
+    class ConfigurationSource:
+        async def get_migration_resource(
+            self, resource, identifier="", start_at=0, **kw
+        ):
+            if resource == "screen_tabs":
+                return [{"id": 17, "name": "Details"}]
+            if resource == "screen_tab_fields":
+                assert identifier == "12" and kw["secondary_id"] == "17"
+                return [{"id": "summary"}, {"id": "customfield_42"}]
+            if resource == "field_configurations":
+                return {"values": [{"id": 3}], "total": 1, "isLast": True}
+            if resource == "field_configuration_items":
+                return {
+                    "startAt": start_at,
+                    "total": 2,
+                    "values": [
+                        {"id": f"field_{start_at}", "isRequired": bool(start_at)}
+                    ],
+                }
+            return {"values": [], "total": 0, "isLast": True}
+
+    result = await retention.capture_configuration_details(
+        ConfigurationSource(), screens=[{"id": 12, "name": "Create"}]
+    )
+    assert [r["id"] for r in result["screen_tab_fields:12:17"]["items"]] == [
+        "summary",
+        "customfield_42",
+    ]
+    assert result["field_configuration_items:3"]["count"] == 2
+    assert result["field_configuration_items:3"]["items"][1]["isRequired"] is True
+    assert all(r["complete"] for r in result.values())
+
+
+@pytest.mark.asyncio
+async def test_unavailable_screen_layout_stays_an_explicit_capture_gap():
+    class UnavailableSource:
+        async def get_migration_resource(self, resource, **kw):
+            if resource == "screen_tabs":
+                return {"success": False, "status_code": 403, "error": "forbidden"}
+            return {"values": [], "total": 0, "isLast": True}
+
+    result = await retention.capture_configuration_details(
+        UnavailableSource(), screens=[{"id": 12}]
+    )
+    assert not result["screen_tabs:12"]["complete"]
+    assert result["screen_tabs:12"]["pages"][0]["status_code"] == 403
+    assert not any(k.startswith("screen_tab_fields:") for k in result)
+
+
+def test_nested_configuration_resources_use_fixed_read_paths():
+    assert resource_request("screen_tab_fields", "12", "17") == (
+        "/rest/api/3/screens/12/tabs/17/fields",
+        {},
+    )
+    assert resource_request("field_configuration_items", "3", start_at=100) == (
+        "/rest/api/3/fieldconfiguration/3/fields",
+        {"startAt": 100, "maxResults": 100},
+    )
+
+
 def test_archive_read_requires_access_and_verifies_bytes(monkeypatch):
     from src.backend.services import computer_file_copy_service as files
 

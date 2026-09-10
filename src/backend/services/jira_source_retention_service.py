@@ -343,6 +343,49 @@ async def capture_project(proxy, project_key):
     }
 
 
+async def capture_configuration_details(proxy, *, screens=None):
+    """Retain scheme mappings and nested field layouts, not only their names.
+
+    Jira's classic configuration APIs can return an empty set for team-managed
+    projects. Preserve the exact responses; these reads do not certify forms or
+    app-owned configuration, which still need their own source dispositions.
+    This function also supports supplementing an existing site archive without
+    downloading every board and issue-membership snapshot again.
+    """
+    resources = {}
+    for resource in (
+        "screen_schemes",
+        "issue_type_screen_schemes",
+        "issue_type_screen_mappings",
+        "issue_type_schemes",
+        "issue_type_scheme_items",
+        "field_configurations",
+        "field_configuration_schemes",
+        "field_configuration_mappings",
+    ):
+        resources[resource] = await capture_resource(proxy, resource, item_key="values")
+    if screens is None:
+        resources["screens"] = await capture_resource(
+            proxy, "screens", item_key="values"
+        )
+        screens = resources["screens"]["items"]
+    for screen in screens:
+        screen_id = str(screen["id"])
+        tabs = await capture_resource(proxy, "screen_tabs", screen_id)
+        resources[f"screen_tabs:{screen_id}"] = tabs
+        for tab in tabs["items"]:
+            tab_id = str(tab["id"])
+            resources[f"screen_tab_fields:{screen_id}:{tab_id}"] = (
+                await capture_resource(proxy, "screen_tab_fields", screen_id, tab_id)
+            )
+    for configuration in resources["field_configurations"]["items"]:
+        config_id = str(configuration["id"])
+        resources[f"field_configuration_items:{config_id}"] = await capture_resource(
+            proxy, "field_configuration_items", config_id, item_key="values"
+        )
+    return resources
+
+
 async def capture_site_configuration(proxy, *, site_url):
     """Shared definitions are captured once and referenced by project records.
 
@@ -399,6 +442,11 @@ async def capture_site_configuration(proxy, *, site_url):
                         item_key="values",
                     )
                 )
+    resources.update(
+        await capture_configuration_details(
+            proxy, screens=resources["screens"]["items"]
+        )
+    )
     for board in resources["boards"]["items"]:
         board_id = board["id"]
         for resource in (
