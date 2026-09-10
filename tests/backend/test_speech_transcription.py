@@ -47,10 +47,11 @@ def test_recorded_audio_carries_vocabulary_and_language(provider, mime, extensio
     assert args["file"][0] == "dictation." + extension
     assert args["extra_body"] == {
         "keywords": ["Vontology", "Wikidata"],
-        "languages": ["en-NZ"],
+        "languages": ["en"],
     }
     assert "Discuss Vontology" in args["prompt"]
     assert result["text"] == "Von uses Vontology."
+    assert result["language_hint"] == "en-NZ"
     gate.assert_called_once_with(
         provider="openai",
         model="gpt-transcribe",
