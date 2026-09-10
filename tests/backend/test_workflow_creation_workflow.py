@@ -1398,6 +1398,33 @@ def test_normalise_workflow_spec_derives_bounded_stable_generated_workflow_id() 
     assert assess_workflow_id_hygiene(workflow_id)["valid"] is True
 
 
+@pytest.mark.parametrize(
+    "graph",
+    [
+        {"states": [{"state_key": "process", "action_id": "llm.action"}]},
+        {"steps": []},
+        {"steps": "process"},
+        {"steps": [None]},
+    ],
+)
+def test_explicit_invalid_graph_cannot_fall_back_to_marker_workflow(graph) -> None:
+    from src.backend.workflows.durable import workflow_creation_workflow as creation
+
+    with (
+        patch.object(creation, "infer_workflow_authoring_identity") as infer,
+        patch.object(creation, "_resolve_workflow_template_spec") as template,
+        pytest.raises(ValueError, match="workflow_authoring_spec_invalid:steps"),
+    ):
+        creation._normalise_workflow_spec(
+            {
+                "workflow_spec": {"workflow_id": "#V#existing_workflow", **graph},
+                "prompt": "Replace an existing workflow",
+            }
+        )
+    infer.assert_not_called()
+    template.assert_not_called()
+
+
 def test_creation_stages_reuse_persisted_design_without_identity_reinference() -> None:
     from src.backend.workflows.durable import workflow_creation_workflow as creation
 
