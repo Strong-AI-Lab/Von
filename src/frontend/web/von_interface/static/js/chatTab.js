@@ -1,3 +1,4 @@
+import { createDictationController } from './dictation.js';
 import { renderImageAttachments, renderImageComposer, uploadConversationImage, imagesBlocked, takeImages, restoreImages, descriptorsForIds } from "./utils/conversationImages.js";
 // Chat Tab Module
 import { annotateTurn, fetchWithTimeout, getJsonDetailed, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
@@ -26,10 +27,8 @@ import { isAnnotationEnabled } from './featureFlags.js';
 import { detectMarkdown, renderMarkdownViaServer } from './markdownUtils.js';
 import {
     getSpeechSynthesisVoices,
-    isSpeechRecognitionSupported,
     isTextToSpeechSupported,
     speakText,
-    startSpeechRecognition,
     stopSpeaking
 } from './speech.js';
 import { getPreferredLanguage, selectBestNameForContext, selectShortestNameForContext } from './utils/nameSelection.js';
@@ -24604,8 +24603,8 @@ const CHAT_STT_LANGUAGE_STORAGE_KEY = 'chatSttLanguage';
 const CHAT_STT_CONTINUOUS_STORAGE_KEY = 'chatSttContinuous';
 const CHAT_STT_INTERIM_RESULTS_STORAGE_KEY = 'chatSttInterimResults';
 
-let activeDictation = null;
-let dictationState = null;
+let dictationController = null;
+let dictationSendPending = false;
 
 let activeTtsTurnId = null;
 let activeTtsButton = null;
@@ -25000,6 +24999,7 @@ function toggleSpeakTurn(turnId, text, button) {
         });
     } catch (err) {
         console.warn('[chatTab] TTS failed:', err);
+        showToast('Speech playback failed. Tap Speak to retry.', 'error');
         clearActiveTtsUi();
         return;
     }
@@ -25026,22 +25026,36 @@ function toggleSpeakTurn(turnId, text, button) {
             }
         };
         utterance.onend = () => finish('ended');
-        utterance.onerror = () => finish('error');
+        utterance.onerror = (event) => {
+            if (activeTtsTurnId === turnId && !['canceled', 'interrupted'].includes(event?.error)) {
+                showToast('Speech playback failed. Tap Speak to retry; your response remains in the conversation.', 'error');
+            }
+            finish('error');
+        };
     } catch (_) {
         // Ignore.
     }
 }
 
 function stopDictation() {
-    if (!activeDictation) {
-        return;
-    }
+    dictationController?.cancel();
+}
 
-    try {
-        activeDictation.stop?.();
-    } catch (_) {
-        // Ignore.
-    }
+function getDictationContext() {
+    const prompt = getPromptInputElement()?.value || '';
+    const history = getConversationTranscriptTurnsSnapshot().slice(-4)
+        .map(turn => turn.message || turn.text || '').join('\n').slice(-4500);
+    const vocabulary = ['Von', 'Vontology'];
+    document.querySelectorAll('#scrollableField [data-full-concept-id], .prompt-input-overlay [data-full-concept-id]')
+        .forEach(element => {
+            const name = element.querySelector('.vontology-cartouche-name')?.textContent || element.textContent;
+            if (name?.trim()) vocabulary.push(name.trim());
+        });
+    return {
+        key: `${getCurrentUserConceptId() || ''}:${activeChatSessionId || ''}:${getSessionScopedNamespace() || ''}`,
+        text: `${history}\n${prompt}`.slice(-6000), vocabulary: [...new Set(vocabulary)].slice(0, 80),
+        ...getChatSpeechSettings().stt
+    };
 }
 
 // Persist sender/message pairs for transcript exports
@@ -28694,6 +28708,7 @@ async function renameChatSession(sessionId, sessionName) {
 }
 
 async function switchToChatSession(sessionId, options = {}) {
+    stopDictation();
     const sid = String(sessionId || '').trim();
     if (!sid) {
         return { ok: false, error: 'session_id required' };
@@ -33544,6 +33559,7 @@ function detachChatWorkForOrganisationSwitch() {
 }
 
 function startOrganisationSwitchForChatTab(detail = {}) {
+    stopDictation();
     const requestedSwitchId = normaliseOrganisationSwitchId(detail);
     if (requestedSwitchId && pendingChatOrganisationSwitchId === requestedSwitchId) {
         return chatOrganisationGeneration;
@@ -34243,89 +34259,20 @@ export function initializeChatTab() {
         });
     }
 
-    // Dictation (STT): optional browser capability.
-    if (dictateButton) {
-        if (!isSpeechRecognitionSupported()) {
-            dictateButton.disabled = true;
-            dictateButton.title = 'Dictation is not supported in this browser.';
-        } else {
-            dictateButton.addEventListener('click', () => {
-                if (activeDictation) {
-                    stopDictation();
-                    return;
-                }
-
-                if (!promptInput) {
-                    return;
-                }
-
-                const baseText = String(promptInput.value || '');
-                dictationState = {
-                    baseText,
-                    finalText: '',
-                    interimText: ''
-                };
-
-                dictateButton.textContent = 'Stop dictation';
-                dictateButton.classList.add('active-dictation');
-
-                try {
-                    const settings = getChatSpeechSettings();
-                    activeDictation = startSpeechRecognition({
-                        language: settings.stt.language,
-                        continuous: settings.stt.continuous,
-                        interimResults: settings.stt.interimResults,
-                        onResult: ({ finalText, interimText }) => {
-                            if (!dictationState) {
-                                return;
-                            }
-
-                            if (finalText) {
-                                dictationState.finalText = [dictationState.finalText, finalText]
-                                    .map(t => String(t || '').trim())
-                                    .filter(Boolean)
-                                    .join(' ');
-                            }
-
-                            dictationState.interimText = String(interimText || '').trim();
-
-                            const baseText = String(dictationState.baseText || '');
-                            const dictatedText = [dictationState.finalText, dictationState.interimText]
-                                .map(t => String(t || '').trim())
-                                .filter(Boolean)
-                                // Normalise spaces/tabs, but preserve newlines.
-                                .join(' ')
-                                .replace(/[ \t]+/g, ' ');
-
-                            if (!dictatedText) {
-                                setPromptComposerValue(baseText, { promptInput });
-                            } else {
-                                const needsSpacer = baseText.length > 0 && !/[ \t\n]$/.test(baseText);
-                                setPromptComposerValue(
-                                    `${baseText}${needsSpacer ? ' ' : ''}${dictatedText}`,
-                                    { promptInput }
-                                );
-                            }
-                        },
-                        onError: (event) => {
-                            console.warn('[chatTab] Dictation error:', event);
-                        },
-                        onEnd: () => {
-                            activeDictation = null;
-                            dictationState = null;
-                            dictateButton.textContent = 'Dictate';
-                            dictateButton.classList.remove('active-dictation');
-                        }
-                    });
-                } catch (err) {
-                    console.warn('[chatTab] Unable to start dictation:', err);
-                    activeDictation = null;
-                    dictationState = null;
-                    dictateButton.textContent = 'Dictate';
-                    dictateButton.classList.remove('active-dictation');
-                }
-            });
-        }
+    // Shared mobile/desktop recording lifecycle; browser recognition is explicit.
+    dictationController?.dispose();
+    if (dictateButton && promptInput) {
+        dictationController = createDictationController({
+            input: promptInput, button: dictateButton,
+            status: document.getElementById('dictationStatus'),
+            cancelButton: document.getElementById('cancelDictationButton'),
+            retryButton: document.getElementById('retryDictationButton'),
+            engineSelect: document.getElementById('dictationEngineSelect'),
+            getContext: getDictationContext,
+            fetchImpl: (url, options = {}) => fetch(url, { ...options, headers: buildChatFetchHeaders(options.headers) }),
+            setValue: value => setPromptComposerValue(value, { promptInput }),
+            onStart: () => { stopSpeaking(); clearActiveTtsUi(); }
+        });
     }
 
     // Add event listeners
@@ -37213,6 +37160,14 @@ async function handleSendPrompt(options = {}) {
         && !hasPromptOverride
         && !selectedQueueEntry
     );
+    if (directComposerSubmission && dictationController?.getState() !== 'idle' && dictationController) {
+        if (dictationSendPending) return;
+        const scopeBefore = getDictationContext().key;
+        dictationSendPending = true;
+        try {
+            if (!await dictationController.finish() || scopeBefore !== getDictationContext().key) return;
+        } finally { dictationSendPending = false; }
+    }
     if (directComposerSubmission && newChatCreationInFlight) {
         const createdSession = await newChatCreationInFlight;
         if (!createdSession || pendingChatOrganisationSwitchId !== null) {
@@ -38124,6 +38079,7 @@ async function handleSendPrompt(options = {}) {
 }
 
 async function handleResetContext() {
+    stopDictation();
     try {
         const response = await fetch('/von/reset', {
             method: 'POST',

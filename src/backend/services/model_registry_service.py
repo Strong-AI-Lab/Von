@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 import json
 import logging
 import os
-from pathlib import Path
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+from ..languagemodels.model_defaults import is_transcription_model
 from .settings_service import resolve_enabled_llm_settings, resolve_llm_setting
 
 logger = logging.getLogger(__name__)
@@ -1280,7 +1281,7 @@ def _build_registry_from_settings() -> Mapping[str, Any]:
     user_concept_id = None
     org_concept_id = None
     try:
-        from flask import session, has_request_context
+        from flask import has_request_context, session
 
         if has_request_context():
             user_concept_id = session.get("user_concept_id")
@@ -1298,6 +1299,8 @@ def _build_registry_from_settings() -> Mapping[str, Any]:
             continue
         provider = entry.get("provider")
         model = entry.get("model")
+        if is_transcription_model(provider, model):
+            continue
         locality = "external"
         if isinstance(provider, str) and provider.lower() == "ollama":
             locality = "local"

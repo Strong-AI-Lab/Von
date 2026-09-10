@@ -43,6 +43,11 @@ function clearKeepaliveInterval(root) {
 
 function startKeepaliveInterval(root) {
     clearKeepaliveInterval(root);
+    // Mobile pause/resume can terminate or restart speech. Restrict the
+    // keepalive workaround to the affected desktop Chromium implementation.
+    const ua = root?.navigator?.userAgent || '';
+    if (!/Chrome\//.test(ua) || /Android|Mobile|iPhone|iPad|iPod/.test(ua)
+        || (root?.navigator?.maxTouchPoints > 1 && /Macintosh/.test(ua))) return;
 
     if (!root || typeof root.setInterval !== 'function') {
         return;
@@ -79,6 +84,7 @@ export function startSpeechRecognition(options = {}) {
         language,
         continuous = true,
         interimResults = true,
+        vocabulary = [],
         onResult,
         onError,
         onEnd
@@ -92,6 +98,12 @@ export function startSpeechRecognition(options = {}) {
     const recognition = new SpeechRecognitionCtor();
     recognition.continuous = !!continuous;
     recognition.interimResults = !!interimResults;
+    const Phrase = globalThis.SpeechRecognitionPhrase;
+    if ('phrases' in recognition && typeof Phrase === 'function') {
+        try {
+            recognition.phrases = vocabulary.slice(0, 80).map(term => new Phrase(String(term), 3));
+        } catch (_) { /* Optional contextual biasing must not break capture. */ }
+    }
 
     if (language) {
         recognition.lang = String(language);
@@ -103,10 +115,11 @@ export function startSpeechRecognition(options = {}) {
         }
 
         try {
+            // Each event is a revisable snapshot, including replayed finals.
             let finalText = '';
             let interimText = '';
 
-            for (let i = event.resultIndex; i < event.results.length; i += 1) {
+            for (let i = 0; i < event.results.length; i += 1) {
                 const result = event.results[i];
                 if (!result || !result[0]) {
                     continue;
@@ -114,9 +127,9 @@ export function startSpeechRecognition(options = {}) {
 
                 const transcript = String(result[0].transcript || '');
                 if (result.isFinal) {
-                    finalText += transcript;
+                    finalText += ` ${transcript}`;
                 } else {
-                    interimText += transcript;
+                    interimText += ` ${transcript}`;
                 }
             }
 
@@ -125,7 +138,7 @@ export function startSpeechRecognition(options = {}) {
                 interimText: interimText.trim(),
                 event
             });
-        } catch (err) {
+        } catch (_err) {
             // Best-effort: swallow and keep recognition alive.
         }
     };
@@ -251,8 +264,13 @@ export function speakText(text, options = {}) {
 
     // Attach event listeners to clear keepalive when speech ends or errors.
     const cleanupKeepalive = () => clearKeepaliveInterval(root);
-    utterance.onend = cleanupKeepalive;
-    utterance.onerror = cleanupKeepalive;
+    if (typeof utterance.addEventListener === 'function') {
+        utterance.addEventListener('end', cleanupKeepalive);
+        utterance.addEventListener('error', cleanupKeepalive);
+    } else {
+        utterance.onend = cleanupKeepalive;
+        utterance.onerror = cleanupKeepalive;
+    }
 
     // Prefer immediate playback (and avoid queueing multiple long utterances).
     try {
@@ -266,7 +284,9 @@ export function speakText(text, options = {}) {
     const settleMs =
         typeof options.cancelSettleMs === 'number'
             ? options.cancelSettleMs
-            : DEFAULT_CANCEL_SETTLE_MS;
+            : (/Android|Mobile|iPhone|iPad|iPod/.test(root.navigator?.userAgent || '')
+                || (root.navigator?.maxTouchPoints > 1 && /Macintosh/.test(root.navigator?.userAgent || '')))
+                ? 0 : DEFAULT_CANCEL_SETTLE_MS;
 
     const doSpeak = () => {
         pendingSpeakTimerId = null;
@@ -274,8 +294,8 @@ export function speakText(text, options = {}) {
             root.speechSynthesis.speak(utterance);
             // Start the Chrome keepalive workaround after speech begins.
             startKeepaliveInterval(root);
-        } catch (_) {
-            // Ignore.
+        } catch (error) {
+            utterance.onerror?.({ error: 'synthesis-failed', message: error?.message });
         }
     };
 

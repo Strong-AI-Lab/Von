@@ -2,13 +2,32 @@
 
 const speechModulePath = '../../src/frontend/web/von_interface/static/js/speech.js';
 
-const { getSpeechSynthesisVoices, speakText } = require(speechModulePath);
+const { getSpeechSynthesisVoices, speakText, stopSpeaking } = require(speechModulePath);
 
 describe('speech TTS utilities', () => {
     afterEach(() => {
+        stopSpeaking();
         delete global.speechSynthesis;
         delete global.SpeechSynthesisUtterance;
         jest.restoreAllMocks();
+        jest.useRealTimers();
+    });
+
+    test.each([
+        ['Android Chrome/130 Mobile', 1],
+        ['iPhone Mobile Safari', 1],
+        ['Macintosh Safari', 5]
+    ])('mobile %s speaks in the gesture and never runs Chromium pause/resume', (userAgent, maxTouchPoints) => {
+        jest.useFakeTimers();
+        jest.spyOn(navigator, 'userAgent', 'get').mockReturnValue(userAgent);
+        Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, get: () => maxTouchPoints });
+        global.speechSynthesis = { cancel: jest.fn(), speak: jest.fn(), getVoices: () => [], speaking: true, paused: false, pause: jest.fn(), resume: jest.fn() };
+        global.SpeechSynthesisUtterance = function (text) { this.text = text; };
+        speakText('A longer conversational reply.');
+        expect(global.speechSynthesis.speak).toHaveBeenCalledTimes(1);
+        jest.advanceTimersByTime(30000);
+        expect(global.speechSynthesis.pause).not.toHaveBeenCalled();
+        expect(global.speechSynthesis.resume).not.toHaveBeenCalled();
     });
 
     test('getSpeechSynthesisVoices returns empty array when unsupported', () => {

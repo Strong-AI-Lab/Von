@@ -8,6 +8,16 @@ remain fixed to their verified model ID.
 
 import os
 
+# Audio/transcriptions models do not implement the chat/tool interface. They
+# may be authorised in the shared model pool without becoming chat fallbacks.
+TRANSCRIPTION_MODELS = ("gpt-transcribe", "gpt-4o-transcribe", "gpt-4o-mini-transcribe")
+
+
+def is_transcription_model(provider: object, model: object) -> bool:
+    return str(provider or "").strip().lower() == "openai" and str(
+        model or ""
+    ).strip().removeprefix("openai:") in TRANSCRIPTION_MODELS
+
 # ---------------------------------------------------------------------------
 # Ollama
 # ---------------------------------------------------------------------------

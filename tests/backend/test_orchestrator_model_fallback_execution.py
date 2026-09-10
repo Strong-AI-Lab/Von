@@ -5222,3 +5222,23 @@ def test_load_workflow_model_policy_distinguishes_graph_completeness(
     state, telemetry = orchestrator._load_workflow_model_policy(None)
     assert telemetry["policy_source"] == "json"
     assert telemetry["graph_completeness"] == "graph_absent"
+
+
+def test_transcription_models_do_not_become_chat_fallbacks(monkeypatch):
+    monkeypatch.setattr(
+        "src.backend.services.settings_service.resolve_enabled_llm_settings",
+        lambda **kwargs: [
+            {"provider": "openai", "model": "gpt-5.5"},
+            {"provider": "openai", "model": "gpt-transcribe"},
+            {"provider": "openai", "model": "gpt-4o-transcribe"},
+            {"provider": "openai", "model": "gpt-4o-mini-transcribe"},
+        ],
+    )
+    candidates = _bare_orchestrator()._stage_model_candidates(
+        stage="planner", default_model="gpt-5.5", default_provider="openai",
+        policy_state=_WorkflowModelPolicyState(
+            enabled=False, policy=None, policy_id=None, predicate_id=None, errors=(),
+        ),
+    )
+    assert candidates
+    assert all(candidate.model == "gpt-5.5" for candidate in candidates)

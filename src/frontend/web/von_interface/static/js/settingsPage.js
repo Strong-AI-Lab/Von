@@ -1,3 +1,4 @@
+import { supportsAudioRecording } from './dictation.js';
 import { ensureUniqueWindowSessionId, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import {
   clearBackgroundTaskHistory,
@@ -3932,15 +3933,7 @@ function setupSpeechSettingsSection() {
   const sttSupported = isSpeechRecognitionSupported();
 
   if (supportNote) {
-    if (ttsSupported && sttSupported) {
-      supportNote.textContent = 'Text-to-speech and dictation are available in this browser.';
-    } else if (ttsSupported) {
-      supportNote.textContent = 'Dictation is not supported in this browser.';
-    } else if (sttSupported) {
-      supportNote.textContent = 'Text-to-speech is not supported in this browser.';
-    } else {
-      supportNote.textContent = 'Speech is not supported in this browser.';
-    }
+    supportNote.textContent = `${supportsAudioRecording() ? 'Recorded dictation is supported; enable an OpenAI transcription model (gpt-transcribe, gpt-4o-transcribe or gpt-4o-mini-transcribe) in your model pool.' : 'Recorded dictation needs HTTPS and microphone recording support.'} Browser recognition: ${sttSupported ? 'available with limited context support' : 'unavailable'}. Spoken playback: ${ttsSupported ? 'available' : 'unavailable'}.`;
   }
 
   if (!ttsSupported) {

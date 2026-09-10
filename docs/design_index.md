@@ -95,6 +95,7 @@ live.
 | Evaluation, benchmarks, or research-sensitive architecture | [agent evaluation and research uptake](engineering/agent_evaluation_and_research_uptake.md) |
 | Minimal imposition, elicitation, or write policy | [minimal-imposition principle](engineering/minimal_imposition_design_principle.md) |
 | Frontend or browser acceptance | [Frontend browser validation](engineering/frontend_browser_user_view_validation.md), at the validation tier justified by the claim |
+| Dictation, audio transcription or mobile speech playback | [Speech I/O](engineering/speech_io.md); current conversational delivery plan remains in its linked Jira issue |
 | Live user-visible behaviour or telemetry diagnosis | Applicable sections of the [real-path replay and telemetry loop](engineering/real_path_server_replay_and_telemetry_loop.md), using the risk tier in `AGENTS.md` |
 | Substantial Jira task definition or pull-request merge boundary | The decision discipline in [`AGENTS.md`](../AGENTS.md#5-capability-slice-planning), the practical [Jira guidance](engineering/operational_engineering_guide.md#53-jira) and [merge-decision procedure](engineering/operational_engineering_guide.md#62-make-new-evidence-change-a-decision), and the [pull-request template](../.github/PULL_REQUEST_TEMPLATE.md) |
 | Practical repository operation | [operational engineering guide](engineering/operational_engineering_guide.md), [authority-alignment scan](engineering/maintaining_global_design_constraints_and_authority_alignment_with_coding_agents.md) |

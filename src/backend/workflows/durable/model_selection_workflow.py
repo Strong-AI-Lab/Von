@@ -129,7 +129,9 @@ def _enabled_model_pool(
         provider = _context_string(entry.get("provider"))
         model = _context_string(entry.get("model"))
         host = _context_string(entry.get("host"))
-        if not provider or not model:
+        from ...languagemodels.model_defaults import is_transcription_model
+
+        if not provider or not model or is_transcription_model(provider, model):
             continue
         key = (provider.lower(), model, host)
         if key in seen:

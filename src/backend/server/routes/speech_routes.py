@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -10,8 +11,96 @@ from ...services.chat_history_service import (
     update_llm_debug_data_for_request_id,
 )
 
-
 speech_bp = Blueprint("speech_bp", __name__, url_prefix="/api/speech")
+
+
+def _speech_actor():
+    from ...security.access_control import (
+        get_effective_organisation_concept_id,
+        get_effective_user_concept_id_with_source,
+    )
+
+    actor, source = get_effective_user_concept_id_with_source()
+    if not actor or source not in {
+        "authenticated_session",
+        "authenticated_session_derived",
+        "trusted_in_process_actor",
+    }:
+        return None, None
+    return actor, get_effective_organisation_concept_id()
+
+
+@speech_bp.route("/capabilities", methods=["GET"])
+def speech_capabilities():
+    from ...services.speech_transcription_service import (
+        SpeechUnavailable,
+        transcription_capability,
+    )
+
+    actor, organisation = _speech_actor()
+    if not actor:
+        return jsonify(error="authentication_required"), 401
+    try:
+        data = transcription_capability(actor, organisation)
+    except SpeechUnavailable as exc:
+        data = {"available": False, "reason": str(exc)}
+    except Exception:
+        data = {
+            "available": False,
+            "reason": "Speech configuration is temporarily unavailable.",
+        }
+    response = jsonify(transcription=data)
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@speech_bp.route("/transcribe", methods=["POST"])
+def transcribe_speech():
+    from ...languagemodels.llm_interface import ModelExecutionEligibilityError
+    from ...services.speech_transcription_service import (
+        MAX_AUDIO_BYTES,
+        SpeechUnavailable,
+        transcribe_audio,
+    )
+
+    actor, organisation = _speech_actor()
+    if not actor:
+        return jsonify(error="authentication_required"), 401
+    # Bound multipart parsing as well as the file read; audio is never retained.
+    request.max_content_length = MAX_AUDIO_BYTES + 65536
+    uploaded = request.files.get("audio")
+    if uploaded is None:
+        return jsonify(error="missing_audio", message="No recording was received."), 400
+    try:
+        vocabulary = json.loads(request.form.get("vocabulary", "[]"))
+        result = transcribe_audio(
+            actor=actor,
+            organisation=organisation,
+            audio=uploaded.read(MAX_AUDIO_BYTES + 1),
+            mime_type=uploaded.mimetype or "",
+            context=request.form.get("context", ""),
+            vocabulary=vocabulary,
+            language=request.form.get("language", ""),
+        )
+    except (ValueError, json.JSONDecodeError) as exc:
+        return jsonify(error="invalid_audio_request", message=str(exc)), 400
+    except (SpeechUnavailable, ModelExecutionEligibilityError) as exc:
+        return jsonify(error="speech_unavailable", message=str(exc)), 503
+    except Exception as exc:
+        # Provider exceptions can contain credentials, URLs and submitted text.
+        current_app.logger.warning(
+            "Speech transcription failed (%s)", type(exc).__name__
+        )
+        return (
+            jsonify(
+                error="transcription_failed",
+                message="Transcription failed. Your recording is available to retry.",
+            ),
+            502,
+        )
+    response = jsonify(success=True, **result)
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 def _coerce_float(value: Any) -> Optional[float]:
@@ -70,8 +159,10 @@ def _normalise_timestamp(value: Any) -> Optional[str]:
             return value
     if isinstance(value, (int, float)):
         try:
-            return datetime.fromtimestamp(float(value) / 1000.0, tz=timezone.utc).isoformat().replace(
-                "+00:00", "Z"
+            return (
+                datetime.fromtimestamp(float(value) / 1000.0, tz=timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
             )
         except Exception:
             return None
@@ -87,7 +178,9 @@ def _sanitise_playback(payload: Dict[str, Any]) -> Dict[str, Any]:
     settings = settings if isinstance(settings, dict) else {}
 
     return {
-        "request_id": _coerce_text(payload.get("request_id") or playback.get("request_id")),
+        "request_id": _coerce_text(
+            payload.get("request_id") or playback.get("request_id")
+        ),
         "turn_id": _coerce_text(payload.get("turn_id")),
         "conversation_id": _coerce_text(payload.get("conversation_id")),
         "started_at": _normalise_timestamp(playback.get("started_at")),
