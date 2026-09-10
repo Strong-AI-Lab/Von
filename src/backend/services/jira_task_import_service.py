@@ -55,6 +55,7 @@ from .task_management_service import (
 )
 from .task_ontology_service import JIRA_IMPORTED_TASK_SOURCE_ID
 from .feature_flags import suppress_event_workflow_launches
+from .relationship_extent_index_service import defer_relationship_extent_index_sync
 
 _normalise_issue_key = normalise_jira_issue_key
 
@@ -1984,6 +1985,7 @@ def _build_pilot_validation_report(
 
 
 @suppress_event_workflow_launches("jira_source_import")
+@defer_relationship_extent_index_sync()
 def import_jira_issues_to_tasks(
     *,
     issues: Sequence[Mapping[str, Any]],

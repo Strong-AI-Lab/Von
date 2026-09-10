@@ -14,8 +14,11 @@ import copy
 import gzip
 import hashlib
 import json
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Any
+
+from .relationship_extent_index_service import defer_relationship_extent_index_sync
 
 
 def canonical_json(value: Any) -> bytes:
@@ -139,6 +142,16 @@ async def capture_issue(
     proxy, issue_key: str, *, attachment_max_size_bytes: int = 100 * 1024 * 1024
 ):
     """Return an unchanged source archive and a separate hydrated projection."""
+    session = getattr(proxy, "source_capture_session", None)
+    async with session() if callable(session) else nullcontext():
+        return await _capture_issue(
+            proxy,
+            issue_key,
+            attachment_max_size_bytes=attachment_max_size_bytes,
+        )
+
+
+async def _capture_issue(proxy, issue_key, *, attachment_max_size_bytes):
     original = _source_payload(
         await proxy.get_issue(
             issue_key=issue_key,
@@ -270,6 +283,12 @@ async def capture_issue(
 
 async def capture_project(proxy, project_key):
     """Retain project data, configuration and nested properties/role memberships."""
+    session = getattr(proxy, "source_capture_session", None)
+    async with session() if callable(session) else nullcontext():
+        return await _capture_project(proxy, project_key)
+
+
+async def _capture_project(proxy, project_key):
     resources = {"project": await capture_resource(proxy, "project", project_key)}
     pages = resources["project"]["pages"]
     project = pages[0] if pages and isinstance(pages[0], dict) else {}
@@ -522,6 +541,127 @@ async def capture_site_configuration(proxy, *, site_url):
     }
 
 
+async def capture_linked_atlassian_project(proxy, *, kind, site_id, object_id):
+    """Capture named project/goal resources without silently truncating pages.
+
+    This retains source information; it neither copies its permissions nor
+    enables imported integrations. Nested pages beyond the returned first page
+    remain explicit gaps, so callers cannot certify them from outer pagination.
+    """
+    from ..integrations.internal_mcp.atlassian_project_migration_queries import (
+        GOAL_CONNECTIONS,
+        PROJECT_CONNECTIONS,
+    )
+    from ..integrations.internal_mcp.jira_proxy_mcp import JiraProxyError
+
+    if kind not in {"project", "goal"}:
+        raise ValueError("Expected an Atlassian project or goal")
+    base_resource = f"atlas_{kind}"
+    root_key = f"{kind}s_byId"
+    resources = {}
+
+    async def request(resource, cursor=None):
+        return _source_payload(
+            await proxy.get_migration_resource(
+                resource=resource,
+                identifier=site_id,
+                secondary_id=object_id,
+                max_results=100,
+                next_page_token=cursor,
+            )
+        )
+
+    def nested_pages(value, path=""):
+        gaps = []
+        if isinstance(value, dict):
+            if (value.get("pageInfo") or {}).get("hasNextPage"):
+                gaps.append(path)
+            for name, child in value.items():
+                gaps.extend(nested_pages(child, f"{path}/{name}"))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                gaps.extend(nested_pages(child, f"{path}/{index}"))
+        return gaps
+
+    first = await request(base_resource)
+    source = (first.get("data") or {}).get(root_key)
+    errors = list(first.get("errors") or [])
+    resources[base_resource] = {
+        "pages": [first],
+        "complete": bool(source) and not errors,
+        "errors": errors,
+    }
+    if source and not errors:
+        connections = PROJECT_CONNECTIONS if kind == "project" else GOAL_CONNECTIONS
+        for field in connections:
+            resource = f"{base_resource}_{field}"
+            record = {
+                "pages": [],
+                "items": [],
+                "errors": [],
+                "complete": False,
+                "nested_page_gaps": [],
+            }
+            resources[resource] = record
+            cursor = None
+            seen = set()
+            while True:
+                try:
+                    page = await request(resource, cursor)
+                except (JiraProxyError, TimeoutError, OSError) as exc:
+                    record["errors"].append(
+                        {"type": type(exc).__name__, "message": str(exc)}
+                    )
+                    break
+                record["pages"].append(page)
+                record["errors"].extend(page.get("errors") or [])
+                parent = (page.get("data") or {}).get(root_key) or {}
+                connection = parent.get(field)
+                if not isinstance(connection, dict) or record["errors"]:
+                    if not record["errors"]:
+                        record["errors"].append(
+                            {"message": "Source connection unavailable"}
+                        )
+                    break
+                edges = connection.get("edges") or []
+                record["items"].extend(edges)
+                record["nested_page_gaps"].extend(nested_pages(edges))
+                info = connection.get("pageInfo") or {}
+                if "hasNextPage" not in info:
+                    record["errors"].append(
+                        {"message": "Source pagination metadata missing"}
+                    )
+                    break
+                if not info.get("hasNextPage"):
+                    record["complete"] = not record["nested_page_gaps"]
+                    break
+                cursor = info.get("endCursor")
+                if not cursor or cursor in seen:
+                    record["errors"].append(
+                        {"message": "Source pagination did not advance"}
+                    )
+                    break
+                seen.add(cursor)
+        after = await request(base_resource)
+        resources[base_resource]["pages"].append(after)
+        stable = not after.get("errors") and canonical_json(
+            (after.get("data") or {}).get(root_key)
+        ) == canonical_json(source)
+    else:
+        stable = False
+    return {
+        "schema": "jira_source_archive.v1",
+        "kind": base_resource,
+        "source": source or {"id": object_id},
+        "site_id": site_id,
+        "resources": resources,
+        "source_stable_during_capture": stable,
+        "capture_scope": "Named Atlassian project or goal fields and connections; source permissions and integration settings are retained as data.",
+        "complete": stable and all(value["complete"] for value in resources.values()),
+    }
+
+
+@defer_relationship_extent_index_sync()
 def store_source_archive(
     archive, *, actor_concept_id, organisation_concept_id=None, namespace=None
 ):

@@ -216,6 +216,10 @@ class JiraMCPProxy:
             )
         )
 
+    def source_capture_session(self):
+        """Keep one helper for a source capture; authority is checked per read."""
+        return self._client.reuse_session()
+
     async def _call(
         self,
         tool_name: str,
