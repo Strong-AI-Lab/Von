@@ -11483,8 +11483,29 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 .chat-composer-actions,
 .chat-composer-primary-actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
+}
+
+#cancelDictationButton[hidden],
+#retryDictationButton[hidden] {
+    display: none;
+}
+
+#dictateButton,
+#cancelDictationButton,
+#retryDictationButton {
+    min-height: 44px;
+}
+
+#dictationStatus {
+    margin: 8px 0 0;
+    overflow-wrap: anywhere;
+}
+
+#dictationEngineSelect {
+    max-width: 100%;
 }
 
 .chat-composer-actions {

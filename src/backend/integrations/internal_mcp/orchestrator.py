@@ -14310,7 +14310,9 @@ class InternalMCPChatOrchestrator:
                 str(entry.get("model") or "").strip() or None
             )
             host = str(entry.get("host") or "").strip() or None
-            if not provider or not model:
+            from ...languagemodels.model_defaults import is_transcription_model
+
+            if not provider or not model or is_transcription_model(provider, model):
                 continue
             model_parameters = (
                 normalise_model_parameters_for_storage(

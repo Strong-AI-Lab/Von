@@ -646,3 +646,12 @@ def test_runtime_parameter_policy_rejects_values_outside_graph_allowed_set(
         )
         is None
     )
+
+
+def test_settings_chat_registry_excludes_audio_only_models(monkeypatch):
+    import src.backend.services.model_registry_service as mod
+    monkeypatch.setattr(mod, "resolve_enabled_llm_settings", lambda **kwargs: [
+        {"provider": "openai", "model": "gpt-5.5"},
+        {"provider": "openai", "model": "gpt-transcribe"},
+    ])
+    assert [entry["model_id"] for entry in mod._build_registry_from_settings()["models"]] == ["gpt-5.5"]
