@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from src.backend.services import (
     workflow_event_integration_service as workflow_event_service,
 )
@@ -398,6 +400,48 @@ def test_launch_event_workflow_applies_represented_binding_condition(
     assert mock_submit.call_count == 1
     assert mock_submit.call_args is not None
     assert mock_submit.call_args.kwargs["inputs"]["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    "org_id, expected_namespace",
+    [(None, "#V#user_alice"), ("#V#org_nao", "#V#user_alice@org_nao")],
+)
+@patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
+def test_event_submission_preserves_personal_or_organisation_authority(
+    mock_get_instance_manager, monkeypatch, org_id, expected_namespace
+):
+    monkeypatch.setenv("VON_EVENT_WORKFLOW_INTEGRATION_ENABLE", "1")
+    monkeypatch.setenv("VON_DURABLE_WORKFLOWS_ENABLE", "1")
+    manager = MagicMock()
+    manager.list_event_bindings.return_value = [
+        EventWorkflowBinding.create(
+            event_type="otter.meeting_collected",
+            workflow_id="#V#meeting_followup_workflow",
+            enabled=True,
+            actor="test",
+        )
+    ]
+    mock_get_instance_manager.return_value = manager
+    with patch.object(
+        workflow_event_service,
+        "submit_verified_workflow_instance",
+        return_value=_submission_result(
+            workflow_id="#V#meeting_followup_workflow",
+            instance_id="private-event-instance",
+            created_new=True,
+        ),
+    ) as submit:
+        result = launch_event_workflow(
+            event_type="otter.meeting_collected",
+            event_id="meeting:source-revision",
+            user_id="#V#user_alice",
+            org_id=org_id,
+            event_payload={"meeting_concept_id": "#V#private_meeting"},
+        )
+    assert result["triggered"] is True
+    assert submit.call_args.kwargs["org_id"] == org_id
+    assert submit.call_args.kwargs["namespace"] == expected_namespace
+    assert submit.call_args.kwargs["user_id"] == "#V#user_alice"
 
 
 @patch("src.backend.services.workflow_event_integration_service.get_instance_manager")
