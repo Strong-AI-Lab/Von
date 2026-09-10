@@ -335,6 +335,12 @@ direct workflow calls; a model-supplied selector or identity is not authority.
 The account's Jira permissions determine its issue visibility. This bounded
 owner path does not delegate the deployment account to other Von users or
 release Jira writes. Explicit trusted-local operator access remains separate.
+The local stdio `jira_create_issue` entry point preserves that operator
+provenance through its nested issue-type preflight; standalone
+`jira_get_project_issue_types` uses the same boundary. Existing actor or
+untrusted invocation context is never promoted to operator. Creation still
+requires the coding-agent write gate, project allow-list and explicit write
+intent. This does not grant Jira creation to ordinary browser turns.
 Missing or ambiguous identity binding fails closed, and a changed credential
 configuration cannot silently reuse the previous account's proxy.
 
