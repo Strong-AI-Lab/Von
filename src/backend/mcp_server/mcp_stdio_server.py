@@ -1046,8 +1046,6 @@ _TRUSTED_LOCAL_OPERATOR_DIAGNOSTIC_READ_TOOLS = frozenset(
         "jira_get_issue",
         "jira_get_myself",
         "jira_get_transitions",
-        "jira_get_project_issue_types",
-        "jira_create_issue",
         "jira_update_issue",
         "jira_search",
         "turn_execution_get",
