@@ -924,6 +924,15 @@ def _normalise_workflow_spec(
 ) -> dict[str, Any]:
     request_text = _extract_request_text(context)
     raw_spec = _extract_workflow_spec(context)
+    if raw_spec:
+        raw_steps = raw_spec.get("steps")
+        if not isinstance(raw_steps, list) or not raw_steps or any(
+            not isinstance(step, Mapping) for step in raw_steps
+        ):
+            raise ValueError(
+                "workflow_authoring_spec_invalid:steps_must_be_a_nonempty_list_of_objects;"
+                "use_steps_not_states"
+            )
     template_resolution: dict[str, Any] = {}
     identity = _resolve_workflow_authoring_identity(
         context={**context, **raw_spec},
