@@ -927,7 +927,9 @@ def _launch_single_event_binding(
         manager=manager,
         workflow_id=resolved_workflow_id,
         user_id=(user_id or "anonymous"),
-        org_id=(org_id or "default"),
+        # A personal event has no organisation. A shared placeholder becomes
+        # real execution authority and can widen publication of private files.
+        org_id=org_id,
         namespace=namespace,
         event_idempotency_key=event_idempotency_key,
         source_event_type=event_type,
