@@ -1396,12 +1396,21 @@ async def call_tool(
         return [types.TextContent(type="text", text=text)]
 
     elif name == "jira_get_migration_resource":
+        from src.backend.integrations.internal_mcp.atlassian_project_migration_queries import (
+            project_query_request,
+        )
         from src.backend.integrations.internal_mcp.jira_migration_resources import (
             resource_request,
         )
 
-        path, params = resource_request(**arguments)
-        result = _request_json("GET", f"{JIRA_BASE_URL}{path}", params=params)
+        if str(arguments.get("resource", "")).startswith("atlas_"):
+            payload = project_query_request(**arguments)
+            result = _request_json(
+                "POST", f"{JIRA_BASE_URL}/gateway/api/graphql", payload=payload
+            )
+        else:
+            path, params = resource_request(**arguments)
+            result = _request_json("GET", f"{JIRA_BASE_URL}{path}", params=params)
         return [types.TextContent(type="text", text=_tool_json(result))]
 
     elif name == "jira_get_issue":

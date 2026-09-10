@@ -12,6 +12,8 @@ import json
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from uuid import uuid4
@@ -135,6 +137,68 @@ class MCPStdIOClient:
         self._total_duration_ms = 0.0
         self._last_call_telemetry: Optional[MCPCallTelemetry] = None
         self._telemetry_history: List[MCPCallTelemetry] = []
+        self._capture_session: ContextVar[dict[str, Any] | None] = ContextVar(
+            f"mcp_capture_session_{id(self)}", default=None
+        )
+
+    @asynccontextmanager
+    async def _new_session(self, params):
+        # Bound startup independently; borrowed calls retain their own existing
+        # operation deadlines and telemetry below.
+        async with asyncio.timeout(self._effective_operation_timeout_sec()) as startup:
+            async with stdio_client(params) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    startup.reschedule(None)
+                    yield session
+
+    @asynccontextmanager
+    async def reuse_session(self):
+        """Reuse one helper in an explicitly bounded caller scope, then close it.
+
+        Context-local state cannot lend a session to an unrelated caller. A
+        dropped transport invalidates the borrowed session; normal per-call
+        retries then open fresh helpers. This is not a persistent process pool.
+        """
+        existing = self._capture_session.get()
+        if existing and existing["usable"]:
+            yield
+            return
+        state = None
+        token = None
+        body_failed = False
+        try:
+            async with self._new_session(self._build_server_params()) as session:
+                state = {"session": session, "usable": True}
+                token = self._capture_session.set(state)
+                try:
+                    yield
+                except BaseException:
+                    body_failed = True
+                    raise
+        except Exception as exc:
+            # A failed borrowed transport can also report its close while the
+            # scope unwinds. Preserve successfully recovered per-call results;
+            # never suppress a caller failure or an unrelated close error.
+            if (
+                body_failed
+                or not state
+                or state["usable"]
+                or not self._is_transport_closed_error(exc)
+            ):
+                raise
+        finally:
+            if token is not None:
+                self._capture_session.reset(token)
+
+    @asynccontextmanager
+    async def _call_session(self, params):
+        state = self._capture_session.get()
+        if state and state["usable"]:
+            yield state["session"]
+        else:
+            async with self._new_session(params) as session:
+                yield session
 
     @property
     def helper_owner_token(self) -> str:
@@ -408,63 +472,63 @@ class MCPStdIOClient:
             async with asyncio.timeout(operation_timeout_sec):
                 while True:
                     try:
-                        async with stdio_client(params) as (read_stream, write_stream):
-                            async with ClientSession(
-                                read_stream, write_stream
-                            ) as session:
-                                await session.initialize()
-                                result = await session.call_tool(tool_name, arguments)
-                                if bool(getattr(result, "isError", False)):
-                                    raise _MCPToolResultError(
+                        async with self._call_session(params) as session:
+                            result = await session.call_tool(tool_name, arguments)
+                            if bool(getattr(result, "isError", False)):
+                                raise _MCPToolResultError(
+                                    tool_name=tool_name,
+                                    actor_message=self._tool_result_error_message(
+                                        result,
                                         tool_name=tool_name,
-                                        actor_message=self._tool_result_error_message(
-                                            result,
-                                            tool_name=tool_name,
-                                        ),
-                                    )
-                                duration_ms = (time.perf_counter() - start_time) * 1000
-                                self._call_count += 1
-                                self._total_duration_ms += duration_ms
-
-                                # Extract content types for telemetry
-                                content_types = []
-                                char_count = 0
-                                if result and getattr(result, "content", None):
-                                    for item in result.content:
-                                        if isinstance(item, mcp_types.TextContent):
-                                            content_types.append("text")
-                                            char_count += len(item.text or "")
-                                        elif isinstance(item, mcp_types.ImageContent):
-                                            content_types.append("image")
-                                        elif isinstance(
-                                            item, mcp_types.EmbeddedResource
-                                        ):
-                                            content_types.append("resource")
-                                        else:
-                                            content_types.append(type(item).__name__)
-
-                                parsed, parsed_as = self._parse_result_with_telemetry(
-                                    result, text_parser=text_parser
+                                    ),
                                 )
+                            duration_ms = (time.perf_counter() - start_time) * 1000
+                            self._call_count += 1
+                            self._total_duration_ms += duration_ms
 
-                                telemetry.duration_ms = duration_ms
-                                telemetry.success = True
-                                telemetry.response_content_types = content_types
-                                telemetry.response_char_count = char_count
-                                telemetry.parsed_as = parsed_as
-                                self._record_telemetry(telemetry)
+                            # Extract content types for telemetry
+                            content_types = []
+                            char_count = 0
+                            if result and getattr(result, "content", None):
+                                for item in result.content:
+                                    if isinstance(item, mcp_types.TextContent):
+                                        content_types.append("text")
+                                        char_count += len(item.text or "")
+                                    elif isinstance(item, mcp_types.ImageContent):
+                                        content_types.append("image")
+                                    elif isinstance(item, mcp_types.EmbeddedResource):
+                                        content_types.append("resource")
+                                    else:
+                                        content_types.append(type(item).__name__)
 
-                                logger.info(
-                                    "%s Tool %s completed in %.1fms (chars=%d, parsed_as=%s)",
-                                    self._config.log_tag,
-                                    tool_name,
-                                    duration_ms,
-                                    char_count,
-                                    parsed_as,
-                                )
+                            parsed, parsed_as = self._parse_result_with_telemetry(
+                                result, text_parser=text_parser
+                            )
 
-                                return parsed
+                            telemetry.duration_ms = duration_ms
+                            telemetry.success = True
+                            telemetry.response_content_types = content_types
+                            telemetry.response_char_count = char_count
+                            telemetry.parsed_as = parsed_as
+                            self._record_telemetry(telemetry)
+
+                            logger.info(
+                                "%s Tool %s completed in %.1fms (chars=%d, parsed_as=%s)",
+                                self._config.log_tag,
+                                tool_name,
+                                duration_ms,
+                                char_count,
+                                parsed_as,
+                            )
+
+                            return parsed
                     except Exception as exc:
+                        state = self._capture_session.get()
+                        if state and (
+                            isinstance(exc, TimeoutError)
+                            or self._is_transport_closed_error(exc)
+                        ):
+                            state["usable"] = False
                         should_retry = (
                             self._is_transport_closed_error(exc)
                             and attempt < max_retries
@@ -491,6 +555,11 @@ class MCPStdIOClient:
                             continue
                         raise
         except Exception as exc:  # pragma: no cover
+            state = self._capture_session.get()
+            if state and (
+                isinstance(exc, TimeoutError) or self._is_transport_closed_error(exc)
+            ):
+                state["usable"] = False
             duration_ms = (time.perf_counter() - start_time) * 1000
             self._error_count += 1
             self._total_duration_ms += duration_ms

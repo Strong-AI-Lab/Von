@@ -173,6 +173,62 @@ def test_import_jira_issues_idempotent_rerun_updates_existing(monkeypatch):
     assert update_calls["count"] >= 2
 
 
+def test_import_flushes_shared_extent_once_after_all_task_mutations(monkeypatch):
+    from src.backend.services import relationship_extent_index_service as extent
+
+    canonical = []
+    flushes = []
+
+    def create(**_kwargs):
+        cid = f"#V#task_{len(canonical) + 1}"
+        canonical.append(cid)
+        extent.sync_relationship_extent_index_for_concept_id(cid)
+        extent.sync_relationship_extent_index_for_concept_id("#V#task_specification")
+        assert not flushes
+        return {"task_concept_id": cid}
+
+    def update(cid, **_kwargs):
+        extent.sync_relationship_extent_index_for_concept_id(cid)
+        extent.sync_relationship_extent_index_for_concept_id("#V#task_specification")
+        assert not flushes
+        return {"task": {"task_concept_id": cid}}
+
+    def flush(ids):
+        flushes.append((set(ids), list(canonical)))
+        return {"success": True}
+
+    monkeypatch.setattr(
+        import_service, "find_task_by_external_reference", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(import_service, "create_task", create)
+    monkeypatch.setattr(import_service, "update_task_fields", update)
+    monkeypatch.setattr(
+        import_service, "upsert_task_external_reference", lambda *_args, **_kwargs: {}
+    )
+    monkeypatch.setattr(
+        extent, "_sync_relationship_extent_index_for_concept_ids_now", flush
+    )
+    monkeypatch.setattr(
+        extent,
+        "_sync_relationship_extent_index_for_concept_id_now",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("unbatched extent rebuild")
+        ),
+    )
+
+    result = import_service.import_jira_issues_to_tasks(
+        issues=[_jira_issue("TEST-1"), _jira_issue("TEST-2")], dry_run=False
+    )
+
+    assert result["summary"]["created"] == 2
+    assert flushes == [
+        (
+            {"#V#task_1", "#V#task_2", "#V#task_specification"},
+            ["#V#task_1", "#V#task_2"],
+        )
+    ]
+
+
 def test_import_jira_issues_marks_bulk_migration_collection_when_requested(monkeypatch):
     captured_fields: list[dict[str, Any]] = []
 

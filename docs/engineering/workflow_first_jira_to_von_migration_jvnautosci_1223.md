@@ -53,6 +53,18 @@ archives, and deduplicate source activity. Unresolved hierarchy/link targets
 can be repaired from retained import rows after all projects have imported.
 Never infer deletion authority from a missing source issue.
 
+Start large recovery runs with one importer process. Keep raw payloads in private
+files and return compact progress summaries to the calling agent. Monitor host
+memory pressure and the worker's memory use; stop the owned worker and preserve
+its checkpoints when the host is under critical pressure. Increasing process
+count is not a substitute for diagnosing a slow phase. Source registration and
+task import coalesce derived relationship-index refreshes through the existing
+bulk-mutation context, which flushes before the operation returns.
+An issue or project source capture reuses one scoped MCP helper, while each
+read retains its authority check, operation timeout and transport recovery.
+The helper closes when that capture ends; unrelated calls keep their existing
+one-call lifetime.
+
 `scripts/capture_jira_project_sources.py` captures project and site source
 configuration through named Jira MCP resources and associates board/filter
 collections. It includes screen tabs and ordered fields, issue-type/screen
@@ -66,6 +78,17 @@ Automation exports, cloud exports, app-owned data, forms and linked external
 documents require explicit capture or an evidence-backed scope disposition;
 REST access failures are not proof that a resource is empty. Keep these private
 source artefacts outside the repository.
+
+Linked Atlassian Projects/Goals (formerly Atlas) can be read through the same
+configured Jira account using named `atlas_project*` and `atlas_goal*` resources.
+`capture_linked_atlassian_project` retains the selected project/goal fields and
+paginated activity, custom values, access records and integration references as
+source data. It checks the primary record again after capture. API errors,
+changing records, missing/non-advancing pagination and unfinished nested pages
+remain explicit gaps. A successful outer page does not certify nested comments
+or custom-field values. These reads do not activate integrations or copy source
+permissions into Von. Associate the retained archives with the intended native
+projects and tasks, and keep unavailable fields in the disposition register.
 
 ### Native use and actor binding
 
