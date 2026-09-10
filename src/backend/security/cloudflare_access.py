@@ -139,7 +139,8 @@ def install_cloudflare_access(app) -> None:
                 if not user or not user.get("concept_id"):
                     raise ValueError("von_login_email_not_authorised")
                 actor = user["concept_id"]
-                if session.get("user_concept_id") != actor:
+                if (session.get("user_concept_id") != actor
+                        or session.get("user_email") != email):
                     session.clear()
                 session.update(
                     user_email=email,

@@ -111,7 +111,7 @@ def test_get_user_prefs_returns_404_when_user_concept_missing(app_client, monkey
     assert resp.get_json()["error"] == "User concept not found"
 
 
-def test_get_user_prefs_reads_relationship_values(app_client, monkeypatch):
+def test_get_user_prefs_does_not_treat_legacy_membership_as_preference(app_client, monkeypatch):
     _, client = app_client
 
     import src.backend.server.routes.settings_routes as settings_routes
@@ -141,7 +141,7 @@ def test_get_user_prefs_reads_relationship_values(app_client, monkeypatch):
     assert resp.status_code == 200
     data = resp.get_json()
     assert data["preferred_language"] == "en-NZ"
-    assert data["organisation_concept_id"] == "#V#the_lu_witbrock_household"
+    assert data["organisation_concept_id"] is None
 
 
 def test_set_user_language_uses_governed_text_effect(app_client, monkeypatch):

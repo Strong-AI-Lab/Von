@@ -2251,7 +2251,6 @@ def get_model_parameter_capabilities():
 # --- Per-user preference (language & organisation) storage via concept relationships ---
 
 USER_PREF_LANG_PREDICATE = "#V#preferred_language"
-USER_PREF_ORG_PREDICATE = "#V#member_of_organisation"
 
 
 def _normalize_relationships(rel):
@@ -2300,7 +2299,6 @@ def get_user_prefs(user_concept_id: str):
             return jsonify({"error": "User concept not found"}), 404
         rel = _normalize_relationships(concept.get("relationships", {}))
         lang_raw = rel.get(USER_PREF_LANG_PREDICATE)
-        org_raw = rel.get(USER_PREF_ORG_PREDICATE)
 
         def first_val(v):
             if isinstance(v, list):
@@ -2317,7 +2315,13 @@ def get_user_prefs(user_concept_id: str):
             )
             if language_rows:
                 preferred_language = language_rows[0].get("text")
-        organisation_concept_id = first_val(org_raw)
+        # Legacy member_of_organisation describes membership, not preference.
+        # Never choose the first membership as a landing context.
+        from ...services.login_organisation_preference_service import initialise_login_context
+        organisation_concept_id = (
+            initialise_login_context(session)["organisation_concept_id"]
+            if session.get("user_email") and session.get("user_concept_id") else None
+        )
         return (
             jsonify(
                 {
