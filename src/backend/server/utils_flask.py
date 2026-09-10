@@ -1544,6 +1544,9 @@ def create_flask_app(
 
     _install_request_timing_middleware(app)
     _configure_flask_app_core(app, list_models_func, generate_func)
+    from ..security.cloudflare_access import install_cloudflare_access
+
+    install_cloudflare_access(app)
     _install_local_browser_origin_canonicalisation(app)
     _register_default_blueprints(app)
 

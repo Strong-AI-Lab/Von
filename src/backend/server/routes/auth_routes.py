@@ -622,6 +622,7 @@ def browser_test_login():
 @auth_bp.route("/api/auth/logout", methods=["POST"])
 def logout():
     """Log out the current user by clearing their session."""
+    cloudflare_logout = session.get("auth_provider") == "cloudflare_access"
     user_email = session.get("user_email")
     user_id = (
         session.get("user_concept_id")
@@ -661,6 +662,7 @@ def logout():
             "success": True,
             "message": "Logged out successfully",
             "window_context_cleanup": ("deferred" if cleanup_deferred else "completed"),
+            "redirect_url": "/cdn-cgi/access/logout" if cloudflare_logout else None,
         }
     )
 
