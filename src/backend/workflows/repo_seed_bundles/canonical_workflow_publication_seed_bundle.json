@@ -1,7 +1,7 @@
 {
   "family_id": "canonical_workflow_publication_seed_bundle",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "53",
+  "seed_version": "54",
   "known_legacy_authority_payload_sha256_by_seed_version": {
     "#V#tool_calling_workflow": {
       "42": [
@@ -7104,6 +7104,7 @@
           "lang": "en-NZ"
         }
       ],
+      "description": "Repair an existing represented workflow definition. Load its current specification, use the governed repair prompt to design executable steps and tool bindings, then materialise and validate the revised definition while preserving the target workflow identity.",
       "workflow_id": "#V#workflow_authoring_repair_workflow"
     },
     {
@@ -7518,6 +7519,7 @@
           "lang": "en-NZ"
         }
       ],
+      "description": "Author a represented workflow by discovering existing capabilities, deciding whether to reuse or repair an existing workflow or create a new one, and invoking the corresponding authoring workflow. Prefer repairing an existing workflow when it can satisfy the requested behaviour.",
       "workflow_id": "#V#workflow_repair_or_create_workflow"
     },
     {
