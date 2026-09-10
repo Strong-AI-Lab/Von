@@ -13,6 +13,7 @@ import { evaluateServerHealthState } from './utils/serverHealthState.js';
 import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.js';
 import {
   hasAuthenticatedVonActor,
+  applyHomeAuthUnavailable,
   initialiseHomeAuthentication,
   shouldClearHomeIdentityMirrors,
 } from './homeAuthGate.js';
@@ -43,6 +44,7 @@ import {
 } from './utils/runtimeIdentityBootstrap.js';
 import { recoverPersonalContextAfterMembershipDenial } from './utils/organisationSessionRecovery.js';
 import { hydrateStoredSelectionsFromUserPreferences } from './utils/userPreferenceBootstrap.js';
+import { initialiseLoginOrganisation } from './utils/loginOrganisationBootstrap.js';
 import { isVontologyBusy, loadKeyConceptsForUser, preloadVontologyData, selectVontologyNodeByIdentifier, setupVontologySearchUI } from './vontology.js';
 
 // JVNAUTOSCI-1011: getCurrentNamespace is now provided by sessionScopedStorage.js
@@ -81,7 +83,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Ensure user context is loaded BEFORE initializing chat to prevent race condition
   // where conversation history loads with null user_id
-  await ensureUserContext(authStatus);
+  try {
+    await ensureUserContext(authStatus);
+  } catch (error) {
+    applyHomeAuthUnavailable(new Error(`Organisation context could not be confirmed. ${error.message}`));
+    return;
+  }
   loadDeferredSettingsFrame();
 
   // JVNAUTOSCI-954: report bounded, client-reported capability hints (speech/audio)
@@ -452,7 +459,7 @@ async function ensureUserContext(authStatus) {
     initSessionStorageFromLocalStorage();
 
     // Import to ensure window session ID is generated
-    const { getJson, ensureUniqueWindowSessionId } = await import('./apiService.js');
+    const { getJson, postJson, ensureUniqueWindowSessionId, replaceMismatchedWindowSessionId } = await import('./apiService.js');
     // Resolve a copied duplicate-tab ID before any actor-scoped bootstrap call.
     await ensureUniqueWindowSessionId();
 
@@ -479,6 +486,11 @@ async function ensureUserContext(authStatus) {
     localStorage.setItem('von_current_user', encodedAuthenticatedUser);
     sessionStorage.setItem('von_current_user', encodedAuthenticatedUser);
     storedUser = authenticatedUser;
+
+    await initialiseLoginOrganisation(authStatus, {
+      postJson,
+      rotateWindow: replaceMismatchedWindowSessionId,
+    });
 
     try {
       await hydrateStoredSelectionsFromUserPreferences(authenticatedUser.concept_id);
@@ -544,6 +556,7 @@ async function ensureUserContext(authStatus) {
     await syncFlaskSessionOrg();
   } catch (e) {
     console.warn('[main] Failed to ensure user context:', e);
+    throw e; // Do not initialise chat/tools in an unconfirmed organisation.
   }
 }
 

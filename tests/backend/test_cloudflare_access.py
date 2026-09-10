@@ -33,6 +33,8 @@ def token(signer, **overrides):
 
 @pytest.fixture
 def app(monkeypatch, signing_key):
+    from src.backend.services import login_organisation_preference_service as preferences
+    monkeypatch.setattr(preferences, "read_preferences", lambda actor: {})
     monkeypatch.setenv("VON_CLOUDFLARE_ACCESS_ENABLED", "true")
     monkeypatch.setenv("VON_CLOUDFLARE_ACCESS_HOSTNAME", "von.example.test")
     monkeypatch.setenv("VON_CLOUDFLARE_ACCESS_TEAM_DOMAIN", TEAM)
@@ -66,6 +68,27 @@ def test_normal_issuance_binding_and_scope_retention(app, signing_key):
         s["organisation_concept_id"] = "#V#permitted_org"
     assert client.get("/private", base_url=HOST, headers=headers).json["org"] == "#V#permitted_org"
     assert client.get("/von/api/auth/google/login", base_url=HOST, headers=headers).location == "/von/"
+
+
+def test_same_person_other_email_gets_new_login_context(app, signing_key, monkeypatch):
+    from src.backend.services import login_organisation_preference_service as preferences
+    monkeypatch.setattr(preferences, "read_preferences", lambda actor: {
+        "user@example.test": "#V#primary", "home@example.test": "#V#household"})
+    monkeypatch.setattr(preferences, "resolve_user_organisation_membership",
+                        lambda actor, org: {"role": "member"})
+    client = app.test_client()
+    first = client.get("/von/api/auth/status", base_url=HOST,
+        headers={"Cf-Access-Jwt-Assertion": token(signing_key[0])}).json
+    with client.session_transaction(base_url=HOST) as s:
+        s["session_id"] = "work-chat"
+    second = client.get("/von/api/auth/status", base_url=HOST,
+        headers={"Cf-Access-Jwt-Assertion": token(signing_key[0], email="home@example.test")}).json
+    assert first["user_concept_id"] == second["user_concept_id"]
+    assert first["login_context"]["organisation_concept_id"] == "#V#primary"
+    assert second["login_context"]["organisation_concept_id"] == "#V#household"
+    assert first["login_context"]["generation"] != second["login_context"]["generation"]
+    with client.session_transaction(base_url=HOST) as s:
+        assert "session_id" not in s
 
 
 @pytest.mark.parametrize("overrides", [
