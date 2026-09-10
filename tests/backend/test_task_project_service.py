@@ -7,6 +7,7 @@ from src.backend.services import task_project_service as projects
 
 def test_project_collection_rerun_preserves_identity_and_writer(monkeypatch):
     docs = {}
+    publish_during_refresh = False
     monkeypatch.setattr(projects, "can_access_concept", lambda key: True)
     monkeypatch.setattr(
         projects,
@@ -23,8 +24,16 @@ def test_project_collection_rerun_preserves_identity_and_writer(monkeypatch):
         return docs[key]
 
     def update(key, fields):
+        if publish_during_refresh:
+            record = docs[key]["attributes"]["task_project"]
+            record.update(writer="von", site_source_archive={"content_sha256": "new"})
+            record["collection_concept_ids"].append("#V#new_board_collection")
         for path, value in fields.items():
-            docs[key]["attributes"][path.split(".", 1)[1]] = copy.deepcopy(value)
+            target = docs[key]
+            parts = path.split(".")
+            for part in parts[:-1]:
+                target = target.setdefault(part, {})
+            target[parts[-1]] = copy.deepcopy(value)
 
     monkeypatch.setattr(projects, "create_concept", create)
     monkeypatch.setattr(projects, "update_concept", update)
@@ -32,18 +41,26 @@ def test_project_collection_rerun_preserves_identity_and_writer(monkeypatch):
         "id": "12",
         "key": "KKAT",
         "name": "KnowKat",
+        "description": "The complete project description",
         "self": "https://jira.example/rest/api/3/project/12",
     }
     first = projects.ensure_jira_project(source, actor_concept_id="#V#owner")
     project_id = first["project_concept_id"]
-    docs[project_id]["attributes"]["task_project"]["writer"] = "von"
+    publish_during_refresh = True
+    partial_source = {
+        key: value for key, value in source.items() if key != "description"
+    }
     second = projects.ensure_jira_project(
-        {**source, "name": "KnowKat updated"}, actor_concept_id="#V#owner"
+        {**partial_source, "name": "KnowKat updated"}, actor_concept_id="#V#owner"
     )
     assert len(docs) == 2
     assert second["project_concept_id"] == project_id
     assert second["collection"]["project_concept_ids"] == [project_id]
     assert second["project"]["writer"] == "von"
+    assert second["project"]["name"] == "KnowKat updated"
+    assert second["project"]["description"] == "The complete project description"
+    assert second["project"]["site_source_archive"] == {"content_sha256": "new"}
+    assert "#V#new_board_collection" in second["project"]["collection_concept_ids"]
     assert (
         projects.validate_task_membership(project_id, second["collection_concept_ids"])[
             1
