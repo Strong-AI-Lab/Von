@@ -279,6 +279,27 @@ def _run_mongorestore(
     with tempfile.TemporaryDirectory(prefix="von-mongorestore-") as config_dir:
         config_root = Path(config_dir)
         os.chmod(config_root, 0o700)
+        restore_root = dump_root
+        legacy_prelude = dump_root / "prelude.json"
+        if legacy_prelude.is_file():
+            prelude = json.loads(legacy_prelude.read_text(encoding="utf-8"))
+            if "mongo_uri_redacted" in prelude and "ServerVersion" not in prelude:
+                # Older Von archives used a filename now reserved by MongoDB.
+                # Stage only the selected database, preserving the source
+                # archive and avoiding a second byte copy on the same volume.
+                restore_root = config_root / "dump"
+
+                def link_or_copy(source, destination):
+                    try:
+                        return os.link(source, destination)
+                    except OSError:
+                        return shutil.copy2(source, destination)
+
+                shutil.copytree(
+                    dump_root / source_db_name,
+                    restore_root / source_db_name,
+                    copy_function=link_or_copy,
+                )
         config_path = config_root / "config.yml"
         config_path.write_text(
             f"uri: {json.dumps(mongo_uri)}\n",
@@ -290,7 +311,7 @@ def _run_mongorestore(
             "--config",
             str(config_path),
             "--dir",
-            str(dump_root),
+            str(restore_root),
             "--nsFrom",
             f"{source_db_name}.*",
             "--nsTo",

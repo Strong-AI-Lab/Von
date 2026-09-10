@@ -1028,7 +1028,9 @@ _TRUSTED_LOCAL_OPERATOR_CONVERSATION_TOOLS = frozenset(
     }
 )
 
-# Only these read handlers inherit the local stdio operator boundary. Keep
+# Only these named handlers inherit the local stdio operator boundary. Jira
+# writes still pass their existing write-profile/effect checks; this binding
+# permits their nested actor-scoped read preflight. Keep
 # execution, recovery, schedules and ontology mutations on their own authority
 # paths; an input flag or actor identifier must never enlarge this set.
 _TRUSTED_LOCAL_OPERATOR_DIAGNOSTIC_READ_TOOLS = frozenset(
@@ -1038,8 +1040,15 @@ _TRUSTED_LOCAL_OPERATOR_DIAGNOSTIC_READ_TOOLS = frozenset(
         "conversation_inspect_batch",
         "conversation_telemetry_get_locator",
         "conversation_transcript_page",
+        "task_get_source_archive",
+        "task_add_attachment",
         "jira_get_comments",
         "jira_get_issue",
+        "jira_get_myself",
+        "jira_get_transitions",
+        "jira_get_project_issue_types",
+        "jira_create_issue",
+        "jira_update_issue",
         "jira_search",
         "turn_execution_get",
         "turn_execution_get_diagnostics",
@@ -1202,6 +1211,80 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ig
         ]
 
     try:
+        if name in _NATIVE_TASK_TOOLS or name in {
+            "create_task",
+            "get_task",
+            "list_my_tasks",
+            "assign_task",
+            "update_task_status",
+        }:
+            configured_actor = os.environ.get(
+                "VON_MCP_TASK_ACTOR_CONCEPT_ID", ""
+            ).strip()
+            configured_org = (
+                os.environ.get("VON_MCP_TASK_ORGANISATION_CONCEPT_ID", "").strip()
+                or None
+            )
+            inherited_source = (
+                internal_mcp_gateway_module.get_internal_mcp_actor_context_source()
+            )
+            if configured_actor and inherited_source is None:
+                # A local server installation may bind its task tools to its
+                # operator once. Per-call payloads cannot select a principal;
+                # this also lets native task work continue with Jira offline.
+                if not configured_actor.startswith("#V#"):
+                    return [
+                        _json_error(
+                            "Invalid configured task actor",
+                            error_code="invalid_task_actor_configuration",
+                        )
+                    ]
+                if configured_org and not configured_org.startswith("#V#"):
+                    return [
+                        _json_error(
+                            "Invalid configured task organisation",
+                            error_code="invalid_task_actor_configuration",
+                        )
+                    ]
+                actor_fields = (
+                    "acting_user_concept_id",
+                    "actor_concept_id",
+                    "created_by_concept_id",
+                    "creator_concept_id",
+                    "added_by_concept_id",
+                    "author_concept_id",
+                    "user_concept_id",
+                )
+                if any(
+                    parsed_arguments.get(key) not in (None, "", configured_actor)
+                    for key in actor_fields
+                ):
+                    return [
+                        _json_error(
+                            "Task actor differs from the configured local principal",
+                            error_code="task_actor_mismatch",
+                        )
+                    ]
+                from src.backend.security.access_control import (
+                    override_current_actor,
+                    force_access_control_enforcement,
+                )
+
+                task_arguments = dict(parsed_arguments)
+                task_arguments.update({key: configured_actor for key in actor_fields})
+                if not task_arguments.get("request_id"):
+                    from uuid import uuid4
+
+                    task_arguments["request_id"] = f"task-mcp-{uuid4().hex}"
+                with (
+                    override_current_actor(configured_actor, configured_org),
+                    force_access_control_enforcement(),
+                    internal_mcp_gateway_module.bind_internal_mcp_actor_context_source(
+                        internal_mcp_gateway_module.INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE,
+                        preexisting_actor_context=(configured_actor, configured_org),
+                    ),
+                ):
+                    return await handler(task_arguments)
         governed_method = _STDIO_GOVERNED_ONTOLOGY_METHODS.get(name)
         if governed_method:
             # Stdio has no independently authenticated actor context. Binding
@@ -4617,6 +4700,8 @@ async def _handle_create_task(arguments: dict[str, Any]) -> list[TextContent]:
             evidence=arguments.get("evidence"),
             notes=arguments.get("notes"),
             reference_code=arguments.get("reference_code"),
+            project_concept_id=arguments.get("project_concept_id"),
+            collection_concept_ids=arguments.get("collection_concept_ids"),
         )
         return [_json_text({"success": True, **result})]
     except Exception as exc:
@@ -4723,7 +4808,45 @@ async def _handle_otter_collection_status(arguments: dict[str, Any]) -> list[Tex
     return [_json_text(call_collection("status", **arguments))]
 
 
+def _native_task_handler(name):
+    async def handle(arguments):
+        from src.backend.integrations.internal_mcp import catalogue
+
+        # Reuse the canonical task handlers. The stdio write profile is checked
+        # by call_tool before reaching this adapter; actor-bound callers retain
+        # their context and ordinary continuation checks.
+        result = getattr(catalogue, f"_{name}")(**arguments)
+        return [_json_text(result)]
+
+    return handle
+
+
+_NATIVE_TASK_TOOLS = (
+    "task_get",
+    "task_search",
+    "task_update_fields",
+    "task_get_transitions",
+    "task_transition",
+    "task_create_subtask",
+    "task_set_parent",
+    "task_link",
+    "task_unlink",
+    "task_add_comment",
+    "task_list_comments",
+    "task_add_attachment",
+    "task_list_attachments",
+    "task_add_worklog",
+    "task_list_worklog",
+    "task_get_history",
+    "task_list_projects",
+    "task_get_project",
+    "task_get_collection",
+    "task_get_source_archive",
+)
+
+
 _TOOL_HANDLERS: dict[str, Callable[[dict[str, Any]], Awaitable[list[TextContent]]]] = {
+    **{name: _native_task_handler(name) for name in _NATIVE_TASK_TOOLS},
     "otter_collect_now": _handle_otter_collect_now,
     "otter_collection_status": _handle_otter_collection_status,
     "get_context": _handle_get_context,

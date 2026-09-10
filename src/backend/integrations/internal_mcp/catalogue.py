@@ -35105,11 +35105,6 @@ def _resolve_task_actor_scope(
             "authenticated_actor_context_required",
             "Task effects require a trusted authenticated user.",
         )
-    if not actor_scope.organisation_concept_id:
-        return None, make_error_response(
-            "authenticated_organisation_context_required",
-            "Task effects require a trusted organisation context.",
-        )
     return actor_scope, None
 
 
@@ -35118,14 +35113,14 @@ def _authorise_task_actor_mutation(
     *,
     surface: str,
 ) -> tuple[Any | None, dict[str, Any] | None, dict[str, Any] | None]:
-    """Require a same-organisation task owned by or assigned to the actor."""
+    """Check task access, then the authority of the calling task surface."""
 
     from ...services.task_management_service import TaskNotFoundError, get_task
 
     actor_scope, scope_error = _resolve_task_actor_scope(kwargs, surface=surface)
     if scope_error is not None:
         return None, None, scope_error
-    task_id = kwargs.get("task_concept_id") or kwargs.get("task_id")
+    task_id = _resolve_task_identifier(dict(kwargs))
     if not isinstance(task_id, str) or not task_id.strip():
         return (
             actor_scope,
@@ -35151,8 +35146,15 @@ def _authorise_task_actor_mutation(
         )
 
     assert actor_scope is not None
+    from .gateway import internal_mcp_actor_context_is_trusted_local_operator
+
+    # The configured local task principal can operate on accessible tasks,
+    # including personal projects and imported tasks with historical creators.
+    # get_task above enforces the principal's canonical visibility boundary.
+    if internal_mcp_actor_context_is_trusted_local_operator():
+        return actor_scope, task, None
     actor_id = str(actor_scope.user_concept_id)
-    actor_org_id = str(actor_scope.organisation_concept_id)
+    actor_org_id = str(actor_scope.organisation_concept_id or "")
     task_org_id = str(task.get("organisation_concept_id") or "").strip()
     actor_controls_task = actor_id in {
         str(task.get("assignee_concept_id") or "").strip(),
@@ -35166,7 +35168,7 @@ def _authorise_task_actor_mutation(
                 "task_actor_scope_denied",
                 (
                     "An ordinary-turn agent may change only a task in its authenticated "
-                    "organisation that it created or is assigned to."
+                    "organisation (or personal scope) that it created or is assigned to."
                 ),
             ),
         )
@@ -35234,7 +35236,7 @@ def _task_create(**kwargs):
     idempotency_key = str(kwargs.get("idempotency_key") or "").strip()
 
     actor_id = str(actor_scope.user_concept_id)
-    actor_org_id = str(actor_scope.organisation_concept_id)
+    actor_org_id = str(actor_scope.organisation_concept_id or "")
     if (
         str(assignee_id or "").strip() != actor_id
         or str(created_by or "").strip() != actor_id
@@ -35426,6 +35428,8 @@ def _task_create(**kwargs):
                 evidence=evidence,
                 notes=notes,
                 reference_code=reference_code,
+                project_concept_id=kwargs.get("project_concept_id"),
+                collection_concept_ids=kwargs.get("collection_concept_ids"),
                 agent_creation_fingerprint=creation_fingerprint,
                 agent_creation_request_id=(
                     request_id
@@ -35491,7 +35495,7 @@ def _task_get(**kwargs):
     """Get a task by concept_id."""
     from ...services.task_management_service import TaskNotFoundError, get_task
 
-    task_id = kwargs.get("task_concept_id") or kwargs.get("task_id")
+    task_id = _resolve_task_identifier(kwargs)
     if not task_id or not isinstance(task_id, str) or not task_id.strip():
         return make_error_response(
             "MISSING_PARAM",
@@ -35689,7 +35693,81 @@ def _resolve_task_identifier(payload: dict[str, Any]) -> str | None:
     if not isinstance(task_id, str):
         return None
     cleaned = task_id.strip()
+    if cleaned and not cleaned.startswith("#V#"):
+        from ...services.task_management_service import find_task_by_external_reference
+
+        task = find_task_by_external_reference(
+            source_system="jira", external_id=cleaned.upper()
+        )
+        if task:
+            return task["task_concept_id"]
     return cleaned or None
+
+
+def _task_list_projects(**kwargs):
+    from ...services.task_project_service import list_task_projects
+
+    return {
+        "success": True,
+        "projects": list_task_projects(
+            limit=kwargs.get("limit", 100), offset=kwargs.get("offset", 0)
+        ),
+    }
+
+
+def _task_get_project(**kwargs):
+    from ...services.task_project_service import (
+        get_task_project,
+        list_project_collections,
+    )
+
+    try:
+        project = get_task_project(kwargs.get("project_concept_id"))
+        return {
+            "success": True,
+            "project": project,
+            "collections": list_project_collections(project),
+        }
+    except ValueError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+
+
+def _task_get_collection(**kwargs):
+    from ...services.task_project_service import get_task_collection
+
+    try:
+        return {
+            "success": True,
+            "collection": get_task_collection(kwargs.get("collection_concept_id")),
+        }
+    except ValueError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
+
+
+def _task_get_source_archive(**kwargs):
+    from ...services.jira_source_retention_service import get_retained_task_source
+
+    actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+        kwargs,
+        surface="task_get_source_archive",
+        require_actor=True,
+    )
+    if denial:
+        return denial
+    try:
+        with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+            return {
+                "success": True,
+                **get_retained_task_source(
+                    _resolve_task_identifier(kwargs),
+                    actor_concept_id=actor_scope.user_concept_id,
+                    resource=kwargs.get("resource"),
+                    offset=kwargs.get("offset", 0),
+                    limit=kwargs.get("limit", 100),
+                ),
+            }
+    except ValueError as exc:
+        return make_error_response("NOT_FOUND", str(exc))
 
 
 def _task_search(**kwargs):
@@ -35702,6 +35780,8 @@ def _task_search(**kwargs):
     try:
         result = search_tasks(
             query=kwargs.get("query"),
+            project_concept_id=kwargs.get("project_concept_id"),
+            collection_concept_id=kwargs.get("collection_concept_id"),
             status_filter=kwargs.get("status_filter") or kwargs.get("status"),
             statuses=kwargs.get("statuses"),
             task_type_ids=kwargs.get("task_type_ids") or kwargs.get("task_type_id"),
@@ -36144,6 +36224,11 @@ def _task_import_jira_issues(**kwargs):
     participant_map: dict[str, str] = {}
     participant_map.update(assignee_map)
     participant_map.update(jira_map)
+    preserve_source = _coerce_bool_input(kwargs.get("preserve_source"), default=False)
+    if preserve_source and not actor_concept_id:
+        return make_error_response(
+            "MISSING_PARAM", "Source preservation requires a resolved actor."
+        )
 
     async def _fetch_jira_issues() -> dict[str, Any]:
         proxy = await get_jira_proxy()
@@ -36204,7 +36289,66 @@ def _task_import_jira_issues(**kwargs):
 
         issue_docs: list[dict[str, Any]] = []
         attachment_max_size_bytes = _jira_attachment_max_size_bytes()
+        project_contexts: dict[str, Any] = {}
         for issue_key in discovered_keys:
+            if preserve_source:
+                from ...services.jira_source_retention_service import (
+                    capture_issue,
+                    capture_project,
+                    store_source_archive,
+                )
+                from ...services.task_project_service import ensure_jira_project
+
+                try:
+                    archive, issue_doc = await capture_issue(
+                        proxy,
+                        issue_key,
+                        attachment_max_size_bytes=attachment_max_size_bytes,
+                    )
+                    project_key = issue_doc["fields"]["project"]["key"]
+                    if not dry_run:
+                        # Original source copies belong to the importing actor.
+                        # Operational project membership does not publish raw data.
+                        issue_doc["_von_source_archive"] = store_source_archive(
+                            archive, actor_concept_id=actor_concept_id
+                        )
+                        if project_key not in project_contexts:
+                            project_archive = await capture_project(proxy, project_key)
+                            reference = store_source_archive(
+                                project_archive, actor_concept_id=actor_concept_id
+                            )
+                            if not project_archive["complete"]:
+                                fetch_errors.append(
+                                    {
+                                        "issue_key": issue_key,
+                                        "error": f"project_source_retention_incomplete:{project_key}",
+                                    }
+                                )
+                            project_contexts[project_key] = ensure_jira_project(
+                                project_archive["source"],
+                                actor_concept_id=actor_concept_id,
+                                archive_reference=reference,
+                                organisation_concept_id=organisation_concept_id,
+                            )
+                        issue_doc["_von_project_context"] = project_contexts[
+                            project_key
+                        ]
+                    if not archive["complete"]:
+                        fetch_errors.append(
+                            {
+                                "issue_key": issue_key,
+                                "error": "source_retention_incomplete",
+                            }
+                        )
+                    issue_docs.append(issue_doc)
+                except Exception as exc:
+                    fetch_errors.append(
+                        {
+                            "issue_key": issue_key,
+                            "error": f"source_capture_failed:{type(exc).__name__}:{exc}",
+                        }
+                    )
+                continue
             seeded_issue_doc = seeded_issue_docs.get(issue_key)
             issue_doc: dict[str, Any] | None = None
             if isinstance(seeded_issue_doc, Mapping):
@@ -36597,6 +36741,25 @@ def _task_import_jira_issues(**kwargs):
         }
 
     report["success"] = bool(report.get("success", True))
+    if preserve_source and fetch_payload.get("fetch_errors"):
+        report["success"] = False
+        report["error_code"] = "source_retention_incomplete"
+    if preserve_source:
+        report["source_retention"] = {
+            "mode": "original_source_and_binary_archives",
+            "archives": [
+                {
+                    "issue_key": item.get("key"),
+                    "reference": item.get("_von_source_archive"),
+                }
+                for item in issue_docs
+            ],
+            "cutover_ready": False,
+            "reason": "Batch capture does not establish estate reconciliation, usability or restoration.",
+        }
+        if report.get("summary", {}).get("errors", 0):
+            report["success"] = False
+            report.setdefault("error_code", "task_projection_incomplete")
     if int(source_label_sync_report.get("error_count", 0)) > 0:
         report["success"] = False
     report["source_label_sync"] = source_label_sync_report
@@ -37250,6 +37413,40 @@ def _task_add_attachment(**kwargs):
     task_id = _resolve_task_identifier(kwargs)
     filename = kwargs.get("filename") or kwargs.get("name")
     uri = kwargs.get("uri")
+    if kwargs.get("content_base64") is not None:
+        import base64
+        from ...services.task_management_service import add_task_attachment_bytes
+
+        actor_scope, denial = _resolve_internal_mcp_scoped_assertion_actor_scope(
+            kwargs,
+            surface="task_add_attachment",
+            require_actor=True,
+        )
+        if denial:
+            return denial
+        try:
+            encoded = kwargs["content_base64"]
+            if not isinstance(encoded, str) or len(encoded) > 140 * 1024 * 1024:
+                raise ValueError("Attachment exceeds the 100 MiB limit")
+            with _bind_internal_mcp_scoped_assertion_actor(actor_scope):
+                attachment = add_task_attachment_bytes(
+                    task_id,
+                    data=base64.b64decode(encoded, validate=True),
+                    filename=filename,
+                    actor_concept_id=actor_scope.user_concept_id,
+                    media_type=kwargs.get("media_type"),
+                    note=kwargs.get("note"),
+                )
+            return {
+                "success": True,
+                "task_concept_id": task_id,
+                "attachment": attachment,
+            }
+        except (ValueError, InvalidTaskDataError) as exc:
+            return make_error_response("INVALID_DATA", str(exc))
+        except TaskNotFoundError as exc:
+            return make_error_response("NOT_FOUND", str(exc))
+
     if not task_id:
         return make_error_response(
             "MISSING_PARAM",
@@ -44521,6 +44718,63 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             ),
         ),
         MethodDefinition(
+            name="task_list_projects",
+            handler=_task_list_projects,
+            input_schema=Schema(
+                required={},
+                optional={"limit": (int,), "offset": (int,)},
+                allow_unknown=False,
+            ),
+            output_schema=_task_generic_output_schema("projects"),
+            category="read",
+            description="List accessible task projects and their collection references, source identities and current writer.",
+        ),
+        MethodDefinition(
+            name="task_get_source_archive",
+            handler=_task_get_source_archive,
+            input_schema=Schema(
+                required={"task_concept_id": (str,)},
+                optional={
+                    "resource": (str,),
+                    "offset": (int,),
+                    "limit": (int,),
+                    "acting_user_concept_id": (str,),
+                    "namespace": (str,),
+                },
+                allow_unknown=False,
+            ),
+            output_schema=_task_generic_output_schema("source_archive"),
+            category="read",
+            ordinary_turn_trusted_argument_bindings={
+                "acting_user_concept_id": "actor_user_concept_id"
+            },
+            description="Read a checksum-verified retained Jira original or page of original comments, worklogs or changelog, without contacting Jira. Includes original-file download reference; private archive access remains actor-scoped.",
+        ),
+        MethodDefinition(
+            name="task_get_project",
+            handler=_task_get_project,
+            input_schema=Schema(
+                required={"project_concept_id": (str,)},
+                optional={},
+                allow_unknown=False,
+            ),
+            output_schema=_task_generic_output_schema("project"),
+            category="read",
+            description="Get a task project and its accessible task collections.",
+        ),
+        MethodDefinition(
+            name="task_get_collection",
+            handler=_task_get_collection,
+            input_schema=Schema(
+                required={"collection_concept_id": (str,)},
+                optional={},
+                allow_unknown=False,
+            ),
+            output_schema=_task_generic_output_schema("collection"),
+            category="read",
+            description="Get a task collection, its selection semantics and associated projects.",
+        ),
+        MethodDefinition(
             name="task_create",
             handler=_task_create,
             input_schema=Schema(
@@ -44529,6 +44783,8 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "description": str,
                 },
                 optional={
+                    "project_concept_id": (str, type(None)),
+                    "collection_concept_ids": (list, type(None)),
                     "assignee_id": (str, type(None)),
                     "assignee_concept_id": (str, type(None)),
                     "originating_session_id": (str, type(None)),
@@ -44658,6 +44914,8 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             input_schema=Schema(
                 required={},
                 optional={
+                    "project_concept_id": (str, type(None)),
+                    "collection_concept_id": (str, type(None)),
                     "query": (str, type(None)),
                     "status_filter": (str, type(None)),
                     "status": (str, type(None)),
@@ -44721,6 +44979,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             input_schema=Schema(
                 required={},
                 optional={
+                    "preserve_source": (bool,),
                     "issue_keys": (list, type(None)),
                     "jql": (str, type(None)),
                     "max_results": (int, type(None)),
@@ -45136,6 +45395,8 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "filename": (str,),
                     "name": (str,),
                     "uri": (str,),
+                    "content_base64": (str,),
+                    "acting_user_concept_id": (str,),
                     "media_type": (str, type(None)),
                     "mime_type": (str, type(None)),
                     "size_bytes": (int, type(None)),
@@ -45145,7 +45406,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "namespace": (str, type(None)),
                 },
                 allow_unknown=True,
-                description="Add attachment metadata to a task.",
+                description="Upload a task attachment using content_base64, or add an existing URI.",
             ),
             output_schema=task_add_attachment_output_schema,
             category="write",

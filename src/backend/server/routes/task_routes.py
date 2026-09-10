@@ -36,6 +36,7 @@ from ...services.task_management_service import (
     TaskNotFoundError,
     TaskOrganisationScopeAccessError,
     add_task_attachment,
+    add_task_attachment_bytes,
     add_task_comment,
     apply_bulk_task_visibility,
     backfill_jira_migration_bulk_task_collections,
@@ -48,6 +49,8 @@ from ...services.task_management_service import (
     link_tasks,
     list_task_attachments,
     list_task_comments,
+    list_task_worklog,
+    add_task_worklog,
     list_tasks_with_visibility,
     search_tasks,
     unlink_tasks,
@@ -327,6 +330,14 @@ def create_task_route() -> ResponseReturnValue:
         # Get creator from session
         creator_concept_id = _get_current_user_concept_id()
         organisation_concept_id = _get_current_org_concept_id()
+        if data.get("project_concept_id"):
+            from ...services.task_project_service import get_task_project
+
+            try:
+                project = get_task_project(data["project_concept_id"])
+            except ValueError as exc:
+                raise InvalidTaskDataError(str(exc)) from exc
+            organisation_concept_id = project.get("organisation_concept_id")
         parsed_start_date = _parse_optional_datetime(
             data.get("start_date"), "start_date"
         )
@@ -359,6 +370,8 @@ def create_task_route() -> ResponseReturnValue:
             evidence=data.get("evidence"),
             notes=data.get("notes"),
             reference_code=data.get("reference_code"),
+            project_concept_id=data.get("project_concept_id"),
+            collection_concept_ids=data.get("collection_concept_ids"),
         )
 
         return jsonify(result), 201
@@ -732,6 +745,8 @@ def search_tasks_route() -> ResponseReturnValue:
 
         result = search_tasks(
             query=request.args.get("query"),
+            project_concept_id=request.args.get("project_concept_id"),
+            collection_concept_id=request.args.get("collection_concept_id"),
             status_filter=request.args.get("status_filter"),
             statuses=statuses or None,
             task_type_ids=(
@@ -779,8 +794,12 @@ def search_tasks_route() -> ResponseReturnValue:
             updated_from=request.args.get("updated_from"),
             updated_to=request.args.get("updated_to"),
             dependency_state=request.args.get("dependency_state"),
-            organisation_concept_id=request.args.get("organisation_concept_id")
-            or _get_current_org_concept_id(),
+            organisation_concept_id=(
+                None
+                if request.args.get("project_concept_id")
+                else request.args.get("organisation_concept_id")
+                or _get_current_org_concept_id()
+            ),
             bulk_visibility=request.args.get("bulk_visibility")
             or request.args.get("bulk_task_visibility"),
             bulk_collection_ids=_parse_bulk_collection_ids(),
@@ -796,6 +815,42 @@ def search_tasks_route() -> ResponseReturnValue:
     except Exception as e:
         logger.error(f"Unexpected error searching tasks: {e}")
         return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/projects", methods=["GET"])
+def task_projects_route() -> ResponseReturnValue:
+    from ...services.task_project_service import list_task_projects
+
+    projects = list_task_projects(
+        limit=_parse_int_param(request.args.get("limit"), 100),
+        offset=_parse_int_param(request.args.get("offset"), 0),
+    )
+    return jsonify({"projects": projects})
+
+
+@task_bp.route("/projects/<path:project_id>", methods=["GET"])
+def task_project_route(project_id) -> ResponseReturnValue:
+    from ...services.task_project_service import (
+        get_task_project,
+        list_project_collections,
+    )
+
+    try:
+        project = get_task_project(project_id)
+        collections = list_project_collections(project)
+        return jsonify({"project": project, "collections": collections})
+    except ValueError:
+        return jsonify({"error": "Project not found"}), 404
+
+
+@task_bp.route("/collections/<path:collection_id>", methods=["GET"])
+def task_collection_route(collection_id) -> ResponseReturnValue:
+    from ...services.task_project_service import get_task_collection
+
+    try:
+        return jsonify({"collection": get_task_collection(collection_id)})
+    except ValueError:
+        return jsonify({"error": "Collection not found"}), 404
 
 
 @task_bp.route("/my", methods=["GET"])
@@ -1009,6 +1064,24 @@ def list_task_attachments_route(task_concept_id: str) -> ResponseReturnValue:
 def add_task_attachment_route(task_concept_id: str) -> ResponseReturnValue:
     """Add an attachment record to a task."""
     try:
+        if request.content_type and request.content_type.startswith(
+            "multipart/form-data"
+        ):
+            actor_id = _get_current_user_concept_id()
+            if not actor_id:
+                return jsonify({"error": "Not authenticated"}), 401
+            upload = request.files.get("file")
+            if upload is None:
+                raise InvalidTaskDataError("file is required")
+            attachment = add_task_attachment_bytes(
+                task_concept_id,
+                data=upload.stream.read(100 * 1024 * 1024 + 1),
+                filename=upload.filename,
+                media_type=upload.mimetype,
+                actor_concept_id=actor_id,
+                note=request.form.get("note"),
+            )
+            return jsonify(attachment), 201
         data = request.get_json() or {}
         filename = data.get("filename")
         uri = data.get("uri")
@@ -1069,6 +1142,62 @@ def get_task_history_route(task_concept_id: str) -> ResponseReturnValue:
     except Exception as e:
         logger.error(f"Unexpected error getting task history: {e}")
         return jsonify({"error": "Internal server error"}), 500
+
+
+@task_bp.route("/<task_concept_id>/source", methods=["GET"])
+def get_task_source_route(task_concept_id: str) -> ResponseReturnValue:
+    from ...services.jira_source_retention_service import get_retained_task_source
+
+    actor = _get_current_user_concept_id()
+    if not actor:
+        return jsonify({"error": "Authentication required"}), 401
+    try:
+        result = get_retained_task_source(
+            task_concept_id,
+            actor_concept_id=actor,
+            resource=request.args.get("resource"),
+            offset=_parse_int_param(request.args.get("offset"), 0),
+            limit=_parse_int_param(request.args.get("limit"), 100),
+        )
+        return jsonify(result), 200
+    except (ValueError, TaskNotFoundError) as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+@task_bp.route("/<task_concept_id>/worklog", methods=["GET", "POST"])
+def task_worklog_route(task_concept_id: str) -> ResponseReturnValue:
+    try:
+        if request.method == "GET":
+            return (
+                jsonify(
+                    list_task_worklog(
+                        task_concept_id,
+                        limit=_parse_int_param(request.args.get("limit"), 100),
+                        offset=_parse_int_param(request.args.get("offset"), 0),
+                    )
+                ),
+                200,
+            )
+        actor = _get_current_user_concept_id()
+        if not actor:
+            return jsonify({"error": "Authentication required"}), 401
+        data = request.get_json() or {}
+        return (
+            jsonify(
+                add_task_worklog(
+                    task_concept_id,
+                    author_concept_id=actor,
+                    time_spent_minutes=data.get("time_spent_minutes"),
+                    comment=data.get("comment"),
+                    started_at=data.get("started_at"),
+                )
+            ),
+            201,
+        )
+    except TaskNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except InvalidTaskDataError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @task_bp.route("/<task_concept_id>/links", methods=["POST"])

@@ -3,6 +3,8 @@ import base64
 import json
 import re
 import time
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 import anyio
@@ -12,6 +14,10 @@ from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 import mcp.types as types
+
+# The Jira proxy launches this file directly, rather than with python -m.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 # ---------------------------------------------------------
 # Load env
@@ -993,6 +999,22 @@ server = Server("jira-mcp")
 async def list_tools() -> List[types.Tool]:
     return [
         types.Tool(
+            name="jira_get_migration_resource",
+            description="Read a named Jira migration source resource; no arbitrary URLs or writes.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "resource": {"type": "string"},
+                    "identifier": {"type": "string"},
+                    "secondary_id": {"type": "string"},
+                    "start_at": {"type": "integer"},
+                    "max_results": {"type": "integer"},
+                    "next_page_token": {"type": ["string", "null"]},
+                },
+                "required": ["resource"],
+            },
+        ),
+        types.Tool(
             name="jira_search",
             description="Run a JQL query in Jira and return matching issues.",
             inputSchema={
@@ -1114,6 +1136,20 @@ async def list_tools() -> List[types.Tool]:
                     },
                 },
                 "required": ["attachment_id"],
+            },
+        ),
+        types.Tool(
+            name="jira_get_migration_export",
+            description="Download an already-created Jira cloud backup or Automation export from the configured site.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["cloud_backup", "automation"]},
+                    "export_id": {"type": "string"},
+                    "cloud_id": {"type": ["string", "null"]},
+                },
+                "required": ["kind", "export_id"],
+                "additionalProperties": False,
             },
         ),
         types.Tool(
@@ -1359,6 +1395,15 @@ async def call_tool(
         text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
 
+    elif name == "jira_get_migration_resource":
+        from src.backend.integrations.internal_mcp.jira_migration_resources import (
+            resource_request,
+        )
+
+        path, params = resource_request(**arguments)
+        result = _request_json("GET", f"{JIRA_BASE_URL}{path}", params=params)
+        return [types.TextContent(type="text", text=_tool_json(result))]
+
     elif name == "jira_get_issue":
         issue_key = arguments["issue_key"]
         issue_params: Dict[str, Any] | None = None
@@ -1398,6 +1443,26 @@ async def call_tool(
         result = jira_get(f"issue/{issue_key}/watchers")
         text = _tool_json(result)
         return [types.TextContent(type="text", text=text)]
+
+    elif name == "jira_get_migration_export":
+        from src.backend.integrations.internal_mcp.jira_migration_resources import (
+            export_download_path,
+        )
+
+        path = export_download_path(
+            arguments["kind"], arguments["export_id"], arguments.get("cloud_id")
+        )
+        result = _request_bytes(JIRA_BASE_URL + path)
+        content = result.pop("content", None)
+        if isinstance(content, bytes):
+            if "text/html" in str(result.get("content_type", "")):
+                result.update(
+                    success=False, error="export_returned_html_instead_of_source"
+                )
+            else:
+                result["content_base64"] = base64.b64encode(content).decode("ascii")
+                result["size_bytes"] = len(content)
+        return [types.TextContent(type="text", text=_tool_json(result))]
 
     elif name == "jira_get_attachment_content":
         attachment_id = arguments["attachment_id"]

@@ -482,6 +482,15 @@ _SUPPLEMENTAL_SURFACE_ONLY_SPECS: dict[str, dict[str, Any]] = {
         "input_schema": {
             "type": "object",
             "properties": {
+                "project_concept_id": {
+                    "type": "string",
+                    "description": "Project selected from task_list_projects.",
+                },
+                "collection_concept_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Collections associated with the selected project.",
+                },
                 "title": {
                     "type": "string",
                     "description": "Brief task title (required)",

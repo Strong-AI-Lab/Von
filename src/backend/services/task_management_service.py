@@ -1014,7 +1014,18 @@ def _append_task_history_event(
     if touch_updated_at:
         update_doc.setdefault("$set", {})
         update_doc["$set"]["updated_at"] = _now()
-    ConceptsRepository.update_one({"concept_id": task_concept_id}, update_doc)
+    query: Dict[str, Any] = {"concept_id": task_concept_id}
+    signature = (details or {}).get("import_signature")
+    if signature:
+        query[f"metadata.{TASK_METADATA_KEY_HISTORY}"] = {
+            "$not": {
+                "$elemMatch": {
+                    "event_type": event_type,
+                    "details.import_signature": signature,
+                }
+            }
+        }
+    ConceptsRepository.update_one(query, update_doc)
     return event
 
 
@@ -1023,14 +1034,36 @@ def _append_task_metadata_entry(
     task_concept_id: str,
     metadata_key: str,
     entry: Dict[str, Any],
-) -> None:
-    ConceptsRepository.update_one(
-        {"concept_id": task_concept_id},
+) -> Dict[str, Any]:
+    query: Dict[str, Any] = {"concept_id": task_concept_id}
+    source = entry.get("source") or {}
+    source_match = None
+    if source.get("source_system") and source.get("external_id"):
+        source_match = {
+            "source.source_system": source["source_system"],
+            "source.external_id": source["external_id"],
+        }
+        query[f"metadata.{metadata_key}"] = {"$not": {"$elemMatch": source_match}}
+    result = ConceptsRepository.update_one(
+        query,
         {
             "$push": {f"metadata.{metadata_key}": entry},
             "$set": {"updated_at": _now()},
         },
     )
+    if source_match and getattr(result, "matched_count", 1) == 0:
+        _, doc = _get_task_doc(task_concept_id)
+        for existing in _list_metadata_items(doc, metadata_key):
+            previous_source = existing.get("source") or {}
+            if all(
+                previous_source.get(key.split(".")[-1]) == value
+                for key, value in source_match.items()
+            ):
+                return existing
+        raise TaskManagementError(
+            "Imported activity was not stored or found on read-back"
+        )
+    return entry
 
 
 def _replace_task_metadata_list(
@@ -1268,6 +1301,10 @@ def create_task(
     reference_code: str | None = None,
     agent_creation_fingerprint: str | None = None,
     agent_creation_request_id: str | None = None,
+    project_concept_id: str | None = None,
+    collection_concept_ids: list[str] | None = None,
+    visibility_owner_concept_id: str | None = None,
+    initial_external_references: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Create a new task as a Vontology concept.
 
@@ -1413,6 +1450,15 @@ def create_task(
 
     now = _now()
 
+    if project_concept_id or collection_concept_ids:
+        from .task_project_service import validate_task_membership
+
+        project, collection_concept_ids = validate_task_membership(
+            project_concept_id, collection_concept_ids
+        )
+        if project and organisation_concept_id is None:
+            organisation_concept_id = project.get("organisation_concept_id")
+
     # Build relationships
     relationships: Dict[str, Any] = {
         "is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID, *canonical_task_type_ids],
@@ -1437,6 +1483,10 @@ def create_task(
         visible_to_users.append(assignee_concept_id)
     if report_to_concept_id and report_to_concept_id not in visible_to_users:
         visible_to_users.append(report_to_concept_id)
+    if visibility_owner_concept_id:
+        # Import provenance and assignment do not confer access to a private
+        # source corpus. Used by the trusted importer, not exposed as a UI field.
+        visible_to_users = [visibility_owner_concept_id]
     if visible_to_users:
         relationships = set_specific_to_user_values(relationships, visible_to_users)
 
@@ -1481,10 +1531,14 @@ def create_task(
             TASK_METADATA_KEY_ATTACHMENTS: [],
             TASK_METADATA_KEY_WORKLOG: [],
             TASK_METADATA_KEY_HISTORY: [],
-            TASK_METADATA_KEY_EXTERNAL_REFERENCES: {},
+            TASK_METADATA_KEY_EXTERNAL_REFERENCES: dict(
+                initial_external_references or {}
+            ),
             TASK_METADATA_KEY_BULK_TASK_COLLECTIONS: [],
             TASK_METADATA_KEY_CREATION_FINGERPRINT: agent_creation_fingerprint,
             TASK_METADATA_KEY_CREATION_REQUEST_ID: agent_creation_request_id,
+            "project_concept_id": project_concept_id,
+            "collection_concept_ids": collection_concept_ids or [],
         },
     }
 
@@ -1561,6 +1615,8 @@ def create_task(
     result = {
         "task_concept_id": task_concept_id,
         "title": title,
+        "project_concept_id": project_concept_id,
+        "collection_concept_ids": collection_concept_ids or [],
         "description": description,
         "status": TASK_STATUS_PENDING,
         "priority": priority,
@@ -2117,6 +2173,8 @@ def _build_task_response(
         "worklog_total_minutes": worklog_total_minutes,
         "history_count": len(history),
         "external_references": external_references,
+        "project_concept_id": metadata.get("project_concept_id"),
+        "collection_concept_ids": metadata.get("collection_concept_ids", []),
         "bulk_task_collections": bulk_task_collections,
         "hidden_by_default_bulk_task_collections": (
             hidden_by_default_bulk_task_collections
@@ -2285,7 +2343,9 @@ def update_task_status(
     return updated_task
 
 
-def assign_task(task_concept_id: str, assignee_concept_id: str) -> Dict[str, Any]:
+def assign_task(
+    task_concept_id: str, assignee_concept_id: str, *, update_visibility: bool = True
+) -> Dict[str, Any]:
     """Assign or reassign a task to a person or organisation.
 
     Args:
@@ -2331,14 +2391,16 @@ def assign_task(task_concept_id: str, assignee_concept_id: str) -> Dict[str, Any
         action="add",
     )
 
-    # Also add new assignee to the canonical user visibility predicate.
-    for predicate in SPECIFIC_TO_USER_PREDICATES_WRITE:
-        ConceptsRepository.mutate_relationship_edge(
-            source_id=task_concept_id,
-            kind=predicate,
-            target_id=assignee_concept_id,
-            action="add",
-        )
+    # Source assignment records do not grant the source participant new access.
+    if update_visibility:
+        # Also add new assignee to the canonical user visibility predicate.
+        for predicate in SPECIFIC_TO_USER_PREDICATES_WRITE:
+            ConceptsRepository.mutate_relationship_edge(
+                source_id=task_concept_id,
+                kind=predicate,
+                target_id=assignee_concept_id,
+                action="add",
+            )
 
     # Update timestamp
     now = _now()
@@ -3299,6 +3361,8 @@ def _actor_scoped_task_query_candidates(
 def search_tasks(
     *,
     query: str | None = None,
+    project_concept_id: str | None = None,
+    collection_concept_id: str | None = None,
     status_filter: str | None = None,
     statuses: list[str] | None = None,
     task_type_ids: list[str] | str | None = None,
@@ -3347,6 +3411,14 @@ def search_tasks(
     query_filter: Dict[str, Any] = {
         "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID
     }
+    if project_concept_id:
+        query_filter["metadata.project_concept_id"] = project_concept_id
+    if collection_concept_id:
+        from .task_project_service import collection_task_query
+
+        query_filter.setdefault("$and", []).append(
+            collection_task_query(collection_concept_id)
+        )
     if organisation_concept_id:
         org_id = _normalise_optional_concept_id(organisation_concept_id)
         if not org_id:
@@ -3977,7 +4049,11 @@ def create_subtask(
     organisation_concept_id: str | None = None,
     originating_session_id: str | None = None,
 ) -> Dict[str, Any]:
-    parent_task_concept_id, _ = _get_task_doc(parent_task_concept_id)
+    parent_task_concept_id, parent_doc = _get_task_doc(parent_task_concept_id)
+    parent_metadata = parent_doc.get("metadata") or {}
+    project_id = parent_metadata.get("project_concept_id")
+    if project_id and organisation_concept_id is None:
+        organisation_concept_id = parent_metadata.get(TASK_METADATA_KEY_ORGANISATION)
     created = create_task(
         title=title,
         description=description,
@@ -3989,6 +4065,8 @@ def create_subtask(
         priority=priority,
         organisation_concept_id=organisation_concept_id,
         originating_session_id=originating_session_id,
+        project_concept_id=project_id,
+        collection_concept_ids=parent_metadata.get("collection_concept_ids") or [],
     )
     subtask_id = str(created.get("task_concept_id"))
     subtask = set_task_parent(
@@ -4223,11 +4301,13 @@ def add_task_comment(
     }
     if isinstance(source, Mapping):
         comment["source"] = dict(source)
-    _append_task_metadata_entry(
+    stored_entry = _append_task_metadata_entry(
         task_concept_id=task_concept_id,
         metadata_key=TASK_METADATA_KEY_COMMENTS,
         entry=comment,
     )
+    if stored_entry != comment:
+        return stored_entry
     try:
         _append_task_history_event(
             task_concept_id=task_concept_id,
@@ -4311,6 +4391,79 @@ def find_task_comment_by_effect_fingerprint(
     return None
 
 
+def add_task_attachment_bytes(
+    task_concept_id: str,
+    *,
+    data: bytes,
+    filename: str,
+    actor_concept_id: str,
+    media_type: str | None = None,
+    note: str | None = None,
+) -> Dict[str, Any]:
+    """Store an attachment in Von and link its verified file-copy receipt."""
+    from urllib.parse import quote
+    from .computer_file_copy_service import (
+        import_bytes_file_copy,
+        fetch_file_copy_bytes,
+    )
+
+    task_concept_id, doc = _get_task_doc(task_concept_id)
+    if not actor_concept_id:
+        raise InvalidTaskDataError("An authenticated actor is required")
+    if not isinstance(data, bytes) or not data or len(data) > 100 * 1024 * 1024:
+        raise InvalidTaskDataError("Attachment must contain 1 byte to 100 MiB")
+    if not isinstance(filename, str) or not filename.strip():
+        raise InvalidTaskDataError("filename is required")
+    org_id = doc.get("metadata", {}).get(TASK_METADATA_KEY_ORGANISATION)
+    digest = hashlib.sha256(data).hexdigest()
+    scope = hashlib.sha256(
+        f"{actor_concept_id}:{task_concept_id}".encode()
+    ).hexdigest()[:24]
+    receipt = import_bytes_file_copy(
+        data=data,
+        user_concept_id=actor_concept_id,
+        organisation_concept_id=org_id,
+        original_filename=filename.strip(),
+        content_type=media_type,
+        source_system="von_task_attachment",
+        source_identifier=task_concept_id,
+        blob_key=f"task-attachments/{scope}/{digest}",
+        metadata_in_attributes=True,
+        infer_typing=False,
+        maintain_relationship_inverses=False,
+        visibility_scope_mode="user_org_default" if org_id else "user_only_default",
+    )
+    if not receipt.get("success"):
+        raise TaskManagementError("Attachment file was not stored")
+    file_id = receipt["concept_id"]
+    readback = fetch_file_copy_bytes(
+        file_copy_concept_id=file_id,
+        user_concept_id=actor_concept_id,
+        organisation_concept_id=org_id,
+        allow_large=True,
+    )
+    if (
+        not readback.get("success")
+        or hashlib.sha256(readback["data"]).hexdigest() != digest
+    ):
+        raise TaskManagementError("Attachment file read-back failed")
+    return add_task_attachment(
+        task_concept_id,
+        filename=filename,
+        uri=f"/von/api/files/{quote(file_id, safe='')}/download",
+        media_type=media_type,
+        size_bytes=len(data),
+        added_by_concept_id=actor_concept_id,
+        note=note,
+        file_copy_concept_id=file_id,
+        source={
+            "source_system": "von_task_attachment",
+            "external_id": digest,
+            "sha256": digest,
+        },
+    )
+
+
 def add_task_attachment(
     task_concept_id: str,
     *,
@@ -4350,11 +4503,13 @@ def add_task_attachment(
     )
     if isinstance(normalised_file_copy_concept_id, str):
         attachment["file_copy_concept_id"] = normalised_file_copy_concept_id
-    _append_task_metadata_entry(
+    stored_entry = _append_task_metadata_entry(
         task_concept_id=task_concept_id,
         metadata_key=TASK_METADATA_KEY_ATTACHMENTS,
         entry=attachment,
     )
+    if stored_entry != attachment:
+        return stored_entry
     try:
         _append_task_history_event(
             task_concept_id=task_concept_id,
@@ -4429,11 +4584,13 @@ def add_task_worklog(
     }
     if isinstance(source, Mapping):
         entry["source"] = dict(source)
-    _append_task_metadata_entry(
+    stored_entry = _append_task_metadata_entry(
         task_concept_id=task_concept_id,
         metadata_key=TASK_METADATA_KEY_WORKLOG,
         entry=entry,
     )
+    if stored_entry != entry:
+        return stored_entry
     try:
         _append_task_history_event(
             task_concept_id=task_concept_id,
@@ -4539,6 +4696,7 @@ def update_task_fields(
     *,
     fields: Dict[str, Any],
     actor_concept_id: str | None = None,
+    preserve_visibility: bool = False,
 ) -> Dict[str, Any]:
     task_concept_id = _normalise_task_concept_id(task_concept_id)
     _, task_doc = _get_task_doc(task_concept_id)
@@ -4547,6 +4705,30 @@ def update_task_fields(
         raise InvalidTaskDataError("fields must be a non-empty dict")
 
     existing_task = _build_task_response(task_doc)
+    membership = None
+    if "project_concept_id" in fields or "collection_concept_ids" in fields:
+        from .task_project_service import validate_task_membership
+
+        project_id = fields.get(
+            "project_concept_id", existing_task.get("project_concept_id")
+        )
+        collection_ids = fields.get(
+            "collection_concept_ids", existing_task.get("collection_concept_ids", [])
+        )
+        if not isinstance(collection_ids, list) or any(
+            not isinstance(value, str) for value in collection_ids
+        ):
+            raise InvalidTaskDataError(
+                "collection_concept_ids must be a list of concept IDs"
+            )
+        try:
+            _, collection_ids = validate_task_membership(project_id, collection_ids)
+        except ValueError as exc:
+            raise InvalidTaskDataError(str(exc)) from exc
+        membership = {
+            "project_concept_id": project_id,
+            "collection_concept_ids": collection_ids,
+        }
     # An explicit reference is validated before any other requested edits.
     product_field_present = "current_work_product_concept_id" in fields
     product_id = None
@@ -4664,7 +4846,10 @@ def update_task_fields(
             unassign_task(task_concept_id)
             changed_fields.append("assignee_concept_id")
         else:
-            assign_task(task_concept_id, str(raw_assignee))
+            if preserve_visibility:
+                assign_task(task_concept_id, str(raw_assignee), update_visibility=False)
+            else:
+                assign_task(task_concept_id, str(raw_assignee))
             changed_fields.append("assignee_concept_id")
 
     created_by_field_present = (
@@ -5150,10 +5335,19 @@ def update_task_fields(
             "parent_task_concept_id",
             "epic_task_concept_id",
             "bulk_task_collections",
+            "project_concept_id",
+            "collection_concept_ids",
         }
     )
     if unknown_keys:
         warnings.append(f"Ignored unsupported fields: {unknown_keys}")
+
+    if membership is not None:
+        ConceptsRepository.update_one(
+            {"concept_id": task_concept_id},
+            {"$set": {f"metadata.{key}": value for key, value in membership.items()}},
+        )
+        changed_fields.extend(membership)
 
     if changed_fields:
         ConceptsRepository.update_one(
@@ -5208,7 +5402,14 @@ def find_task_by_external_reference(
 
     query_base: Dict[str, Any] = {
         "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID,
-        f"metadata.{TASK_METADATA_KEY_EXTERNAL_REFERENCES}.{source_key}.external_id": external_value,
+        "$or": [
+            {
+                f"metadata.{TASK_METADATA_KEY_EXTERNAL_REFERENCES}.{source_key}.external_id": external_value
+            },
+            {
+                f"metadata.{TASK_METADATA_KEY_EXTERNAL_REFERENCES}.{source_key}.previous_issue_keys": external_value
+            },
+        ],
     }
     doc: Dict[str, Any] | None = None
     if organisation_concept_id:

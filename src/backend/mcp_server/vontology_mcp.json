@@ -1494,6 +1494,17 @@
             "inputSchema": {
                 "type": "object",
                 "properties": {
+                    "project_concept_id": {
+                        "type": "string",
+                        "description": "Project selected from task_list_projects."
+                    },
+                    "collection_concept_ids": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Collections associated with the selected project."
+                    },
                     "title": {
                         "type": "string",
                         "description": "Brief task title (required)"
@@ -5859,6 +5870,1143 @@
                 "required": [],
                 "additionalProperties": true,
                 "description": "skill_catalogue_sync input: optional include_default_roots (defaults true), optional per-scope root overrides, and optional dry_run to preview sync without mutating Vontology."
+            }
+        },
+        {
+            "name": "task_add_attachment",
+            "description": "Record task attachment metadata (filename/URI/media type/size) in a Jira-like attachment operation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string"
+                    },
+                    "task_id": {
+                        "type": "string"
+                    },
+                    "filename": {
+                        "type": "string"
+                    },
+                    "name": {
+                        "type": "string"
+                    },
+                    "uri": {
+                        "type": "string"
+                    },
+                    "content_base64": {
+                        "type": "string"
+                    },
+                    "acting_user_concept_id": {
+                        "type": "string"
+                    },
+                    "media_type": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "mime_type": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "size_bytes": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "note": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "added_by_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "author_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Upload a task attachment using content_base64, or add an existing URI."
+            }
+        },
+        {
+            "name": "task_add_comment",
+            "description": "Add a retry-safe comment to a Von task created by or assigned to the authenticated actor in the same organisation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string"
+                    },
+                    "body": {
+                        "type": "string"
+                    },
+                    "task_id": {
+                        "type": "string"
+                    },
+                    "comment": {
+                        "type": "string"
+                    },
+                    "author_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "acting_user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "request_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "task_concept_id",
+                    "body"
+                ],
+                "additionalProperties": true,
+                "description": "Add an idempotent comment to an actor-owned task.",
+                "x-von-argument-aliases": {
+                    "task_id": "task_concept_id",
+                    "comment": "body"
+                }
+            }
+        },
+        {
+            "name": "task_add_worklog",
+            "description": "Add a task worklog entry for effort tracking.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string"
+                    },
+                    "task_id": {
+                        "type": "string"
+                    },
+                    "time_spent_minutes": {
+                        "type": "integer"
+                    },
+                    "comment": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "started_at": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "author_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "added_by_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Add a worklog entry for a task."
+            }
+        },
+        {
+            "name": "task_create_subtask",
+            "description": "Create a subtask under an existing parent task using the same core task creation pathway.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "parent_task_concept_id": {
+                        "type": "string"
+                    },
+                    "title": {
+                        "type": "string"
+                    },
+                    "description": {
+                        "type": "string"
+                    },
+                    "assignee_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "assignee_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "originating_session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "session_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "created_by_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "critical"
+                        ]
+                    },
+                    "start_date": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "due_date": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "epic_task_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "parent_task_concept_id",
+                    "title",
+                    "description"
+                ],
+                "additionalProperties": true,
+                "description": "Create a task and attach it as a subtask of a parent task.",
+                "x-von-scalar-source-fields": {
+                    "parent_task_concept_id": [
+                        "task_concept_id",
+                        "concept_id",
+                        "task_id",
+                        "id"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "task_get",
+            "description": "Retrieve a Von task by its concept_id. Returns title, description, status, priority, assignee, and other metadata.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string"
+                    },
+                    "task_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Get a task by its concept_id.",
+                "x-von-scalar-source-fields": {
+                    "task_concept_id": [
+                        "task_concept_id",
+                        "concept_id",
+                        "task_id",
+                        "id"
+                    ],
+                    "task_id": [
+                        "task_concept_id",
+                        "concept_id",
+                        "task_id",
+                        "id"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "task_get_collection",
+            "description": "Get a task collection, its selection semantics and associated projects.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "collection_concept_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "collection_concept_id"
+                ],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "task_get_history",
+            "description": "Return task history/audit timeline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string"
+                    },
+                    "task_id": {
+                        "type": "string"
+                    },
+                    "limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "offset": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Get task audit history/timeline entries."
+            }
+        },
+        {
+            "name": "task_get_project",
+            "description": "Get a task project and its accessible task collections.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_concept_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "project_concept_id"
+                ],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "task_get_source_archive",
+            "description": "Read a checksum-verified retained Jira original or page of original comments, worklogs or changelog, without contacting Jira. Includes original-file download reference; private archive access remains actor-scoped.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string"
+                    },
+                    "resource": {
+                        "type": "string"
+                    },
+                    "offset": {
+                        "type": "integer"
+                    },
+                    "limit": {
+                        "type": "integer"
+                    },
+                    "acting_user_concept_id": {
+                        "type": "string"
+                    },
+                    "namespace": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "task_concept_id"
+                ],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "task_get_transitions",
+            "description": "Return available task status transitions (Jira-style), including transition IDs and resulting statuses.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string"
+                    },
+                    "task_id": {
+                        "type": "string"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "List available transitions for the task's current status.",
+                "x-von-scalar-source-fields": {
+                    "task_concept_id": [
+                        "task_concept_id",
+                        "concept_id",
+                        "task_id",
+                        "id"
+                    ],
+                    "task_id": [
+                        "task_concept_id",
+                        "concept_id",
+                        "task_id",
+                        "id"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "task_link",
+            "description": "Create typed task dependencies (e.g., depends_on, blocks, relates_to) for Jira-like task graph management.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_task_concept_id": {
+                        "type": "string"
+                    },
+                    "target_task_concept_id": {
+                        "type": "string"
+                    },
+                    "link_type": {
+                        "type": "string"
+                    },
+                    "source_task_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "target_task_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "actor_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "source_task_concept_id",
+                    "target_task_concept_id",
+                    "link_type"
+                ],
+                "additionalProperties": true,
+                "description": "Create a typed dependency link between two tasks."
+            }
+        },
+        {
+            "name": "task_list_attachments",
+            "description": "List task attachments with offset/limit pagination.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string"
+                    },
+                    "task_id": {
+                        "type": "string"
+                    },
+                    "limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "offset": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "List attachments recorded on a task."
+            }
+        },
+        {
+            "name": "task_list_comments",
+            "description": "List task comments with offset/limit pagination.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string"
+                    },
+                    "task_id": {
+                        "type": "string"
+                    },
+                    "limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "offset": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "List comments for a task."
+            }
+        },
+        {
+            "name": "task_list_projects",
+            "description": "List accessible task projects and their collection references, source identities and current writer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer"
+                    },
+                    "offset": {
+                        "type": "integer"
+                    }
+                },
+                "required": [],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "task_list_worklog",
+            "description": "List task worklog entries with aggregate effort totals.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string"
+                    },
+                    "task_id": {
+                        "type": "string"
+                    },
+                    "limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "offset": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "List task worklog entries."
+            }
+        },
+        {
+            "name": "task_search",
+            "description": "Search Von's internal task store with rich filters (status, assignee, creator, report-to, labels, planning metadata, category/source semantics, hierarchy, date ranges, and dependency state).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "collection_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "query": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "status_filter": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "status": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "statuses": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "task_type_ids": {
+                        "type": [
+                            "array",
+                            "string",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "task_type_id": {
+                        "type": [
+                            "array",
+                            "string",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "task_source_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "task_source_ids": {
+                        "type": [
+                            "array",
+                            "string",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "source_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "assignee_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "assignee_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "created_by_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "creator_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "report_to_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "reports_to_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "labels": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "components": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "fix_versions": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "fixVersions": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "sprint_values": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "sprints": {
+                        "type": [
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "backlog_rank": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "parent_task_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "epic_task_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "has_parent": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "has_subtasks": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "has_epic": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "has_backlog_rank": {
+                        "type": [
+                            "boolean",
+                            "null"
+                        ]
+                    },
+                    "start_from": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "start_to": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "due_from": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "due_to": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "created_from": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "created_to": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "updated_from": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "updated_to": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "dependency_state": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "bulk_visibility": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "bulk_task_visibility": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "bulk_collection_id": {
+                        "type": [
+                            "string",
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "bulk_collection_ids": {
+                        "type": [
+                            "string",
+                            "array",
+                            "null"
+                        ],
+                        "items": {}
+                    },
+                    "limit": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    },
+                    "offset": {
+                        "type": [
+                            "integer",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Search Von internal tasks with rich filtering."
+            }
+        },
+        {
+            "name": "task_set_parent",
+            "description": "Set or clear a task's parent. Supports parent reassignment and hierarchy cycle protection.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string"
+                    },
+                    "task_id": {
+                        "type": "string"
+                    },
+                    "parent_task_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "actor_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Set or clear parent task relationship for hierarchy management.",
+                "x-von-scalar-source-fields": {
+                    "task_concept_id": [
+                        "task_concept_id",
+                        "concept_id",
+                        "task_id",
+                        "id"
+                    ],
+                    "parent_task_concept_id": [
+                        "task_concept_id",
+                        "concept_id",
+                        "task_id",
+                        "id"
+                    ],
+                    "task_id": [
+                        "task_concept_id",
+                        "concept_id",
+                        "task_id",
+                        "id"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "task_transition",
+            "description": "Apply a status transition to a task (Jira-style transition operation). Use task_get_transitions first for valid transition IDs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string"
+                    },
+                    "task_id": {
+                        "type": "string"
+                    },
+                    "transition_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "to_status": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "actor_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Transition a task by transition_id or directly by to_status.",
+                "x-von-scalar-source-fields": {
+                    "task_concept_id": [
+                        "task_concept_id",
+                        "concept_id",
+                        "task_id",
+                        "id"
+                    ],
+                    "task_id": [
+                        "task_concept_id",
+                        "concept_id",
+                        "task_id",
+                        "id"
+                    ]
+                }
+            }
+        },
+        {
+            "name": "task_unlink",
+            "description": "Remove typed task dependency links.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_task_concept_id": {
+                        "type": "string"
+                    },
+                    "target_task_concept_id": {
+                        "type": "string"
+                    },
+                    "link_type": {
+                        "type": "string"
+                    },
+                    "source_task_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "target_task_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "actor_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    }
+                },
+                "required": [
+                    "source_task_concept_id",
+                    "target_task_concept_id",
+                    "link_type"
+                ],
+                "additionalProperties": true,
+                "description": "Remove a typed dependency link between two tasks."
+            }
+        },
+        {
+            "name": "task_update_fields",
+            "description": "Revise an existing task and its next checkpoint, evidence, or notes. Attach the canonical current work product with current_work_product_concept_id so it opens from Tasks; its readable body belongs in the product's actor-effective hasContent. For a continuing responsibility delegated to Von, the creator can assign it to #V#von_system and set report_to_concept_id to themselves. This preserves the task and does not launch execution or a schedule. Ordinary chat edits only tasks created by or assigned to the authenticated actor in the same organisation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_concept_id": {
+                        "type": "string"
+                    },
+                    "task_id": {
+                        "type": "string"
+                    },
+                    "fields": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "actor_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "namespace": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "acting_user_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "organisation_concept_id": {
+                        "type": [
+                            "string",
+                            "null"
+                        ]
+                    },
+                    "actor_bound_continuation": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [],
+                "additionalProperties": true,
+                "description": "Update multiple task fields in one operation. Supported fields: status, assignee_concept_id, created_by_concept_id, title, description, priority, task_type_ids, task_source_id, report_to_concept_id, task_role, next_checkpoint, progress_signal, evidence, notes, reference_code, start_date, due_date, labels, components, fix_versions, sprint_values, backlog_rank, reporter_concept_id, watcher_concept_ids, parent_task_concept_id, epic_task_concept_id, current_work_product_concept_id. For ordinary continuation use title, description, status, priority, task_type_ids, task_role, next_checkpoint, progress_signal, evidence, notes, start_date, due_date, current_work_product_concept_id, assignee_concept_id (self or #V#von_system, creator only), and report_to_concept_id (self).",
+                "x-von-scalar-source-fields": {
+                    "task_concept_id": [
+                        "task_concept_id",
+                        "concept_id",
+                        "task_id",
+                        "id"
+                    ],
+                    "task_id": [
+                        "task_concept_id",
+                        "concept_id",
+                        "task_id",
+                        "id"
+                    ]
+                }
             }
         },
         {

@@ -19,6 +19,7 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
+import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence
 
@@ -88,6 +89,8 @@ class JiraTaskMigrationOptions:
     report_path: Path | None = DEFAULT_JIRA_TASK_MIGRATION_REPORT_PATH
     updated_within_hours: int | None = None
     include_done: bool = False
+    preserve_source: bool = False
+    resume: bool = False
     min_issue_number: int | None = None
     max_issue_number: int | None = None
 
@@ -105,7 +108,6 @@ def build_default_jira_task_migration_jql(
     )
     clauses = [
         f"project = {project_key_clean}",
-        "issuetype in (Task, Subtask, Epic)",
     ]
     if not include_done:
         clauses.append("statusCategory != Done")
@@ -200,6 +202,8 @@ def normalise_jira_task_migration_options(
         include_done=bool(options.include_done),
         min_issue_number=min_issue_number,
         max_issue_number=max_issue_number,
+        preserve_source=bool(options.preserve_source),
+        resume=bool(options.resume),
     )
 
 
@@ -220,6 +224,7 @@ async def discover_jira_issue_docs(
     proxy = await get_jira_proxy()
     next_page_token: str | None = None
     issue_docs: list[dict[str, Any]] = []
+    seen_tokens: set[str] = set()
 
     while True:
         payload = await proxy.search(
@@ -232,11 +237,20 @@ async def discover_jira_issue_docs(
         next_page_token = (
             payload.get("nextPageToken") if isinstance(payload, Mapping) else None
         )
-        if not isinstance(raw_issues, list) or not raw_issues:
-            break
+        if not isinstance(raw_issues, list) or payload.get("success") is False:
+            raise RuntimeError(
+                "Jira discovery failed; an error is not an empty project"
+            )
+        if not raw_issues and next_page_token:
+            raise RuntimeError("Jira discovery returned an empty non-terminal page")
         issue_docs.extend(item for item in raw_issues if isinstance(item, dict))
         if not isinstance(next_page_token, str) or not next_page_token.strip():
+            if payload.get("isLast") is False:
+                raise RuntimeError("Jira discovery omitted the next page token")
             break
+        if next_page_token in seen_tokens:
+            raise RuntimeError("Jira discovery pagination stalled")
+        seen_tokens.add(next_page_token)
 
     return issue_docs
 
@@ -298,13 +312,17 @@ def _extract_missing_targets(
 
 def _build_gateway() -> InternalMCPGateway:
     from ..integrations.internal_mcp import build_default_catalogue
-    from ..integrations.internal_mcp.gateway import InternalMCPGateway
+    from ..integrations.internal_mcp.gateway import (
+        InternalMCPGateway,
+        internal_mcp_actor_context_is_trusted_local_operator,
+    )
     from ..integrations.internal_mcp.transport import InternalMCPTransport
 
     return InternalMCPGateway(
         catalogue=build_default_catalogue(),
         transport=InternalMCPTransport(),
         enabled=True,
+        trusted_actor_payload_fallback=internal_mcp_actor_context_is_trusted_local_operator(),
     )
 
 
@@ -317,12 +335,52 @@ def _run_import_batches(
 ) -> dict[str, Any]:
     reports: list[dict[str, Any]] = []
     aggregate_summary: Counter[str] = Counter()
+    checkpoint = (
+        options.report_path.with_suffix(f".{run_label}.checkpoint.json")
+        if options.report_path is not None
+        else None
+    )
+    signature_payload = {
+        "options": {
+            key: value
+            for key, value in _options_to_report_dict(options).items()
+            if key not in {"resume", "report_path"}
+        },
+        "source_versions": [
+            (item.get("id"), item.get("key"), item.get("fields", {}).get("updated"))
+            for item in issue_docs
+        ],
+        "run_label": run_label,
+    }
+    signature = hashlib.sha256(
+        json.dumps(signature_payload, sort_keys=True).encode()
+    ).hexdigest()
+    if options.resume and checkpoint and checkpoint.exists():
+        saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+        if saved.get("signature") != signature:
+            raise ValueError(
+                "Migration checkpoint scope/source changed; start a fresh run for the new delta"
+            )
+        reports = saved.get("completed_batches", [])
+        for report in reports:
+            _merge_counter(aggregate_summary, report.get("summary"))
+    completed_count = len(reports)
+    batch_index = 0
 
-    for pass_index in range(options.passes):
+    # The historical extra pass only repaired cross-batch relationships. Full
+    # source capture is followed by that same repair using the retained rows.
+    capture_passes = 1 if options.preserve_source else options.passes
+    for pass_index in range(capture_passes):
         for batch in _iter_batches(issue_docs, options.batch_size):
+            batch_index += 1
+            if batch_index <= completed_count:
+                continue
             payload = {
-                "issue_keys": [dict(item) for item in batch if isinstance(item, Mapping)],
+                "issue_keys": [
+                    dict(item) for item in batch if isinstance(item, Mapping)
+                ],
                 "dry_run": options.dry_run,
+                "preserve_source": options.preserve_source,
                 "update_existing": True,
                 "include_watchers": False,
                 "namespace": options.namespace,
@@ -338,16 +396,51 @@ def _run_import_batches(
                 ),
             }
             result = gateway.invoke("task_import_jira_issues", payload).payload
-            if not isinstance(result, dict) or result.get("success") is not True:
+            succeeded = isinstance(result, dict) and result.get("success") is True
+            if succeeded:
+                reports.append(result)
+                _merge_counter(aggregate_summary, result.get("summary"))
+            if checkpoint is not None:
+                write_jira_task_migration_report(
+                    {
+                        "signature": signature,
+                        "run_label": run_label,
+                        "pass_index": pass_index,
+                        "completed_batches": reports,
+                        "last_batch": result,
+                    },
+                    report_path=checkpoint,
+                )
+            if not succeeded:
                 raise RuntimeError(
                     f"{run_label} pass {pass_index + 1} failed: {result}"
                 )
-            reports.append(result)
-            _merge_counter(aggregate_summary, result.get("summary"))
 
+    relation_repair = None
+    if options.preserve_source and reports:
+        from .jira_task_import_service import repair_jira_task_relations
+
+        rows = [row for report in reports for row in report.get("issues", [])]
+        relation_repair = repair_jira_task_relations(
+            rows,
+            actor_concept_id=options.actor_concept_id,
+            organisation_concept_id=options.organisation_concept_id,
+            dry_run=options.dry_run,
+            only_unresolved=True,
+        )
+        relations = [
+            relation for row in rows for relation in row.get("relation_results", [])
+        ]
+        aggregate_summary["mapped_relations"] = sum(
+            row.get("status") in {"mapped", "would_map"} for row in relations
+        )
+        aggregate_summary["dropped_relations"] = sum(
+            row.get("status") == "dropped" for row in relations
+        )
     return {
         "run_label": run_label,
-        "passes": options.passes,
+        "passes": capture_passes,
+        "relation_repair": relation_repair,
         "batch_size": options.batch_size,
         "input_issue_count": len(issue_docs),
         "batch_count": len(reports),
@@ -407,6 +500,8 @@ def _options_to_report_dict(
         "report_path": str(options.report_path) if options.report_path else None,
         "updated_within_hours": options.updated_within_hours,
         "include_done": options.include_done,
+        "preserve_source": options.preserve_source,
+        "resume": options.resume,
         "min_issue_number": options.min_issue_number,
         "max_issue_number": options.max_issue_number,
     }
@@ -418,7 +513,9 @@ def write_jira_task_migration_report(
     report_path: Path,
 ) -> Path:
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    temporary = report_path.with_suffix(report_path.suffix + ".tmp")
+    temporary.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    temporary.replace(report_path)
     return report_path
 
 
@@ -477,7 +574,11 @@ async def run_jira_task_migration(
         ]
 
     selection_mode = "explicit_jql"
-    if not options.include_done and options.updated_within_hours is None and not options.only_missing:
+    if (
+        not options.include_done
+        and options.updated_within_hours is None
+        and not options.only_missing
+    ):
         selection_mode = "current_scope"
     if options.updated_within_hours is not None:
         selection_mode = "incremental_recent_window"
@@ -511,9 +612,7 @@ async def run_jira_task_migration(
         options=options,
         run_label="current_scope",
     )
-    report["current_scope"] = {
-        key: value for key, value in main_run.items() if key != "reports"
-    }
+    report["current_scope"] = {key: value for key, value in main_run.items()}
 
     referenced_target_keys = main_run.get("missing_target_issue_keys") or []
     if options.import_referenced_targets and referenced_target_keys:
