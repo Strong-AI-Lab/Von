@@ -1509,6 +1509,13 @@
                 if (response.ok) {
                     console.log('Logout successful');
 
+                    const logoutResult = await response.json();
+                    if (logoutResult.redirect_url === '/cdn-cgi/access/logout') {
+                        clearIdentityScopeMirrors();
+                        getSettingsHostWindow().location.assign('/cdn-cgi/access/logout');
+                        return;
+                    }
+
                     clearIdentityScopeMirrors();
                     await updateAuthenticationDisplay({ authenticated: false });
 

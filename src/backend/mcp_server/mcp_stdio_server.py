@@ -1061,6 +1061,13 @@ _TRUSTED_LOCAL_OPERATOR_DIAGNOSTIC_READ_TOOLS = frozenset(
     }
 )
 
+# Creation already has project and explicit-write-intent guardrails. Its
+# nested metadata read must carry the same entry-point provenance as search.
+# This is not a browser capability grant or a payload-selectable operator flag.
+_TRUSTED_LOCAL_OPERATOR_JIRA_CREATE_TOOLS = frozenset(
+    {"jira_create_issue", "jira_get_project_issue_types"}
+)
+
 _STDIO_GOVERNED_ONTOLOGY_METHODS = {
     "create_concepts": "create_concepts",
     "upsert_text_relation": "upsert_text_relation",
@@ -1307,7 +1314,10 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ig
                     }
                 )
             ]
-        if name in _TRUSTED_LOCAL_OPERATOR_DIAGNOSTIC_READ_TOOLS:
+        if name in (
+            _TRUSTED_LOCAL_OPERATOR_DIAGNOSTIC_READ_TOOLS
+            | _TRUSTED_LOCAL_OPERATOR_JIRA_CREATE_TOOLS
+        ):
             from src.backend.security.access_control import (
                 get_effective_organisation_concept_id,
                 get_effective_user_concept_id,

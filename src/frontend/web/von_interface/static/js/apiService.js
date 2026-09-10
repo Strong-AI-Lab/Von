@@ -59,6 +59,7 @@ async function buildHeaders(extraHeaders = {}) {
 export {
   ensureUniqueWindowSessionId,
   getWindowSessionId,
+  replaceMismatchedWindowSessionId,
   WINDOW_SESSION_HEADER,
   WINDOW_SESSION_KEY
 };

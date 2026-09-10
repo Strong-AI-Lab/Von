@@ -68,7 +68,7 @@ def _clear_scope_if_authenticated_identity_changes(
 
     same_actor = False
     if previous_concept_id and next_concept_id:
-        same_actor = previous_concept_id == next_concept_id
+        same_actor = previous_concept_id == next_concept_id and previous_email == next_email
     elif previous_email and next_email:
         same_actor = previous_email == next_email
 
@@ -110,6 +110,10 @@ def _build_auth_status_payload() -> dict:
         and user_concept_id
         and session_has_required_authentication_assurance(session)
     )
+    login_context = None
+    if authenticated and auth_provider != "browser_test_fixture":
+        from ...services.login_organisation_preference_service import initialise_login_context
+        login_context = initialise_login_context(session)
     return {
         "authenticated": authenticated,
         "email": user_email if authenticated else None,
@@ -121,6 +125,7 @@ def _build_auth_status_payload() -> dict:
         "user_concept_id": user_concept_id if authenticated else None,
         "auth_provider": auth_provider if authenticated else None,
         "browser_test_mode": browser_test_mode,
+        "login_context": login_context,
     }
 
 
@@ -622,6 +627,7 @@ def browser_test_login():
 @auth_bp.route("/api/auth/logout", methods=["POST"])
 def logout():
     """Log out the current user by clearing their session."""
+    cloudflare_logout = session.get("auth_provider") == "cloudflare_access"
     user_email = session.get("user_email")
     user_id = (
         session.get("user_concept_id")
@@ -661,6 +667,7 @@ def logout():
             "success": True,
             "message": "Logged out successfully",
             "window_context_cleanup": ("deferred" if cleanup_deferred else "completed"),
+            "redirect_url": "/cdn-cgi/access/logout" if cloudflare_logout else None,
         }
     )
 
