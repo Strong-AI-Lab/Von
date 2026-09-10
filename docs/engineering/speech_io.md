@@ -67,6 +67,11 @@ hints, not required output or tool instructions. Transcription uses one audio
 model call and no semantic rewriting pass. `gpt-transcribe` receives plural
 `languages`/`keywords`; the GPT-4o audio models receive the compatible prompt
 and singular language parameter.
+Browser locales such as `en-NZ` are reduced to the primary language code `en`
+for either provider API; the response retains the original locale hint. A live
+DGX request on 10 September rejected `languages=["en-NZ"]` with HTTP 400 but
+accepted the otherwise identical `languages=["en"]` request and correctly
+transcribed the synthetic fixture's Von, Vontology and Wikidata vocabulary.
 
 ## Playback repair
 
@@ -106,6 +111,11 @@ or live DGX acceptance. The DGX transcript was read through its own canonical
 history service after temporarily reconnecting this Mac's existing Tailscale
 profile. Its observed pre-repair runtime was `12ae94c0`. Runtime deployment and
 physical iOS/Android behaviour require separate verification receipts.
+The merged repair was subsequently deployed to the DGX as `702530d9`; the
+runtime, served asset and authenticated browser build were read back. An
+operator-scoped synthetic-audio replay exposed the locale incompatibility above,
+which requires the accompanying provider-language correction. This does not
+establish physical-device microphone or autoplay behaviour.
 
 Provider reference: [OpenAI file transcription](https://developers.openai.com/api/docs/guides/speech-to-text).
 Browser reference: [MDN SpeechRecognition](https://developer.mozilla.org/en-US/docs/Web/API/SpeechRecognition).

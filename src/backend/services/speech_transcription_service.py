@@ -111,7 +111,9 @@ def transcribe_audio(
     if model == "gpt-transcribe":
         options["extra_body"] = {
             "keywords": terms,
-            **({"languages": [language]} if language else {}),
+            # The provider accepts language codes, not browser locales: a live
+            # en-NZ request is rejected while the otherwise identical en works.
+            **({"languages": [language.split("-", 1)[0].lower()]} if language else {}),
         }
     elif language:
         options["language"] = language.split("-", 1)[0].lower()
