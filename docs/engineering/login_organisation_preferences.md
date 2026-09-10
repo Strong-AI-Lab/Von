@@ -35,3 +35,8 @@ DGX-local Mongo and Mac/Atlas are separate authority stores. Configure and
 verify each independently; federation does not replicate these authority or
 preference records. A stored default is not proof of a successful Google login:
 validate normal issuance, resulting tab context and actual effect namespace.
+
+Template-generated static URLs carry a release prefix, inherited by relative
+ES-module imports. This prevents a new backend footer/build from accompanying
+old cached login-bootstrap JavaScript. A different release gets different asset
+URLs; an old release prefix is never served with the new release's bytes.
