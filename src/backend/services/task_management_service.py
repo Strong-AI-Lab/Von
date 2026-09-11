@@ -4509,6 +4509,45 @@ def add_task_attachment(
         entry=attachment,
     )
     if stored_entry != attachment:
+        if normalised_file_copy_concept_id and not stored_entry.get(
+            "file_copy_concept_id"
+        ):
+            # Complete an earlier metadata-only import without duplicating its
+            # attachment or replacing a file another writer has already bound.
+            _, before = _get_task_doc(task_concept_id)
+            entries = _list_metadata_items(before, TASK_METADATA_KEY_ATTACHMENTS)
+            index = next(
+                (
+                    index
+                    for index, item in enumerate(entries)
+                    if item.get("attachment_id") == stored_entry["attachment_id"]
+                ),
+                None,
+            )
+            if index is None:
+                raise TaskManagementError("Attachment disappeared before file binding")
+            prefix = f"metadata.{TASK_METADATA_KEY_ATTACHMENTS}.{index}"
+            ConceptsRepository.update_one(
+                {
+                    "concept_id": task_concept_id,
+                    f"{prefix}.attachment_id": stored_entry["attachment_id"],
+                    f"{prefix}.file_copy_concept_id": {"$in": [None, ""]},
+                },
+                {
+                    "$set": {
+                        f"{prefix}.file_copy_concept_id": normalised_file_copy_concept_id,
+                        f"{prefix}.uri": attachment["uri"],
+                        "updated_at": _now(),
+                    }
+                },
+            )
+            _, current = _get_task_doc(task_concept_id)
+            for item in _list_metadata_items(current, TASK_METADATA_KEY_ATTACHMENTS):
+                if item.get("attachment_id") == stored_entry["attachment_id"]:
+                    if item.get("file_copy_concept_id"):
+                        return item
+                    break
+            raise TaskManagementError("Attachment file binding failed read-back")
         return stored_entry
     try:
         _append_task_history_event(

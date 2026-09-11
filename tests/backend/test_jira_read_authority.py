@@ -1,6 +1,9 @@
 """Exercise account ownership at discovery and at the actual Jira RPC boundary."""
 
 import asyncio
+import base64
+from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
@@ -147,7 +150,108 @@ def test_direct_durable_proxy_call_rechecks_actor_without_gateway(account):
     assert account["calls"] == []
     with override_current_actor(OWNER, None):
         result = asyncio.run(account["proxy"].search(jql="project = PROJ"))
+        assert result["authority"]["actor_concept_id"] == OWNER
+
+
+def test_attachment_transfer_has_its_own_budget_and_preserves_byte_limit(
+    account, monkeypatch
+):
+    proxy = account["proxy"]
+    calls = []
+    directories = []
+    data = b"\x00attachment\xff"
+
+    async def transfer(client, tool, arguments):
+        calls.append((tool, arguments))
+        directory = Path(client._config.env["VON_JIRA_ATTACHMENT_STAGING_DIR"])
+        directories.append(directory)
+        name = "a" * 32 + ".bin"
+        (directory / name).write_bytes(data)
+        return {
+            "success": True,
+            "size_bytes": len(data),
+            "staged_file": {
+                "name": name,
+                "size_bytes": len(data),
+                "sha256": sha256(data).hexdigest(),
+            },
+        }
+
+    monkeypatch.setattr(jira.MCPStdIOClient, "call_tool", transfer)
+    with override_current_actor(OWNER, None):
+        result = asyncio.run(
+            proxy.get_attachment_content(
+                attachment_id="10927", max_size_bytes=100 * 1024 * 1024
+            )
+        )
     assert result["authority"]["actor_concept_id"] == OWNER
+    assert calls == [
+        (
+            "jira_get_attachment_content",
+            {"attachment_id": "10927", "max_size_bytes": 100 * 1024 * 1024},
+        )
+    ]
+    assert account["calls"] == []
+    assert base64.b64decode(result["content_base64"]) == data
+    assert "staged_file" not in result
+    assert all(not directory.exists() for directory in directories)
+    assert proxy._binary_client._effective_operation_timeout_sec() == 357.5
+    assert proxy._client._effective_operation_timeout_sec() == 27.5
+
+
+@pytest.mark.parametrize("actor", [OTHER, None])
+def test_attachment_transfer_rejects_non_owner_before_binary_rpc(
+    account, monkeypatch, actor
+):
+    async def unexpected_transfer(*args, **kwargs):
+        pytest.fail("Unauthorised attachment read reached the binary transport")
+
+    monkeypatch.setattr(
+        jira.MCPStdIOClient, "call_tool", unexpected_transfer
+    )
+    with (
+        override_current_actor(actor, None),
+        pytest.raises(jira.JiraInvocationAuthorityError),
+    ):
+        asyncio.run(account["proxy"].get_attachment_content(attachment_id="10927"))
+
+
+@pytest.mark.parametrize("problem", ["path", "hash", "size", "too_large", "symlink"])
+def test_attachment_staging_rejects_bad_receipts_and_cleans_up(
+    account, monkeypatch, tmp_path, problem
+):
+    directories = []
+
+    async def transfer(client, tool, arguments):
+        directory = Path(client._config.env["VON_JIRA_ATTACHMENT_STAGING_DIR"])
+        directories.append(directory)
+        name = "a" * 32 + ".bin"
+        data = b"abc"
+        path = directory / name
+        if problem == "symlink":
+            outside = tmp_path / "outside"
+            outside.write_bytes(data)
+            path.symlink_to(outside)
+        else:
+            path.write_bytes(data)
+        return {
+            "success": True,
+            "size_bytes": len(data),
+            "staged_file": {
+                "name": "../outside" if problem == "path" else name,
+                "size_bytes": 99 if problem == "size" else len(data),
+                "sha256": "wrong" if problem == "hash" else sha256(data).hexdigest(),
+            },
+        }
+
+    monkeypatch.setattr(jira.MCPStdIOClient, "call_tool", transfer)
+    with override_current_actor(OWNER, None), pytest.raises(jira.JiraProxyError):
+        asyncio.run(
+            account["proxy"].get_attachment_content(
+                attachment_id="10927", max_size_bytes=2 if problem == "too_large" else 10
+            )
+        )
+    assert all(not directory.exists() for directory in directories)
 
 
 @pytest.mark.parametrize("new_owner", [None, OTHER])

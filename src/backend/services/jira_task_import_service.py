@@ -47,6 +47,7 @@ from .task_management_service import (
     find_task_by_external_reference,
     get_task,
     link_tasks,
+    list_task_attachments,
     record_task_history_event,
     set_task_epic,
     set_task_parent,
@@ -1296,6 +1297,27 @@ def _materialise_jira_issue_activity(
         mapped_fields.append("comments")
 
     attachments = _extract_issue_attachments(raw_issue)
+    retry_attachment_ids = {
+        item["attachment_id"]
+        for item in attachments
+        if item["attachment_id"] in existing_activity_checkpoint["attachment_ids"]
+        and item.get("content_base64")
+    }
+    if retry_attachment_ids:
+        # A checkpoint may represent metadata retained before its bytes were
+        # available. Reconcile actual native files before skipping those IDs.
+        offset = 0
+        while True:
+            page = list_task_attachments(task_concept_id, limit=500, offset=offset)
+            for stored in page["attachments"]:
+                source = stored.get("source") or {}
+                if source.get("source_system") == "jira" and stored.get(
+                    "file_copy_concept_id"
+                ):
+                    retry_attachment_ids.discard(source.get("external_id"))
+            offset += len(page["attachments"])
+            if offset >= page["total"] or not page["attachments"]:
+                break
     imported_attachment = False
     for attachment in attachments:
         raw_attachment_id = attachment.get("attachment_id")
@@ -1309,11 +1331,15 @@ def _materialise_jira_issue_activity(
                 attachment.get("created_at"),
                 attachment.get("size_bytes"),
             )
-        if attachment_id in existing_activity_checkpoint["attachment_ids"]:
+        if (
+            attachment_id in existing_activity_checkpoint["attachment_ids"]
+            and attachment_id not in retry_attachment_ids
+        ):
             continue
         imported_attachment = True
         if dry_run:
-            imported_activity["attachment_ids"].append(attachment_id)
+            if attachment_id not in imported_activity["attachment_ids"]:
+                imported_activity["attachment_ids"].append(attachment_id)
             continue
         author_resolution = _resolve_participant(
             attachment.get("author")
@@ -1423,7 +1449,8 @@ def _materialise_jira_issue_activity(
                 ),
                 file_copy_concept_id=file_copy_concept_id,
             )
-            imported_activity["attachment_ids"].append(attachment_id)
+            if attachment_id not in imported_activity["attachment_ids"]:
+                imported_activity["attachment_ids"].append(attachment_id)
         except Exception as exc:
             dropped_fields.append(
                 {

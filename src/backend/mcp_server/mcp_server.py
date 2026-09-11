@@ -4,8 +4,10 @@ import json
 import re
 import time
 import sys
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
+from uuid import uuid4
 
 import anyio
 import requests
@@ -173,11 +175,15 @@ def _request_json(
     return {"success": False, "error": "Jira request failed after retries"}
 
 
-def _request_bytes(url: str) -> Dict[str, Any]:
+def _request_bytes(
+    url: str, *, destination: Path | None = None, max_size_bytes: int | None = None
+) -> Dict[str, Any]:
     max_attempts = 3
     delay_sec = 0.5
 
     for attempt in range(1, max_attempts + 1):
+        resp = None
+        staged_complete = False
         try:
             resp = requests.get(
                 url,
@@ -186,9 +192,30 @@ def _request_bytes(url: str) -> Dict[str, Any]:
                     "Accept": "*/*",
                 },
                 timeout=60,
+                stream=destination is not None,
             )
 
             if resp.ok:
+                if destination is not None:
+                    size = 0
+                    digest = sha256()
+                    with destination.open("wb") as output:
+                        for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                            size += len(chunk)
+                            if max_size_bytes is not None and size > max_size_bytes:
+                                return {"success": False, "error": "attachment_too_large"}
+                            output.write(chunk)
+                            digest.update(chunk)
+                    staged_complete = True
+                    return {
+                        "success": True,
+                        "content_type": resp.headers.get("Content-Type"),
+                        "staged_file": {
+                            "name": destination.name,
+                            "size_bytes": size,
+                            "sha256": digest.hexdigest(),
+                        },
+                    }
                 return {
                     "success": True,
                     "status_code": resp.status_code,
@@ -234,6 +261,11 @@ def _request_bytes(url: str) -> Dict[str, Any]:
                 delay_sec = min(delay_sec * 2.0, 8.0)
                 continue
             return {"success": False, "error": f"Jira request failed: {exc}"}
+        finally:
+            if resp is not None:
+                resp.close()
+            if destination is not None and not staged_complete:
+                destination.unlink(missing_ok=True)
 
     return {"success": False, "error": "Jira request failed after retries"}
 
@@ -504,14 +536,37 @@ def jira_get_attachment_content(
             "metadata": metadata,
         }
 
+    # Only the trusted parent process sets this private staging directory. It
+    # is never a tool argument or a path derived from Jira metadata.
+    staging_directory = os.environ.get("VON_JIRA_ATTACHMENT_STAGING_DIR")
+    destination = (
+        Path(staging_directory) / f"{uuid4().hex}.bin"
+        if staging_directory
+        else None
+    )
     content_result = _request_bytes(
-        f"{JIRA_BASE_URL}/rest/api/3/attachment/content/{attachment_id}"
+        f"{JIRA_BASE_URL}/rest/api/3/attachment/content/{attachment_id}",
+        destination=destination,
+        max_size_bytes=max_size_bytes,
     )
     if content_result.get("success") is not True:
         return {
             "success": False,
             "attachment_id": attachment_id,
             "error": content_result.get("error") or "attachment_content_fetch_failed",
+            "metadata": metadata,
+        }
+
+    if destination is not None:
+        staged = content_result["staged_file"]
+        return {
+            "success": True,
+            "attachment_id": attachment_id,
+            "filename": metadata.get("filename"),
+            "size_bytes": size_bytes if size_bytes is not None else staged["size_bytes"],
+            "content_type": metadata.get("mimeType")
+            or content_result.get("content_type"),
+            "staged_file": staged,
             "metadata": metadata,
         }
 

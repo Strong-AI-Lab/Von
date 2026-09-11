@@ -44,6 +44,13 @@ For attachments above the Jira proxy's default 10 MiB retrieval limit, set
 `VON_INTERNAL_MCP_JIRA_ATTACHMENT_MAX_SIZE_BYTES=104857600` in the migration
 process environment. This explicitly permits retrieval up to 100 MiB; larger
 files remain reported gaps requiring a separate bounded capture.
+Attachment transfers use a private directory created by the calling proxy. The
+Jira helper streams into that directory, enforces the byte limit while reading,
+and returns a small size/hash receipt through MCP. The proxy verifies the file
+before hydrating the existing archive payload and removes the temporary directory
+on return or failure. Source filenames cannot select local paths. Binary reads
+have a separate 360-second outer budget for the existing three 60-second HTTP
+attempts and transfer overhead; caller cancellation still takes precedence.
 
 Completed batches are checkpointed atomically. Repeating the command resumes a
 matching source snapshot. If Jira has changed, use a fresh report path for the
@@ -52,6 +59,10 @@ using the previous import projection, report conflicts, preserve prior source
 archives, and deduplicate source activity. Unresolved hierarchy/link targets
 can be repaired from retained import rows after all projects have imported.
 Never infer deletion authority from a missing source issue.
+For checkpointed attachments, reruns also check whether the native attachment
+has a retained file. Previously unavailable bytes fill the existing attachment
+when they become available, preserving its identity, annotations and original
+timestamp. A file already bound by another writer is preserved.
 
 Start large recovery runs with one importer process. Keep raw payloads in private
 files and return compact progress summaries to the calling agent. Monitor host
