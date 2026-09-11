@@ -603,6 +603,48 @@ def test_s3_blob_store_normalises_metadata_keys_for_wire():
     assert ref.metadata == metadata
 
 
+@pytest.mark.parametrize("upload_mode", ["bytes", "file"])
+@pytest.mark.parametrize(
+    "filename",
+    ["Research \u2013 \u201csummary\u201d.pdf", "\u7814\u7a76\u8a08\u753b.pdf", "\u7814\u7a76\u8a08\u753b " * 25 + ".pdf"],
+)
+def test_s3_blob_store_preserves_unicode_metadata_on_upload(
+    tmp_path, upload_mode, filename
+):
+    from email.header import decode_header, make_header
+
+    from botocore.handlers import validate_ascii_metadata
+
+    class _DummyClient:
+        def put_object(self, **kwargs):
+            validate_ascii_metadata(kwargs)
+            self.metadata = kwargs["Metadata"]
+
+        def upload_fileobj(self, handle, bucket, key, *, ExtraArgs):
+            assert handle.read() == b"source bytes"
+            self.put_object(**ExtraArgs)
+
+    store = S3BlobStore.__new__(S3BlobStore)
+    store._bucket = "demo-bucket"
+    store._prefix = ""
+    store._public_base_url = None
+    store._client = _DummyClient()
+    metadata = {"original_filename": filename, "sha256": "abc123"}
+    store._endpoint_url = "https://storage.example"
+    if upload_mode == "file":
+        source = tmp_path / "source.pdf"
+        source.write_bytes(b"source bytes")
+        ref = store.put_file("source.pdf", source, metadata=metadata)
+    else:
+        ref = store.put_bytes("source.pdf", b"source bytes", metadata=metadata)
+
+    wire_filename = store._client.metadata["original-filename"]
+    assert "\n" not in wire_filename and "\r" not in wire_filename
+    assert str(make_header(decode_header(wire_filename))) == filename
+    assert store._client.metadata["sha256"] == "abc123"
+    assert ref.metadata == metadata
+
+
 def test_s3_blob_store_exists_returns_false_for_missing_object():
     class _MissingObject(Exception):
         def __init__(self):
