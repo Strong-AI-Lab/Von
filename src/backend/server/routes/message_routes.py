@@ -875,6 +875,7 @@ def list_threads() -> ResponseReturnValue:
             {
                 "threads": threads,
                 "count": len(threads),
+                "current_user_id": user_id,
             }
         ),
         200,

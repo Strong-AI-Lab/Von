@@ -337,11 +337,7 @@ def project_direct_message(message_doc: Dict[str, Any]) -> Dict[str, Any]:
         "content": concept_data.get("content_fallback"),
         "sent_at": concept_data.get("sent_at"),
         "status": concept_data.get("message_status"),
-        "read_by": [
-            item
-            for item in raw_read_by
-            if isinstance(item, str)
-        ],
+        "read_by": [item for item in raw_read_by if isinstance(item, str)],
         "thread_id": (
             relationship_values(PREDICATE_THREAD)[0]
             if relationship_values(PREDICATE_THREAD)
@@ -429,7 +425,9 @@ def create_message(
         relationships[PREDICATE_REPLY_TO] = [reply_to_id.strip()]
 
     metadata_payload = metadata if isinstance(metadata, dict) else {}
-    metadata_payload = {str(k): v for k, v in metadata_payload.items() if isinstance(k, str)}
+    metadata_payload = {
+        str(k): v for k, v in metadata_payload.items() if isinstance(k, str)
+    }
     attribution = metadata_payload.get("attribution")
     if not isinstance(attribution, str) or not attribution.strip():
         attribution = f"Sent by Von on behalf of {sender_id}"
@@ -745,6 +743,7 @@ def get_messages_for_user(
     thread_id: Optional[str] = None,
     limit: int = 50,
     skip: int = 0,
+    other_user_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Get messages for a user (sent and/or received).
 
@@ -784,6 +783,24 @@ def get_messages_for_user(
 
     if thread_id:
         base_filter[f"relationships.{PREDICATE_THREAD}"] = thread_id.strip()
+
+    if other_user_id:
+        # Further narrow the actor's existing mailbox; never replace its scope.
+        counterpart = other_user_id.strip()
+        base_filter["$and"] = [
+            {
+                "$or": [
+                    {
+                        f"relationships.{PREDICATE_SENDER}": user_id,
+                        f"relationships.{PREDICATE_RECIPIENT}": counterpart,
+                    },
+                    {
+                        f"relationships.{PREDICATE_SENDER}": counterpart,
+                        f"relationships.{PREDICATE_RECIPIENT}": user_id,
+                    },
+                ]
+            }
+        ]
 
     query = apply_concept_query_filter(base_filter)
 

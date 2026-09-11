@@ -5,6 +5,23 @@ from typing import Any
 import pytest
 
 
+def test_message_stream_lookup_keeps_trusted_actor_and_passes_counterpart(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.services import message_service
+
+    calls = []
+    monkeypatch.setattr(message_service, 'get_messages_for_user', lambda **kwargs: calls.append(kwargs) or [])
+    with override_current_actor('#V#user_alice', '#V#org_test'):
+        result = catalogue._message_list_direct(
+            acting_user_concept_id='#V#user_alice', organisation_concept_id='#V#org_test',
+            other_user_concept_id='#V#codex_dgx', include_sent=True, include_received=True,
+        )
+    assert result['success'] is True
+    assert calls[0]['user_id'] == '#V#user_alice'
+    assert calls[0]['other_user_id'] == '#V#codex_dgx'
+
+
 def _message_doc(
     *,
     message_id: str = "#V#message_test",

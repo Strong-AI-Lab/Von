@@ -29,6 +29,8 @@ let _filterTaskSourceId = 'all';
 let _isGlobalTabMode = false;  // True when rendering into global tasks tab
 let _taskDetailState = {};  // taskId -> detail panel state
 let _selectedTaskId = '';
+let _panelTaskIds = null;
+let _panelLoadGeneration = 0;
 let _bulkTaskVisibility = 'exclude';
 let _bulkTaskCollectionId = '';
 let _taskProjects = [];
@@ -173,6 +175,8 @@ async function ensureTaskOrganisationOptionsLoaded() {
 }
 
 function resetTaskPanelScopedState(activeOrganisationConceptId, { actorChanged = false } = {}) {
+    _panelTaskIds = null;
+    _panelLoadGeneration += 1;
     _taskQueueActivityGeneration += 1;
     stopTaskQueueActivityPolling();
     _taskQueueActivityLoadPromise = null;
@@ -734,6 +738,7 @@ function pruneTaskDetailState() {
  * Call this once on page load to set up the panel element.
  */
 export function initializeTaskPanel() {
+    if (_panelEl?.isConnected && _panelEl.dataset.initialized === 'true') return;
     _panelEl = document.getElementById('taskPanel');
     _taskListEl = document.getElementById('taskList');
 
@@ -741,6 +746,9 @@ export function initializeTaskPanel() {
         console.warn('[taskPanel] Panel elements not found in DOM');
         return;
     }
+    // One existing popup, available from Messages as well as Conversations.
+    document.body.appendChild(_panelEl);
+    _panelEl.dataset.initialized = 'true';
     loadTaskGroupSelectionFromStorage();
     ensureTaskPanelOrganisationSwitchListener();
     ensureTaskPanelAuthStatusListener();
@@ -794,7 +802,7 @@ export function initializeTaskPanel() {
     // Set up refresh button
     const refreshBtn = document.getElementById('refreshTasksBtn');
     if (refreshBtn) {
-        refreshBtn.addEventListener('click', () => loadTasks(_currentSessionId));
+        refreshBtn.addEventListener('click', () => refreshTasks());
     }
 
     console.log('[taskPanel] Initialized');
@@ -804,24 +812,55 @@ export function initializeTaskPanel() {
  * Show the task panel.
  */
 export function showTaskPanel(options = {}) {
+    initializeTaskPanel();
     applyPanelOpenOptions(options);
     if (_panelEl) {
         loadTaskGroupSelectionFromStorage();
+        _globalTaskLoadGeneration += 1;
         _isGlobalTabMode = false;
         syncTaskQueueActivityPolling();
         _taskListEl = document.getElementById('taskList') || _taskListEl;
         _panelEl.classList.remove('hidden');
         _panelEl.setAttribute('aria-hidden', 'false');
+        _panelEl.querySelectorAll('.task-create-form, .task-filter-row').forEach(element => {
+            element.classList.toggle('hidden', _panelTaskIds !== null);
+        });
         _isVisible = true;
         // Auto-refresh tasks when panel becomes visible
-        refreshTasks();
+        return refreshTasks();
     }
 }
 
 function applyPanelOpenOptions(options = {}) {
     if (!options || typeof options !== 'object') return;
+    _panelTaskIds = Array.isArray(options.taskIds) ? [...new Set(options.taskIds.filter(Boolean))] : null;
+    _panelLoadGeneration += 1;
     if (Object.prototype.hasOwnProperty.call(options, 'sessionId')) {
         _currentSessionId = options.sessionId || null;
+    }
+}
+
+export async function openTaskInPanel(taskId) {
+    await showTaskPanel({ taskIds: [taskId], sessionId: null });
+    if (!_tasks.some(task => getTaskId(task) === taskId) || _isGlobalTabMode) return;
+    getTaskDetailState(taskId).expanded = true;
+    await loadTaskDetails(taskId);
+    _panelEl?.querySelector('.task-item')?.scrollIntoView?.({ block: 'nearest' });
+}
+
+async function loadReferencedPanelTasks() {
+    const generation = ++_panelLoadGeneration;
+    const scopeGeneration = _taskQueueActivityGeneration;
+    _tasks = [];
+    _taskDetailState = {};
+    renderTaskList();
+    try {
+        const tasks = await Promise.all(_panelTaskIds.map(id => getJson(`/api/tasks/${encodeURIComponent(id)}`)));
+        if (generation !== _panelLoadGeneration || scopeGeneration !== _taskQueueActivityGeneration || _isGlobalTabMode) return;
+        _tasks = tasks;
+        renderTaskList();
+    } catch (_) {
+        if (generation === _panelLoadGeneration) showToast('Could not load the referenced tasks.', 'error');
     }
 }
 
@@ -1224,6 +1263,8 @@ export function getTaskCount() {
  */
 export async function loadTasks(sessionId = null) {
     if (_isLoading) return;
+    const panelGeneration = _panelLoadGeneration;
+    const scopeGeneration = _taskQueueActivityGeneration;
 
     loadTaskGroupSelectionFromStorage();
     _isLoading = true;
@@ -1252,6 +1293,7 @@ export async function loadTasks(sessionId = null) {
         }
 
         const response = await getJson(url);
+        if (panelGeneration !== _panelLoadGeneration || scopeGeneration !== _taskQueueActivityGeneration) return;
         _tasks = response.tasks || [];
         setBulkTaskVisibilitySummary(response);
         pruneTaskDetailState();
@@ -1273,6 +1315,8 @@ export async function loadTasks(sessionId = null) {
  */
 export async function loadMyTasks(statusFilter = null) {
     if (_isLoading) return;
+    const panelGeneration = _panelLoadGeneration;
+    const scopeGeneration = _taskQueueActivityGeneration;
 
     loadTaskGroupSelectionFromStorage();
     _isLoading = true;
@@ -1281,6 +1325,7 @@ export async function loadMyTasks(statusFilter = null) {
     try {
         const url = buildMyTasksUrl(statusFilter);
         const response = await getJson(url);
+        if (panelGeneration !== _panelLoadGeneration || scopeGeneration !== _taskQueueActivityGeneration) return;
         _tasks = response.tasks || [];
         setBulkTaskVisibilitySummary(response);
         pruneTaskDetailState();
@@ -1457,6 +1502,8 @@ function buildTaskSearchText(task) {
 }
 
 function getFilteredTasks() {
+    // Exact references remain reachable regardless of saved list filters.
+    if (!_isGlobalTabMode && _panelTaskIds !== null) return _tasks;
     return _tasks.filter((task) => {
         if (!taskMatchesGlobalScope(task)) {
             return false;
@@ -1780,9 +1827,10 @@ function renderTaskList() {
 
     const previousScrollLeft = _taskListEl.scrollLeft;
     const previousScrollTop = _taskListEl.scrollTop;
-    const isBoardView = _viewMode === 'board';
+    const effectiveViewMode = !_isGlobalTabMode && _panelTaskIds !== null ? 'list' : _viewMode;
+    const isBoardView = effectiveViewMode === 'board';
     const scrollHintEl = _globalTasksContainer?.querySelector('#globalTaskBoardScrollHint');
-    _taskListEl.dataset.viewMode = _viewMode;
+    _taskListEl.dataset.viewMode = effectiveViewMode;
     _taskListEl.setAttribute('aria-label', isBoardView ? 'Task board' : 'Task list');
     if (isBoardView) {
         _taskListEl.setAttribute('aria-describedby', 'globalTaskBoardScrollHint');
@@ -1817,7 +1865,7 @@ function renderTaskList() {
     }
 
     let html = '';
-    if (_viewMode === 'list') {
+    if (effectiveViewMode === 'list') {
         const sortedTasks = [...filteredTasks].sort((left, right) => {
             const leftTimestamp = new Date(left.updated_at || left.created_at || 0).getTime();
             const rightTimestamp = new Date(right.updated_at || right.created_at || 0).getTime();
@@ -3997,6 +4045,8 @@ export function getTasks() {
 export async function refreshTasks() {
     if (_isGlobalTabMode) {
         await loadGlobalTasks();
+    } else if (_panelTaskIds !== null) {
+        await loadReferencedPanelTasks();
     } else if (_currentSessionId) {
         await loadTasks(_currentSessionId);
     } else {
