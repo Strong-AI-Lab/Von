@@ -2588,3 +2588,143 @@ def test_legacy_terminal_purge_backfill_is_bounded_and_has_rollout_grace(
     active = coll.find_one({"queue_id": "legacy-active"})
     assert active is not None
     assert "purge_after" not in active
+
+
+def test_restart_hands_legacy_work_to_one_server_successor_with_receipt_context(
+    monkeypatch,
+):
+    from src.backend.services import turn_execution_record_service as turns
+
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    original = queue_service.create_queue_record(
+        scope=scope, prompt_raw="Create a task", session_id="speech-restart"
+    )
+    queue_service.bind_queue_record_to_turn(
+        scope=scope,
+        queue_id=original["queue_id"],
+        client_request_id="original-request",
+        attempt_id="original-attempt",
+        conversation_key="restart-conversation",
+        server_instance_id="old-server",
+    )
+    monkeypatch.setattr(
+        turns,
+        "get_turn_execution_record_projection",
+        lambda **kw: {
+            "user_id": "#V#user",
+            "request_id": "original-request",
+            "required_effects": [
+                {"effect_id": "already-created", "status": "succeeded"}
+            ],
+        },
+    )
+    kwargs = dict(
+        scope=scope,
+        queue_id=original["queue_id"],
+        current_server_instance_id="new-server",
+        execution_envelope={"language": "en-NZ"},
+    )
+    successor = queue_service.resume_legacy_prompt_record(**kwargs)
+    replay = queue_service.resume_legacy_prompt_record(**kwargs)
+    assert replay["queue_id"] == successor["queue_id"]
+    assert successor["dispatch_mode"] == "server" and successor["dispatch_ready"]
+    row = queue_service._collection().find_one({"queue_id": successor["queue_id"]})
+    recovery = row["execution_envelope"]["workflow_inputs"]["interrupted_turn"]
+    assert recovery["original_attempt"]["attempt_id"] == "original-attempt"
+    assert (
+        recovery["receipt_observations"]["required_effects"][0]["effect_id"]
+        == "already-created"
+    )
+    assert (
+        queue_service._collection().find_one({"queue_id": original["queue_id"]})[
+            "status"
+        ]
+        == "cancelled"
+    )
+    claimed = queue_service.reserve_next_server_dispatch(
+        server_instance_id="new-server"
+    )
+    assert claimed["queue_id"] == successor["queue_id"]
+
+
+def test_resume_previously_requeued_row_without_attempt_identity_keeps_outcome_unknown():
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    original = queue_service.create_queue_record(
+        scope=scope,
+        prompt_raw="Is that task available in Tasks?",
+        session_id="legacy-requeued",
+    )
+    queue_service._collection().update_one(
+        {"queue_id": original["queue_id"]}, {"$set": {"source": "restart"}}
+    )
+    result = queue_service.resume_legacy_prompt_record(
+        scope=scope,
+        queue_id=original["queue_id"],
+        current_server_instance_id="new-server",
+        execution_envelope={},
+        resolve_conversation=lambda session_id: {"conversation_key": "resolved-legacy-conversation"},
+    )
+    assert result["dispatch_mode"] == "server" and result["dispatch_ready"]
+    row = queue_service._collection().find_one({"queue_id": result["queue_id"]})
+    recovery = row["execution_envelope"]["workflow_inputs"]["interrupted_turn"]
+    assert recovery["unobserved_effect_outcome"] == "unknown_not_failed"
+    assert recovery["receipt_observations"] is None
+    assert recovery["original_attempt"]["client_request_id"] is None
+
+
+def test_restart_reconciles_existing_assistant_result_without_replaying_work():
+    from src.backend.services.chat_history_service import (
+        get_chat_history_collection_service,
+    )
+
+    scope = queue_service.build_queue_scope(
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    original = queue_service.create_queue_record(
+        scope=scope, prompt_raw="Create a task", session_id="already-completed"
+    )
+    queue_service.bind_queue_record_to_turn(
+        scope=scope,
+        queue_id=original["queue_id"],
+        client_request_id="completed-request",
+        attempt_id="completed-attempt",
+        conversation_key="completed-conversation",
+        server_instance_id="old-server",
+    )
+    get_chat_history_collection_service().insert_one(
+        {
+            "user_id": "#V#user",
+            "namespace": "#V#user@org",
+            "session_id": "already-completed",
+            "history": [
+                {
+                    "role": "assistant",
+                    "content": "Task created",
+                    "llm_debug_data": {"request_id": "completed-request"},
+                }
+            ],
+        }
+    )
+    result = queue_service.resume_legacy_prompt_record(
+        scope=scope,
+        queue_id=original["queue_id"],
+        current_server_instance_id="new-server",
+        execution_envelope={},
+    )
+    assert result["status"] == "completed" and result["recovered_terminal"]
+    assert (
+        queue_service._collection().count_documents(
+            {"handoff_source_queue_id": original["queue_id"]}
+        )
+        == 0
+    )

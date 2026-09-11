@@ -41,7 +41,7 @@ describe('recorded dictation lifecycle', () => {
         expect(await finish).toBe(true);
         expect(input.value).toBe('Edited while waiting Vontology works.');
         expect(stopTrack).toHaveBeenCalled();
-        const form = fetchImpl.mock.calls[1][1].body;
+        const form = fetchImpl.mock.calls.find(([url]) => url.endsWith('/transcribe'))[1].body;
         expect(form.get('audio').type).toBe('audio/mp4');
         expect(form.get('vocabulary')).toContain('Wikidata');
         expect(form.get('language')).toBe('en-NZ');
@@ -81,6 +81,7 @@ describe('recorded dictation lifecycle', () => {
         await controller.start();
         expect(document.querySelector('p').textContent).toContain('Microphone access was denied');
         expect(await controller.finish()).toBe(false);
+        expect(controller.hasPendingInput()).toBe(false);
     });
     test('inserts at selected range only when original draft is unchanged', () => {
         expect(insertDictation('Hello old world', 'new', { start: 6, end: 9 })).toBe('Hello new world');

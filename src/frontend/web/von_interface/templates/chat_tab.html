@@ -246,6 +246,7 @@
           <button id="dictateButton" class="btn btn-secondary" type="button" title="Dictate with your microphone">
             Dictate
           </button>
+          <button id="voiceConversationButton" class="btn btn-secondary" type="button" aria-pressed="false">Start voice</button>
           <button id="cancelDictationButton" class="btn btn-secondary" type="button" hidden>Cancel dictation</button>
           <button id="retryDictationButton" class="btn btn-secondary" type="button" hidden>Retry recording</button>
         </div>
@@ -255,7 +256,8 @@
           <div class="button-row">
             <label for="dictationEngineSelect">Dictation</label>
             <select id="dictationEngineSelect" aria-describedby="dictationStatus">
-              <option value="recorded">Recorded audio · context-aware</option>
+              <option value="streaming">Live transcription · context-aware</option>
+              <option value="recorded" selected>Recorded audio · context-aware</option>
               <option value="browser">Browser recognition · limited support</option>
             </select>
             <button id="resetButton" class="btn btn-secondary" type="button"
@@ -288,6 +290,7 @@
           </div>
         </details>
       </div>
+      <p id="voiceConversationStatus" class="speech-settings-note" role="status" aria-live="polite"></p>
       <p id="dictationStatus" class="speech-settings-note" role="status" aria-live="polite"></p>
     </div>
       </div>

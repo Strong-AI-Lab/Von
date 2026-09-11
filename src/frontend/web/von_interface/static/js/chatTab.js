@@ -1,3 +1,5 @@
+import { createVoiceConversation } from './voiceConversation.js';
+import { getClientContext } from './clientContext.js';
 import { createDictationController } from './dictation.js';
 import { renderImageAttachments, renderImageComposer, uploadConversationImage, imagesBlocked, takeImages, restoreImages, descriptorsForIds } from "./utils/conversationImages.js";
 // Chat Tab Module
@@ -21270,6 +21272,7 @@ function setPromptComposerValue(value, options = {}) {
     }
 
     promptInput.value = typeof value === 'string' ? value : '';
+    if (!promptInput.value) dictationController?.clearAttemptIds?.();
     dispatchPromptComposerInputEvent(promptInput);
 
     const hasSelection =
@@ -24604,6 +24607,8 @@ const CHAT_STT_CONTINUOUS_STORAGE_KEY = 'chatSttContinuous';
 const CHAT_STT_INTERIM_RESULTS_STORAGE_KEY = 'chatSttInterimResults';
 
 let dictationController = null;
+let voiceConversation = null;
+const voicePromptQueueIds = new Set();
 let dictationSendPending = false;
 
 let activeTtsTurnId = null;
@@ -25038,6 +25043,7 @@ function toggleSpeakTurn(turnId, text, button) {
 }
 
 function stopDictation() {
+    voiceConversation?.end();
     dictationController?.cancel();
 }
 
@@ -25046,14 +25052,18 @@ function getDictationContext() {
     const history = getConversationTranscriptTurnsSnapshot().slice(-4)
         .map(turn => turn.message || turn.text || '').join('\n').slice(-4500);
     const vocabulary = ['Von', 'Vontology'];
+    const focusNames = normaliseFocusedConcepts(activeChatSessionFocus).map(item => item.displayName);
+    vocabulary.push(...focusNames);
     document.querySelectorAll('#scrollableField [data-full-concept-id], .prompt-input-overlay [data-full-concept-id]')
         .forEach(element => {
             const name = element.querySelector('.vontology-cartouche-name')?.textContent || element.textContent;
             if (name?.trim()) vocabulary.push(name.trim());
         });
     return {
+        sessionId: activeChatSessionId,
         key: `${getCurrentUserConceptId() || ''}:${activeChatSessionId || ''}:${getSessionScopedNamespace() || ''}`,
-        text: `${history}\n${prompt}`.slice(-6000), vocabulary: [...new Set(vocabulary)].slice(0, 80),
+        text: `${focusNames.length ? 'Discussing: ' + focusNames.join(', ') + '\n' : ''}${history}\n${prompt}`.slice(-6000),
+        vocabulary: [...new Set(vocabulary)].slice(0, 80),
         ...getChatSpeechSettings().stt
     };
 }
@@ -28460,6 +28470,7 @@ async function promptRenameChatSession(sessionId, currentName) {
 }
 
 async function createChatSession(sessionName, options = {}) {
+    if (activeChatSessionId) stopDictation();
     if (pendingChatOrganisationSwitchId !== null) {
         const error = new Error('Organisation change in progress.');
         error.organisationSwitchSuperseded = true;
@@ -34271,9 +34282,36 @@ export function initializeChatTab() {
             getContext: getDictationContext,
             fetchImpl: (url, options = {}) => fetch(url, { ...options, headers: buildChatFetchHeaders(options.headers) }),
             setValue: value => setPromptComposerValue(value, { promptInput }),
-            onStart: () => { stopSpeaking(); clearActiveTtsUi(); }
+            onStart: () => { voiceConversation?.end(); stopSpeaking(); clearActiveTtsUi(); }
         });
     }
+
+    voiceConversation?.dispose();
+    const voiceButton = document.getElementById('voiceConversationButton');
+    if (voiceButton) voiceConversation = createVoiceConversation({
+        button: voiceButton, status: document.getElementById('voiceConversationStatus'),
+        getContext: getDictationContext,
+        fetchImpl: (url, options = {}) => fetch(url, { ...options, headers: buildChatFetchHeaders(options.headers) }),
+        onStart: async () => {
+            dictationController?.cancel(); stopSpeaking(); clearActiveTtsUi();
+            if (!activeChatSessionId && !await createNewChatSession()) {
+                throw new Error('A conversation could not be opened. Start voice to retry.');
+            }
+        },
+        onSubmit: async (text, speech) => {
+            const envelope = buildChatPromptExecutionEnvelope();
+            envelope.client_context = { ...envelope.client_context,
+                speech_attempt_ids: [speech.attemptId], speech_item_id: speech.itemId };
+            const row = await queuePromptForLater(text, { sessionId: activeChatSessionId,
+                sessionName: activeChatSessionName, enqueueSubmissionId: speech.submissionId,
+                executionEnvelope: envelope });
+            if (!row?.queueId || row.enqueueFailed) throw new Error('Voice message awaiting queue recovery');
+            voicePromptQueueIds.add(row.queueId);
+            if (voicePromptQueueIds.size > 256) voicePromptQueueIds.delete(voicePromptQueueIds.values().next().value);
+            syncChatPromptQueuePolling();
+            syncServerDispatchedRetryObserver();
+        }
+    });
 
     // Add event listeners
     sendButton.addEventListener('click', handleSendPrompt);
@@ -35222,6 +35260,7 @@ function normaliseChatPromptQueueEntry(rawEntry, fallback = {}) {
     return {
         id,
         queueId,
+        source: String(rawEntry.source ?? fallback.source ?? ''),
         promptRaw: String(rawEntry.prompt_raw ?? rawEntry.promptRaw ?? fallback.promptRaw ?? ''),
         status: normaliseChatPromptQueueStatus(rawEntry.status ?? fallback.status),
         sessionId,
@@ -35681,7 +35720,7 @@ function activeConversationQueueStateChanged(previousEntries, nextEntries) {
 function isObservableServerDispatchedRetry(entry) {
     return Boolean(
         entry?.queueId
-        && entry?.retrySourceQueueId
+        && (entry?.retrySourceQueueId || entry?.handoffSourceQueueId || voicePromptQueueIds.has(entry?.queueId))
         && entry?.clientRequestId
         && entry?.attemptId
         && entry.status === CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS
@@ -35857,6 +35896,7 @@ function buildChatPromptExecutionEnvelope({
         resolveLocalRequestedLlm()
     );
     return {
+        client_context: { ...getClientContext(), speech_attempt_ids: dictationController?.getAttemptIds?.() || [] },
         ...(imageAttachmentIds.length ? { image_attachment_ids: imageAttachmentIds } : {}),
         ...(turnKind ? { turn_kind: turnKind } : {}),
         ...(initiationId ? { initiation_id: initiationId } : {}),
@@ -36242,8 +36282,10 @@ async function requeuePersistedChatPromptQueueEntry(entry) {
         return entry;
     }
     const data = await fetchChatPromptQueueJson(`/${encodeURIComponent(entry.queueId)}/requeue`, {
-        method: 'POST'
+        method: 'POST',
+        body: JSON.stringify({ execution_envelope: buildChatPromptExecutionEnvelope() })
     });
+    if (data.item?.recovered_terminal) refreshActiveConversationHistoryAfterQueueChange();
     return data.item ? normaliseChatPromptQueueEntry(data.item, entry) : entry;
 }
 
@@ -36452,11 +36494,10 @@ function ensureChatTaskQueuePanel() {
                 void (async () => {
                     try {
                         const requeued = await requeuePersistedChatPromptQueueEntry(queued);
-                        mergePersistedChatPromptQueueEntry({
-                            ...queued,
-                            ...requeued,
-                            status: CHAT_PROMPT_QUEUE_STATUS_QUEUED
-                        });
+                        if (requeued.queueId !== queued.queueId) {
+                            queuedChatPrompts = queuedChatPrompts.filter(entry => entry.queueId !== queued.queueId);
+                        }
+                        mergePersistedChatPromptQueueEntry({ ...queued, ...requeued });
                         renderChatTaskQueuePanel();
                         refreshChatSessionTabActivityIndicators();
                         updateSendButtonForCurrentChatState();
@@ -36762,10 +36803,10 @@ function renderChatTaskQueuePanel() {
         } else if (isFailed) {
             label.textContent = `Failed • ${sessionLabel}`;
         } else {
-            queuedOrdinal += 1;
-            label.textContent = queuedOrdinal === 1
-                ? `Next up • ${sessionLabel}`
-                : `Queue #${queuedOrdinal} • ${sessionLabel}`;
+            if (isServerDispatched) queuedOrdinal += 1;
+            label.textContent = !isServerDispatched
+                ? `Ready to resume • ${sessionLabel}`
+                : queuedOrdinal === 1 ? `Next up • ${sessionLabel}` : `Queue #${queuedOrdinal} • ${sessionLabel}`;
         }
 
         const editor = document.createElement('textarea');
@@ -36807,7 +36848,7 @@ function renderChatTaskQueuePanel() {
                 `Complete queue handoff ${index + 1}`
             );
             actions.appendChild(retryHandoffButton);
-        } else if (isInterrupted) {
+        } else if (isInterrupted || (!isServerDispatched && entry.status === CHAT_PROMPT_QUEUE_STATUS_QUEUED && entry.source === 'restart')) {
             const restartButton = document.createElement('button');
             restartButton.type = 'button';
             restartButton.className = 'btn-mini chat-task-queue-restart';
@@ -37160,7 +37201,7 @@ async function handleSendPrompt(options = {}) {
         && !hasPromptOverride
         && !selectedQueueEntry
     );
-    if (directComposerSubmission && dictationController?.getState() !== 'idle' && dictationController) {
+    if (directComposerSubmission && dictationController?.hasPendingInput()) {
         if (dictationSendPending) return;
         const scopeBefore = getDictationContext().key;
         dictationSendPending = true;
@@ -38626,7 +38667,9 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 });
 
                 // Auto-speak new assistant responses when enabled.
-                if (!isHistory && turnId && ttsSupported && isChatTtsEnabled()) {
+                if (!isHistory && turnId && voiceConversation?.isActive()) {
+                    void voiceConversation.reply({ text: spokenTextForTurn, turnId, clientContext: debugData?.client_context });
+                } else if (!isHistory && turnId && ttsSupported && isChatTtsEnabled()) {
                     // Auto-speak uses the talk track only (never the screen channel).
                     if (spokenTextForTurn && spokenTextForTurn.trim()) {
                         toggleSpeakTurn(turnId, spokenTextForTurn, speakButton);
@@ -41925,6 +41968,7 @@ export function __testOnly_resetChatRequestState() {
     queuedChatPromptClaimsInFlight.clear();
     queuedChatPromptSubmissionsInFlight.clear();
     serverDispatchedRetryObserversInFlight.clear();
+    voicePromptQueueIds.clear();
     chatPromptQueueAdmissionServerInstanceId = null;
     for (const timer of queuedChatPromptSyncTimers.values()) {
         clearTimeout(timer);

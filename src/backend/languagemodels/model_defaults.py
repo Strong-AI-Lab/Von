@@ -13,10 +13,17 @@ import os
 TRANSCRIPTION_MODELS = ("gpt-transcribe", "gpt-4o-transcribe", "gpt-4o-mini-transcribe")
 
 
-def is_transcription_model(provider: object, model: object) -> bool:
-    return str(provider or "").strip().lower() == "openai" and str(
-        model or ""
-    ).strip().removeprefix("openai:") in TRANSCRIPTION_MODELS
+LIVE_TRANSCRIPTION_MODELS = ("gpt-live-transcribe",)
+SPEECH_OUTPUT_MODELS = ("gpt-4o-mini-tts", "tts-1")
+
+
+def is_audio_only_model(provider: object, model: object) -> bool:
+    return (
+        str(provider or "").strip().lower() == "openai"
+        and str(model or "").strip().removeprefix("openai:")
+        in TRANSCRIPTION_MODELS + LIVE_TRANSCRIPTION_MODELS + SPEECH_OUTPUT_MODELS
+    )
+
 
 # ---------------------------------------------------------------------------
 # Ollama
@@ -43,3 +50,7 @@ DEFAULT_META_MUSE_MODEL: str = "muse-spark-1.3"
 META_MUSE_TEMPERATURE: float = 1.0
 META_MUSE_TOP_P: float = 1.0
 META_MUSE_MAX_OUTPUT_TOKENS: int = 32000
+
+
+# Compatibility for callers using the original audio exclusion helper.
+is_transcription_model = is_audio_only_model
