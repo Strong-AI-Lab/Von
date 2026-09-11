@@ -1790,6 +1790,7 @@ export async function setModelInfoFooterText() {
       userInfo?.conceptId || null,
       userInfo?.name || null,
     );
+    userSegment.classList.add('footer-user-segment');
     footerIdentityTargets.push({
       button: userSegment.querySelector('.concept-footer-button'),
       identityKind: 'User',

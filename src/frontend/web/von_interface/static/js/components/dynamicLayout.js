@@ -3,6 +3,19 @@
  * JVNAUTOSCI-550: Replace hard-coded CSS positions with JavaScript calculation
  */
 export function setupDynamicLayout() {
+  // Reuse the actual diagnostic controls so their handlers and live values survive.
+  const footerContainer = document.querySelector('.footer-container');
+  const secondaryFooterItems = footerContainer
+    ? Array.from(footerContainer.children).filter(item => item.id !== 'modelInfoFooter') : [];
+  const footerDetails = document.createElement('details');
+  footerDetails.className = 'mobile-footer-details';
+  const summary = document.createElement('summary');
+  summary.textContent = 'Info';
+  summary.setAttribute('aria-label', 'Footer information and diagnostics');
+  const detailsPanel = document.createElement('div');
+  detailsPanel.className = 'mobile-footer-details-panel';
+  footerDetails.append(summary, detailsPanel);
+
   function updateLayout() {
     const header = document.getElementById('globalHeader');
     const tabContainer = document.querySelector('.tab-container');
@@ -25,6 +38,14 @@ export function setupDynamicLayout() {
     const contentTop = headerHeight + tabHeight + 8; // 8px margin
     const narrow = window.matchMedia('(max-width: 800px), (max-width: 1024px) and (pointer: coarse)').matches;
     const footer = document.querySelector('.footer-container');
+    if (footer && narrow && !footerDetails.isConnected) {
+      detailsPanel.append(...secondaryFooterItems);
+      footer.append(footerDetails);
+    } else if (!narrow && footerDetails.isConnected) {
+      footer.append(...secondaryFooterItems);
+      footerDetails.remove();
+      footerDetails.open = false;
+    }
     const footerSpace = narrow ? Math.ceil(footer?.getBoundingClientRect().height || 64) + 8 : Math.max(64, Math.ceil(footer?.getBoundingClientRect().height || 0));
     // At normal zoom the visual viewport excludes the on-screen keyboard.
     // Pinch zoom must not resize the application or discard a draft.

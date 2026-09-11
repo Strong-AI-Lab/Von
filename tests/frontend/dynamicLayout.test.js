@@ -4,7 +4,7 @@ import { setupDynamicLayout } from '../../src/frontend/web/von_interface/static/
 test('tracks footer and visual viewport changes without replacing the draft or resizing for pinch zoom', () => {
     document.body.innerHTML = `<header id="globalHeader"></header><div class="tab-container"></div>
         <div class="tab-content-area"><div class="tab-content"><textarea id="promptInput">Keep this draft</textarea></div></div>
-        <footer class="footer-container"></footer>`;
+        <footer class="footer-container"><p id="modelInfoFooter"></p><p id="serverUptimeFooter">Uptime</p></footer>`;
     let narrow = true;
     window.matchMedia = jest.fn(() => ({ matches: narrow }));
     const viewport = new EventTarget();
@@ -26,6 +26,8 @@ test('tracks footer and visual viewport changes without replacing the draft or r
     setupDynamicLayout();
     const value = name => document.documentElement.style.getPropertyValue(name);
     expect(value('--von-fixed-footer-clearance')).toBe('60px');
+    const diagnostics = document.querySelector('#serverUptimeFooter');
+    expect(diagnostics.parentElement.className).toBe('mobile-footer-details-panel');
     viewport.height = 430;
     viewport.dispatchEvent(new Event('resize'));
     expect(value('--von-keyboard-inset')).toBe('485px');
@@ -42,7 +44,9 @@ test('tracks footer and visual viewport changes without replacing the draft or r
     expect(value('--von-viewport-height')).toBe('915px');
     narrow = false;
     window.dispatchEvent(new Event('resize'));
-    expect(value('--von-fixed-footer-clearance')).toBe('64px');
+    expect(value('--von-fixed-footer-clearance')).toBe('76px');
+    expect(diagnostics.parentElement).toBe(footer);
+    expect(document.querySelector('.mobile-footer-details')).toBeNull();
     expect(document.querySelector('#promptInput')).toBe(input);
     expect(input.value).toBe('Keep this draft');
 });

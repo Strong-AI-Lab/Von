@@ -18333,11 +18333,31 @@ body.settings-body {
         gap: 8px;
     }
     .footer-info {
-        min-width: 0;
-        white-space: nowrap;
-        overflow-x: auto;
+        min-width: 0; display: flex; flex-wrap: wrap; gap: 4px;
+        white-space: normal;
     }
-    .footer-container > :not(#modelInfoFooter) { display: none; }
+    .footer-info > .footer-separator { display: none; }
+    .footer-user-segment { order: -2; }
+    .footer-org-switcher { order: -1; }
+    .footer-user-segment, .footer-org-switcher { max-width: 100%; }
+    .footer-user-segment .concept-footer-button,
+    .footer-org-current-button { max-width: min(150px, calc((100vw - 140px) / 2)); overflow: hidden; text-overflow: ellipsis; }
+    .footer-info .conversation-model-controls { flex-basis: 100%; }
+
+    .mobile-footer-details { flex-shrink: 0; }
+    .mobile-footer-details > summary {
+        min-height: 44px; display: flex; align-items: center; cursor: pointer;
+    }
+    .mobile-footer-details-panel {
+        position: fixed;
+        left: 8px; right: 8px;
+        bottom: calc(var(--von-fixed-footer-clearance, 64px) + var(--von-keyboard-inset, 0px));
+        max-height: calc(var(--von-viewport-height, 100dvh) - var(--von-fixed-footer-clearance, 64px) - 16px);
+        overflow: auto; padding: 12px;
+        background: var(--background-color, white); color: var(--text-color, #222);
+        border: 1px solid #aaa; border-radius: 8px;
+    }
+    .mobile-footer-details-panel p { display: block; white-space: normal; }
     .footer-info button, .footer-org-menu-trigger { min-height: 44px; }
     .footer-org-menu {
         position: fixed;

@@ -5,6 +5,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+const baseline = process.env.VON_LAYOUT_BASELINE;
 const { chromium, expect } = require('@playwright/test');
 const root = path.resolve(__dirname, '../../src/frontend/web/von_interface');
 const evidence = process.argv[2];
@@ -26,6 +28,14 @@ const server = http.createServer((req, res) => {
     const file = path.resolve(root, `.${req.url}`);
     if (!file.startsWith(`${root}/static/`) || !fs.existsSync(file)) return res.writeHead(404).end();
     res.setHeader('Content-Type', file.endsWith('.css') ? 'text/css' : 'text/javascript');
+    if (baseline && req.url === '/static/styles.css') {
+        return res.end(execFileSync('git', ['show', `${baseline}:src/frontend/web/von_interface/static/styles.css`]));
+    }
+    if (baseline && req.url === '/static/js/components/dynamicLayout.js') {
+        const main = execFileSync('git', ['show', `${baseline}:src/frontend/web/von_interface/static/js/main.js`], { encoding: 'utf8' });
+        const start = main.indexOf('function setupDynamicLayout()');
+        return res.end('export ' + main.slice(start, main.indexOf('\n}', start) + 2));
+    }
     res.end(fs.readFileSync(file));
 });
 async function noOverflow(page) {
@@ -43,7 +53,7 @@ async function noOverflow(page) {
             { name: 'unfolded', width: 840, height: 900, touch: true },
             { name: 'landscape', width: 915, height: 412, touch: true },
             { name: 'desktop', width: 1440, height: 900 }
-        ]) {
+        ].filter(profile => !baseline || profile.name === 'desktop')) {
             const page = await browser.newPage({ viewport: profile, hasTouch: !!profile.touch, isMobile: !!profile.touch });
             await page.goto(`http://127.0.0.1:${server.address().port}`);
             await noOverflow(page);
@@ -87,7 +97,7 @@ async function noOverflow(page) {
             const menu = await page.locator('.footer-org-menu').boundingBox();
             assert(menu.x >= 0 && menu.x + menu.width <= profile.width + 1 && menu.y >= 0, 'organisation menu fits');
             await page.locator('.footer-org-menu-trigger').click();
-            if (evidence) await page.screenshot({ path: path.join(evidence, `${profile.name}.png`), fullPage: false });
+            if (evidence) await page.screenshot({ animations: 'disabled', path: path.join(evidence, `${profile.name}.png`), fullPage: false });
             if (profile.name === 'pixel-8') {
                 await page.setViewportSize({ width: 412, height: 430 });
                 await input.focus();
@@ -97,7 +107,7 @@ async function noOverflow(page) {
                 const send = await page.locator('#sendButton').boundingBox();
                 const footer = await page.locator('.footer-container').boundingBox();
                 assert(send.y >= 0 && send.y + send.height <= footer.y, 'keyboard-sized viewport keeps send above footer');
-                if (evidence) await page.screenshot({ path: path.join(evidence, 'pixel-8-keyboard.png') });
+                if (evidence) await page.screenshot({ animations: 'disabled', path: path.join(evidence, 'pixel-8-keyboard.png') });
                 await page.setViewportSize({ width: 840, height: 900 });
                 await expect(input).toHaveValue('Draft survives resizing and folding.');
                 await page.setViewportSize({ width: 412, height: 915 });
@@ -113,11 +123,11 @@ async function noOverflow(page) {
             }, template('concept_tab.html'));
             await noOverflow(page);
             await page.locator('#discussConceptButton').click({ trial: true });
-            if (evidence) await page.screenshot({ path: path.join(evidence, `${profile.name}-concept.png`) });
+            if (evidence) await page.screenshot({ animations: 'disabled', path: path.join(evidence, `${profile.name}-concept.png`) });
             await page.goto(`http://127.0.0.1:${server.address().port}/settings`);
             await noOverflow(page);
             await expect(page.locator('#preferredLanguageSelect')).toBeVisible();
-            if (evidence) await page.screenshot({ path: path.join(evidence, `${profile.name}-settings.png`) });
+            if (evidence) await page.screenshot({ animations: 'disabled', path: path.join(evidence, `${profile.name}-settings.png`) });
             console.log(JSON.stringify({ profile: profile.name, passed: true, source: 'synthetic production-template fixture' }));
             await page.close();
         }
