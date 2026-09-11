@@ -35,6 +35,21 @@ test('End cancels capture and playback; late final cannot submit', async () => {
     expect(input.cancel).toHaveBeenCalled(); expect(playback.stop).toHaveBeenCalledWith('ended');
     expect(submit).not.toHaveBeenCalled();
 });
+test('next user turn clears the ended notice without stopping active voice', async () => {
+    await voice.start();
+    const status = document.querySelector('p');
+    const activeStatus = status.textContent;
+    voice.clearStatus();
+    expect(status.textContent).toBe(activeStatus);
+    expect(input.cancel).not.toHaveBeenCalled();
+    callbacks.onFinal('Voice turn', 'one');
+    voice.end();
+    expect(status.textContent).toBe('Voice ended. Microphone released.');
+    voice.clearStatus();
+    expect(status.textContent).toBe('');
+    callbacks.onPartial('late caption');
+    expect(status.textContent).toBe('');
+});
 test('conversation switch ends capture before next final can write elsewhere', async () => {
     await voice.start(); context = { key: 'other', sessionId: 'other' }; callbacks.onFinal('wrong scope', 'one');
     expect(input.cancel).toHaveBeenCalled(); expect(submit).not.toHaveBeenCalled();

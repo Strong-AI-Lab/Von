@@ -3,7 +3,8 @@
 const chatTabModulePath = '../../src/frontend/web/von_interface/static/js/chatTab.js';
 
 jest.mock('../../src/frontend/web/von_interface/static/js/voiceConversation.js', () => ({
-    createVoiceConversation: jest.fn(() => ({ end: jest.fn(), dispose: jest.fn(), isActive: () => false, reply: jest.fn() }))
+    createVoiceConversation: jest.fn(({ status }) => ({ end: jest.fn(), dispose: jest.fn(), isActive: () => false, reply: jest.fn(),
+        clearStatus: jest.fn(() => { status.textContent = ''; }) }))
 }));
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
@@ -79,7 +80,11 @@ describe('chat task queue', () => {
 
     test('voice utterances use canonical server enqueue with frozen speech correlation and a stable submission ID', async () => {
         const chat = require(chatTabModulePath);
-        document.body.insertAdjacentHTML('beforeend', '<button id="resetButton"></button><button id="voiceConversationButton"></button><p id="voiceConversationStatus"></p>');
+        document.body.insertAdjacentHTML('beforeend', `<button id="resetButton"></button>
+            <button id="voiceConversationButton"></button><p id="voiceConversationStatus"></p>
+            <button id="dictateButton"></button><p id="dictationStatus"></p>
+            <button id="cancelDictationButton"></button><button id="retryDictationButton"></button>
+            <select id="dictationEngineSelect"><option value="recorded">Recorded</option></select>`);
         const calls = [];
         global.fetch = jest.fn(async (url, options = {}) => {
             calls.push({ url, options });
@@ -98,6 +103,19 @@ describe('chat task queue', () => {
         expect(body).toMatchObject({ prompt_raw: 'Discuss Vontology', dispatch_mode: 'server', enqueue_submission_id: 'speech-attempt-item-one',
             execution_envelope: { client_context: { speech_attempt_ids: ['speech-attempt'], speech_item_id: 'item-one' } } });
         expect(calls.some(c => String(c.url).startsWith('/von/generate'))).toBe(false);
+        await flushMicrotasks();
+        const voiceStatus = document.getElementById('voiceConversationStatus');
+        const dictationStatus = document.getElementById('dictationStatus');
+        voiceStatus.textContent = 'Voice ended. Microphone released.';
+        dictationStatus.textContent = 'Recorded audio and visible conversation context are sent to OpenAI for transcription. Audio is not saved by Von.';
+        document.getElementById('thinkingCardWrapper').setAttribute('aria-hidden', 'false');
+        document.getElementById('promptInput').value = 'The following user turn';
+        const nextTurn = chat.sendMessage();
+        expect(voiceStatus.textContent).toBe('');
+        expect(dictationStatus.textContent).toBe('');
+        await nextTurn;
+        expect(voiceStatus.textContent).toBe('');
+        expect(dictationStatus.textContent).toBe('');
     });
 
     test('sends the stored Gemini choice as a bare model with its exact provider', async () => {

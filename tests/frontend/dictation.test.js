@@ -34,6 +34,24 @@ describe('recorded dictation lifecycle', () => {
         await flush();
     });
     afterEach(() => controller.dispose());
+    test('next turn dismisses the audio notice through late and subsequent capability refreshes', async () => {
+        const status = document.querySelector('p');
+        expect(status.textContent).toContain('Recorded audio and visible conversation context');
+        const response = deferred();
+        fetchImpl.mockReturnValueOnce(response.promise);
+        const refresh = controller.refreshCapabilities();
+        controller.clearStatus();
+        expect(status.textContent).toBe('');
+        response.resolve({ ok: true, json: async () => ({ transcription: { available: true } }) });
+        await refresh;
+        await controller.refreshCapabilities();
+        expect(status.textContent).toBe('');
+        await controller.start();
+        expect(status.textContent).toContain('Listening');
+        controller.clearStatus();
+        expect(status.textContent).toContain('Listening');
+        expect(controller.hasPendingInput()).toBe(true);
+    });
     test('keeps the microphone icon and exposes recording state accessibly', async () => {
         const icon = buttons[0].querySelector('svg');
         await controller.start();

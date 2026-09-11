@@ -44,6 +44,7 @@ export function createDictationController({ input, button, status, cancelButton,
     const attemptIds = [];
     let engineChosen = false;
     let voiceActive = false;
+    let statusDismissed = false;
     let pressTimer = null, touchOrigin = null, suppressClick = false;
     const clearPress = () => { clearTimeout(pressTimer); pressTimer = null; touchOrigin = null; };
     const pointerDown = event => {
@@ -158,6 +159,7 @@ export function createDictationController({ input, button, status, cancelButton,
     }
 
     async function start() {
+        statusDismissed = false;
         if (current) cancel();
         const context = getContext();
         const capture = { key: context.key, context, base: input.value,
@@ -269,7 +271,7 @@ export function createDictationController({ input, button, status, cancelButton,
                 engineSelect.value = 'streaming';
                 engineChosen = true;
             }
-            render('idle', capability?.available
+            if (!statusDismissed && !voiceActive) render('idle', capability?.available
                 ? 'Recorded audio and visible conversation context are sent to OpenAI for transcription. Audio is not saved by Von.'
                 : capability?.reason || 'Recorded transcription is unavailable.');
         }
@@ -303,6 +305,10 @@ export function createDictationController({ input, button, status, cancelButton,
     render('idle');
     void refreshCapabilities();
     return { cancel, finish, start, refreshCapabilities,
+        clearStatus() {
+            statusDismissed = true;
+            if (!current && !voiceActive) render('idle');
+        },
         setVoiceActive: active => { voiceActive = active; render(state, status.textContent); }, getAttemptIds: () => [...attemptIds], clearAttemptIds: () => { attemptIds.length = 0; },
         getState: () => state, hasPendingInput: () => !!current,
         dispose: () => { clearPress(); cancel(); disposed = true;
