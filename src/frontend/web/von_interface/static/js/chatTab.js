@@ -1,3 +1,5 @@
+import { createConversationTray } from './components/conversationTray.js';
+import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_NARROW_QUERY, loadConversationLayoutPreferences, normaliseConversationLayout, saveConversationLayoutPreference } from './utils/conversationLayoutPreferences.js';
 import { createVoiceConversation } from './voiceConversation.js';
 import { getClientContext } from './clientContext.js';
 import { createDictationController } from './dictation.js';
@@ -1247,10 +1249,10 @@ const LS_HIDDEN_CHAT_SESSIONS_PREFIX = 'von:hiddenChatSessionIds';
 const LS_PINNED_CHAT_SESSIONS_PREFIX = 'von:pinnedChatSessionIds';
 const LS_CHAT_SESSION_LAST_ACCESSED_PREFIX = 'von:chatSessionLastAccessed';
 const LS_AGENT_CREATED_CHAT_SESSIONS_VISIBLE_PREFIX = 'von:showAgentCreatedChatSessions';
-const LS_CHAT_SESSION_TABS_LAYOUT_PREFIX = 'von:chatSessionTabsLayout';
+const LS_CHAT_SESSION_TABS_LAYOUT_PREFIX = CONVERSATION_LAYOUT_KEY;
 const CHAT_SESSION_TABS_LAYOUT_HORIZONTAL = 'horizontal';
 const CHAT_SESSION_TABS_LAYOUT_VERTICAL = 'vertical';
-const CHAT_SESSION_TABS_NARROW_MEDIA_QUERY = '(max-width: 800px)';
+const CHAT_SESSION_TABS_NARROW_MEDIA_QUERY = CONVERSATION_NARROW_QUERY;
 const CHAT_SESSION_TABS_FETCH_LIMIT = 200;
 const AGENT_CREATED_CHAT_SESSION_ORIGIN_KINDS = new Set([
     'browser_test_fixture',
@@ -1268,7 +1270,8 @@ let _pinnedSessionsUserKey = null; // Track current user's localStorage key
 let _agentCreatedSessionsVisibleUserKey = null;
 let chatSessionLastAccessedMap = new Map();
 let _chatSessionLastAccessedUserKey = null;
-let chatSessionTabsLayout = CHAT_SESSION_TABS_LAYOUT_HORIZONTAL;
+let chatSessionTabsLayout = loadConversationLayoutPreferences().layout;
+let conversationTrayController = null;
 let chatSessionTabsLayoutMediaQuery = null;
 let chatSessionTabsLayoutMediaListenerBound = false;
 let agentCreatedSessionVisibilityState = {
@@ -1317,9 +1320,7 @@ function getChatSessionTabsLayoutStorageKey() {
 }
 
 function normaliseChatSessionTabsLayout(value) {
-    return value === CHAT_SESSION_TABS_LAYOUT_VERTICAL
-        ? CHAT_SESSION_TABS_LAYOUT_VERTICAL
-        : CHAT_SESSION_TABS_LAYOUT_HORIZONTAL;
+    return normaliseConversationLayout(value);
 }
 
 function isChatSessionTabsNarrowViewport() {
@@ -1365,6 +1366,11 @@ function applyChatSessionTabsLayout(layout = chatSessionTabsLayout) {
     if (workspace) {
         workspace.dataset.tabsLayout = preferred;
         workspace.dataset.effectiveTabsLayout = effective;
+        if (conversationTrayController?.workspace !== workspace) {
+            conversationTrayController?.destroy();
+            conversationTrayController = createConversationTray(workspace);
+        }
+        conversationTrayController.refresh(loadConversationLayoutPreferences());
     }
     if (chatTab) {
         chatTab.dataset.conversationTabsLayout = preferred;
@@ -1385,24 +1391,22 @@ function applyChatSessionTabsLayout(layout = chatSessionTabsLayout) {
 }
 
 function loadChatSessionTabsLayoutPreference() {
-    const storageKey = getChatSessionTabsLayoutStorageKey();
-    let stored = null;
-    try {
-        stored = localStorage.getItem(storageKey);
-    } catch (e) {
-        console.warn('[chatTab] Failed to load conversation tab layout from localStorage:', e);
-    }
-    return applyChatSessionTabsLayout(normaliseChatSessionTabsLayout(stored));
+    return applyChatSessionTabsLayout(loadConversationLayoutPreferences().layout);
 }
 
 function saveChatSessionTabsLayoutPreference() {
-    const storageKey = getChatSessionTabsLayoutStorageKey();
-    try {
-        localStorage.setItem(storageKey, normaliseChatSessionTabsLayout(chatSessionTabsLayout));
-    } catch (e) {
-        console.warn('[chatTab] Failed to save conversation tab layout to localStorage:', e);
-    }
+    saveConversationLayoutPreference(CONVERSATION_LAYOUT_KEY, chatSessionTabsLayout);
 }
+
+// Settings may be embedded in an iframe. Its existing preference event reaches
+// the parent; storage events cover separate same-origin windows.
+function handleConversationLayoutPreferenceChange(event) {
+    const key = event.type === 'storage' ? event.key : event?.detail?.key;
+    if (key !== null && !CONVERSATION_LAYOUT_KEYS.includes(key)) return;
+    loadChatSessionTabsLayoutPreference();
+}
+window.addEventListener('von-preferences-changed', handleConversationLayoutPreferenceChange);
+window.addEventListener('storage', handleConversationLayoutPreferenceChange);
 
 function setChatSessionTabsLayout(layout, options = {}) {
     const result = applyChatSessionTabsLayout(layout);
@@ -27721,6 +27725,10 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             preview.title = previewText;
         }
 
+        // The compact rail hides visible title/metadata, but retains their accessible name.
+        tab.dataset.trayInitial = Array.from(displayName || 'Conversation')[0].toLocaleUpperCase();
+        tab.setAttribute('aria-label', tab.title);
+        tab.setAttribute('data-keep-title', 'true');
         tab.appendChild(header);
         tab.appendChild(meta);
         if (previewText) {

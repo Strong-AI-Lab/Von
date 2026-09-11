@@ -1,14 +1,26 @@
 <!-- Chat Tab Content -->
 <div id="chatTab" class="tab-content active">
   <div class="content-wrapper">
-    <div id="conversationWorkspace" class="conversation-workspace" data-tabs-layout="horizontal"
+    <div id="conversationWorkspace" class="conversation-workspace" data-tabs-layout="vertical"
       data-effective-tabs-layout="horizontal">
-      <div class="chat-session-tabs-row" aria-label="Conversation sessions">
-        <div id="chatSessionTabs" class="chat-session-tabs" role="tablist" aria-label="Conversation sessions"
-          aria-orientation="horizontal"></div>
-        <div class="chat-session-history-summary" aria-label="Conversation history summary">
-          <div id="chatSessionHistoryControls" class="chat-session-history-controls"></div>
+      <div class="chat-conversation-nav">
+        <div class="chat-session-tabs-row" aria-label="Conversation sessions">
+          <div class="conversation-tray-header">
+            <button id="conversationTrayToggle" class="conversation-tray-toggle" type="button"
+              aria-label="Collapse conversation list" aria-expanded="true" aria-controls="chatSessionTabs"
+              title="Collapse conversation list" data-keep-title="true"><span aria-hidden="true">◧</span></button>
+            <span class="conversation-tray-heading">Conversations</span>
+          </div>
+          <div id="chatSessionTabs" class="chat-session-tabs" role="tablist" aria-label="Conversation sessions"
+            aria-orientation="horizontal"></div>
+          <div class="chat-session-history-summary" aria-label="Conversation history summary">
+            <div id="chatSessionHistoryControls" class="chat-session-history-controls"></div>
+          </div>
         </div>
+        <div id="conversationTrayResize" class="conversation-tray-resize" role="separator" tabindex="0"
+          aria-label="Resize conversation list" aria-orientation="vertical" aria-valuemin="220"
+          aria-valuemax="400" aria-valuenow="260" aria-controls="chatSessionTabs"
+          title="Drag to resize, or use left and right arrow keys" data-keep-title="true"></div>
       </div>
       <div class="chat-conversation-main">
         <div class="chat-conversation-masthead">
