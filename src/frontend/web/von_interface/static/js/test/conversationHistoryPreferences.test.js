@@ -25,7 +25,7 @@ describe('conversationHistoryPreferences', () => {
         expect(clampConversationHistoryRecentWindowDays(99999)).toBe(3650);
     });
 
-    test('selects sessions by recency window and access order with limit', () => {
+    test('orders by published contributions even when access history disagrees', () => {
         const nowMs = Date.parse('2026-02-16T00:00:00Z');
         const sessions = [
             { session_id: 'a', last_message_at: '2026-02-15T10:00:00Z' },
@@ -50,7 +50,7 @@ describe('conversationHistoryPreferences', () => {
         expect(limited.totalMatchingCount).toBe(3);
         expect(limited.hiddenByLimitCount).toBe(1);
         expect(limited.olderThanWindowCount).toBe(1);
-        expect(limited.sessionsToRender.map((s) => s.session_id)).toEqual(['b', 'a']);
+        expect(limited.sessionsToRender.map((s) => s.session_id)).toEqual(['a', 'b']);
 
         const expanded = selectConversationHistorySessions({
             sessions,
@@ -60,7 +60,7 @@ describe('conversationHistoryPreferences', () => {
             showAll: true,
             nowMs
         });
-        expect(expanded.sessionsToRender.map((s) => s.session_id)).toEqual(['b', 'a', 'c']);
+        expect(expanded.sessionsToRender.map((s) => s.session_id)).toEqual(['a', 'b', 'c']);
     });
 
     test('reads persisted settings using configured storage keys', () => {

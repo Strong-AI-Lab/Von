@@ -1851,7 +1851,10 @@ export async function setModelInfoFooterText() {
       span.className = 'footer-segment';
       span.textContent = seg;
       footer.appendChild(span);
-    } else { footer.appendChild(seg); }
+    } else {
+      if (seg.querySelector?.('.footer-label-inline')?.textContent?.trim().startsWith('Model:')) seg.classList.add('conversation-model-controls');
+      footer.appendChild(seg);
+    }
     if (idx < segments.length - 1) {
       const sep = document.createElement('span');
       sep.className = 'footer-separator';

@@ -8,6 +8,7 @@
     <!-- Link to shared CSS file -->
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
     <!-- Inline styles migrated to styles.css; keep markup clean. -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/participantProfile.css') }}">
 </head>
 
 <body class="settings-body">
@@ -41,6 +42,7 @@
 
         <section id="current-user-settings" data-settings-concern="identity">
             <h2>Signed-in Identity</h2>
+            <div id="participantProfileSettings"></div>
 
             <!-- Authentication Status -->
             <div id="authenticationStatus">

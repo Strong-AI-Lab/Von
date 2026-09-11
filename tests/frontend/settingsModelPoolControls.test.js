@@ -554,6 +554,36 @@ describe('settings model scope and workflow pool controls', () => {
         expect(document.getElementById('saveModelPoolButton').disabled).toBe(true);
     });
 
+    test.each([null, '#V#lab'])('background settings preserves an established window actor in %s', async (organisationId) => {
+        sessionStorage.setItem('von_current_user', JSON.stringify({ concept_id: '#V#alice' }));
+        if (organisationId) sessionStorage.setItem('von_current_org', JSON.stringify({ concept_id: organisationId }));
+        const setUserConcept = jest.fn();
+        const switchOrganisationFn = jest.fn();
+        const result = await __testOnly_syncInitialScopedSelections({
+            readSessionContext: async () => ({ authenticated: true, context_source: 'window_session', user_id: '#V#alice', organisation_id: organisationId, namespace: 'verified-namespace', role: 'member' }),
+            setUserConcept, switchOrganisationFn, refreshRagStatus: jest.fn(),
+        });
+        expect(result).toMatchObject({ applied: true, namespace: 'verified-namespace', role: 'member' });
+        expect(setUserConcept).not.toHaveBeenCalled();
+        expect(switchOrganisationFn).not.toHaveBeenCalled();
+    });
+
+    test.each([
+        { context_source: 'flask_session', user_id: '#V#alice' },
+        { context_source: 'window_session', user_id: '#V#other' },
+        { context_source: 'window_session', user_id: '#V#alice', organisation_id: '#V#other-org' },
+    ])('initial settings still binds a missing or different window actor: %j', async (context) => {
+        sessionStorage.setItem('von_current_user', JSON.stringify({ concept_id: '#V#alice' }));
+        const setUserConcept = jest.fn(async () => ({ namespace: '#V#alice' }));
+        const switchOrganisationFn = jest.fn(async () => ({ namespace: '#V#alice' }));
+        await __testOnly_syncInitialScopedSelections({
+            readSessionContext: async () => ({ authenticated: true, ...context }),
+            setUserConcept, switchOrganisationFn, refreshRagStatus: jest.fn(),
+        });
+        expect(setUserConcept).toHaveBeenCalledWith('#V#alice');
+        expect(switchOrganisationFn).toHaveBeenCalledWith(null, null);
+    });
+
     test('failed initial actor commit restores committed context and leaves Save disabled', async () => {
         sessionStorage.setItem('von_current_user', JSON.stringify({
             concept_id: '#V#restored-user',

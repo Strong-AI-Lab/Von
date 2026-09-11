@@ -83,15 +83,6 @@ export function loadConversationHistorySettings(readStorage = null) {
     };
 }
 
-function getAccessTimestampMs(session, accessTimestampBySessionId = {}) {
-    const sessionId = (typeof session?.session_id === 'string') ? session.session_id.trim() : '';
-    const sessionAccessTs = sessionId ? accessTimestampBySessionId[sessionId] : null;
-    return parseIsoTimestampMs(sessionAccessTs)
-        ?? parseIsoTimestampMs(session?.last_accessed_at)
-        ?? getSessionOccurredAtMs(session)
-        ?? 0;
-}
-
 export function selectConversationHistorySessions({
     sessions = [],
     accessTimestampBySessionId = {},
@@ -107,7 +98,7 @@ export function selectConversationHistorySessions({
     let olderThanWindowCount = 0;
     const sessionsInWindow = sessions.filter((session) => {
         const occurredAtMs = getSessionOccurredAtMs(session);
-        if (occurredAtMs !== null && occurredAtMs < cutoffMs) {
+        if (!(session?.shared_unread_count > 0) && occurredAtMs !== null && occurredAtMs < cutoffMs) {
             olderThanWindowCount += 1;
             return false;
         }
@@ -115,8 +106,8 @@ export function selectConversationHistorySessions({
     });
 
     const sorted = sessionsInWindow.slice().sort((a, b) => (
-        getAccessTimestampMs(b, accessTimestampBySessionId)
-        - getAccessTimestampMs(a, accessTimestampBySessionId)
+        (getSessionOccurredAtMs(b) || 0) - (getSessionOccurredAtMs(a) || 0)
+        || String(a?.session_id || '').localeCompare(String(b?.session_id || ''))
     ));
 
     const limited = showAll ? sorted : sorted.slice(0, safeLimit);

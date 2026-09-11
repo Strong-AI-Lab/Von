@@ -1,3 +1,4 @@
+import { profileButton } from './components/participantProfile.js';
 import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_TRAY_HOVER_KEY, loadConversationLayoutPreferences, normaliseConversationLayout, saveConversationLayoutPreference } from './utils/conversationLayoutPreferences.js';
 import { supportsAudioRecording } from './dictation.js';
 import { ensureUniqueWindowSessionId, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
@@ -8,6 +9,7 @@ import {
   subscribeBackgroundTaskUpdates
 } from './backgroundTaskTracker.js';
 import {
+  getSessionContext,
   normaliseOrganisationDisplayName,
   renderOrgSelector,
   setupOrgSwitchListener,
@@ -1105,6 +1107,7 @@ function resolveDisplayedProviderModels(settings) {
 }
 
 async function syncInitialScopedSelections({
+  readSessionContext = getSessionContext,
   setUserConcept = async (userConceptId) =>
     postJson('/von/api/session/set_user_concept', { user_concept_id: userConceptId }),
   switchOrganisationFn = switchOrganisation,
@@ -1123,8 +1126,17 @@ async function syncInitialScopedSelections({
     throw new Error('No authenticated user is available for scoped model settings.');
   }
   try {
-    const userResponse = await setUserConcept(userData.concept_id);
-    const organisationResponse = await switchOrganisationFn(
+    // Settings loads in a background iframe. Rebinding an already established
+    // window actor emits an organisation switch and erases an active message
+    // selection (or an in-flight compose). Read the actual server binding first;
+    // browser preferences alone are not evidence that the actor is established.
+    const context = await readSessionContext().catch(() => null);
+    const alreadyBound = context?.authenticated === true
+      && context.context_source === 'window_session'
+      && context.user_id === userData.concept_id
+      && (context.organisation_id || null) === (orgData?.concept_id || null);
+    const userResponse = alreadyBound ? context : await setUserConcept(userData.concept_id);
+    const organisationResponse = alreadyBound ? context : await switchOrganisationFn(
       orgData?.concept_id || null,
       orgData?.name || null,
     );
@@ -6857,3 +6869,10 @@ async function shutdownServer() {
     if (statusEl) { statusEl.textContent = 'Shutdown failed: ' + e.message; statusEl.className = 'status-message error'; }
   }
 }
+
+function mountParticipantSettings() {
+  const host = document.getElementById('participantProfileSettings');
+  if (host && !host.children.length) host.append(profileButton(null, 'Edit my profile and avatar'));
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mountParticipantSettings);
+else mountParticipantSettings();

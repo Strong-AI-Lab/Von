@@ -1,3 +1,6 @@
+import { initializeConceptAutocomplete } from './conceptAutocomplete.js';
+import { simpleMarkdownToHtml } from '../markdownUtils.js';
+import { profileButton, participantAvatar } from './participantProfile.js';
 /**
  * Message Panel Component (JVNAUTOSCI-1071)
  *
@@ -8,7 +11,7 @@
 import { getJson, postJson, postJsonDetailed } from '../apiService.js';
 import { getSessionScopedOrgId } from '../utils/sessionScopedStorage.js';
 import { hydrateConceptCartouchesInRoot } from '../utils/selectConceptByIdHandler.js';
-import { cartouchifyElementText } from '../utils/textDecorator.js';
+import { createCartoucheFragment } from '../utils/textDecorator.js';
 import { showToast } from '../utils/toast.js';
 import { buildMessageStreamReference } from '../utils/messageStreamReference.js';
 import { copyTextWithClipboardFallback } from '../utils/copyJsonButtonState.js';
@@ -33,6 +36,108 @@ let _newMessageSendPending = false;
 let _replyDeliveryAttempt = null;
 let _newMessageDeliveryAttempt = null;
 let _deliveryKeySequence = 0;
+
+let _exchange = null;
+let _exchangeGeneration = 0;
+let _olderCursor = null;
+let _readObserver = null;
+const _exchangeDrafts = new Map();
+
+function exchangeScope(row = _exchange) {
+    return row ? `${row.browser_scope ?? getSessionScopedOrgId() ?? ''}:${row.viewer_id}:${row.session_id}` : '';
+}
+
+export function resetMessagePanelContext() {
+    const input = _messagesContainer?.querySelector('#messageInput');
+    if (_exchange && input) _exchangeDrafts.set(exchangeScope(), input.value);
+    _exchangeGeneration += 1;
+    _exchange = null;
+    _currentConversationUserId = null;
+    _currentMessages = [];
+    _isLoading = false;
+    _readObserver?.disconnect();
+    _messagesContainer?.replaceChildren();
+}
+
+export async function openMessageExchange(row) {
+    const oldInput = _messagesContainer?.querySelector('#messageInput');
+    if (_exchange && oldInput) _exchangeDrafts.set(exchangeScope(), oldInput.value);
+    _exchangeGeneration += 1;
+    _isLoading = false;
+    _readObserver?.disconnect();
+    _exchange = { ...row, browser_scope: getSessionScopedOrgId() };
+    resetMessagesViewportPosition();
+    _olderCursor = null;
+    if (!_messagesContainer) initializeMessagePanel();
+    if (!_messagesContainer?.querySelector('#messageViewContent')) renderMessagesTabContent();
+    _currentUserId = row.viewer_id;
+    const selectedGeneration = _exchangeGeneration;
+    await selectConversation(row.other_participant_ids[0] || row.viewer_id);
+    if (selectedGeneration !== _exchangeGeneration) return;
+    const title = _messagesContainer?.querySelector('#conversationTitle');
+    if (title) title.textContent = row.session_name;
+    const header = _messagesContainer?.querySelector('#messageViewHeader');
+    header?.querySelectorAll('.exchange-profile-button').forEach(el => el.remove());
+    for (const id of row.participant_ids) {
+        const b = profileButton(id, id === row.viewer_id ? 'Your profile' : 'Participant profile');
+        b.className = 'exchange-profile-button'; header?.append(b);
+    }
+    const input = _messagesContainer?.querySelector('#messageInput');
+    if (input) {
+        input.value = _exchangeDrafts.get(exchangeScope()) || '';
+        input.placeholder = `Reply to ${row.session_name}`;
+    }
+    const compose = _messagesContainer?.querySelector('#messageComposeArea');
+    let destination = compose?.querySelector('.message-reply-destination');
+    if (compose && !destination) { destination = document.createElement('p'); destination.className = 'message-reply-destination'; compose.prepend(destination); }
+    if (destination) destination.textContent = `To: ${row.session_name} · ${row.organisation_concept_id?.replace(/^#V#/, '').replaceAll('_', ' ') || 'Original conversation context'}`;
+    // A legacy group exchange can be read without silently dropping recipients.
+    if (row.other_participant_ids.length > 1) {
+        if (destination) destination.textContent += ' · Group replies are not yet supported.';
+        if (input) input.disabled = true;
+        const send = compose?.querySelector('#sendMessageBtn'); if (send) send.disabled = true;
+    } else {
+        if (input) input.disabled = false;
+        const send = compose?.querySelector('#sendMessageBtn'); if (send) send.disabled = false;
+    }
+}
+
+let composerOpenedFromChat = false;
+
+export async function showMessageComposer() {
+    if (!_messagesContainer) initializeMessagePanel();
+    if (!_messagesContainer?.querySelector('#newMessageModal')) renderMessagesTabContent();
+    const workspace = document.getElementById('conversationWorkspace');
+    composerOpenedFromChat = !workspace?.classList.contains('show-message-exchange');
+    workspace?.classList.add('show-message-exchange');
+    document.body.classList.add('viewing-message-exchange');
+    showNewMessageModal();
+}
+
+export async function refreshOpenMessageExchange() {
+    if (!_exchange || document.hidden || !document.getElementById('conversationWorkspace')?.classList.contains('show-message-exchange')) return;
+    await loadConversation(_currentConversationUserId, { silent: true });
+}
+
+function observeDisplayedMessages() {
+    _readObserver?.disconnect();
+    if (typeof IntersectionObserver !== 'function') return;
+    const root = _messagesContainer?.querySelector('#messageViewContent');
+    _readObserver = new IntersectionObserver(entries => {
+        if (document.hidden || !root?.getClientRects().length) return;
+        const ids = entries.filter(entry => entry.isIntersecting && entry.intersectionRatio > 0)
+            .map(entry => entry.target.dataset.contributionId)
+            .filter(id => _currentMessages.some(m => m.concept_id === id && (m.relationships?.['#V#has_recipient'] || []).includes(_currentUserId) && !(m.concept_data?.read_by || []).includes(_currentUserId)));
+        if (!ids.length) return;
+        const generation = _exchangeGeneration;
+        void postJson('/api/messages/read/bulk', { message_ids: ids }).then(() => {
+            if (generation !== _exchangeGeneration) return;
+            _currentMessages.forEach(m => { if (ids.includes(m.concept_id)) { m.concept_data ||= {}; m.concept_data.read_by = [...new Set([...(m.concept_data.read_by || []), _currentUserId])]; } });
+            document.dispatchEvent(new CustomEvent('von:conversation-contribution'));
+        }).catch(() => {});
+    }, { root, threshold: 0.01 });
+    root?.querySelectorAll('[data-contribution-id]').forEach(el => _readObserver.observe(el));
+}
 
 const COMPOSE_SCOPE_REPLY = 'reply';
 const COMPOSE_SCOPE_NEW_MESSAGE = 'newMessage';
@@ -176,7 +281,7 @@ function renderMessagesTabContent() {
                 <div class="message-modal-body">
                     <label for="newMessageRecipient">To:</label>
                     <input type="text" id="newMessageRecipient" class="message-recipient-input"
-                           placeholder="Enter recipient concept ID (e.g., #V#username)">
+                           placeholder="Type #V# then a person or agent name">
                     <label for="newMessageContent">Message:</label>
                     <textarea id="newMessageContent" class="message-content-input"
                               placeholder="Type your message..." rows="4"></textarea>
@@ -200,6 +305,7 @@ function renderMessagesTabContent() {
 
     // Attach event listeners
     attachMessagesEventListeners();
+    initializeConceptAutocomplete(_messagesContainer.querySelector('#newMessageRecipient'));
     restoreNewMessageDeliveryAttemptForCurrentScope();
     renderComposePendingUi(COMPOSE_SCOPE_REPLY);
     renderComposePendingUi(COMPOSE_SCOPE_NEW_MESSAGE);
@@ -491,7 +597,7 @@ function bindMessageStreamMenu(element, getOtherUserId) {
         if (!otherUserId || !userId) return;
         const thread = _threads.find(row => getThreadUserId(row) === otherUserId);
         const messages = otherUserId === _currentConversationUserId ? _currentMessages : [thread?.last_message].filter(Boolean);
-        const payload = buildMessageStreamReference({ currentUserId: userId, otherUserId, messages, displayName: `Conversation with ${formatUserName(otherUserId)}` });
+        const payload = buildMessageStreamReference({ currentUserId: userId, otherUserId, messages, displayName: _exchange?.session_name || `Conversation with ${formatUserName(otherUserId)}`, participantIds: _exchange?.participant_ids, organisationConceptId: _exchange?.organisation_concept_id });
         const { openChatSessionMenu } = await import('../chatTab.js');
         if (!element.isConnected || _currentUserId !== userId) return;
         const rect = element.getBoundingClientRect();
@@ -515,53 +621,56 @@ function bindMessageStreamMenu(element, getOtherUserId) {
 /**
  * Load messages for a conversation with a specific user.
  */
-async function loadConversation(userId) {
+async function loadConversation(userId, { silent = false, before = null } = {}) {
     if (_isLoading) return;
-
     _isLoading = true;
+    const generation = _exchangeGeneration;
+    const org = getSessionScopedOrgId();
     const contentEl = _messagesContainer?.querySelector('#messageViewContent');
-
-    if (contentEl) {
-        contentEl.innerHTML = '<div class="loading">Loading messages...</div>';
-    }
-
+    const oldTop = contentEl?.scrollTop || 0;
+    const oldHeight = contentEl?.scrollHeight || 0;
+    const nearBottom = !contentEl || oldHeight - oldTop - contentEl.clientHeight < 60;
+    if (contentEl && !silent) contentEl.innerHTML = '<div class="loading">Loading conversation…</div>';
     try {
-        const response = await getJson(`/api/messages/conversation/${encodeURIComponent(userId)}?limit=50`);
-        _currentMessages = response.messages || [];
+        const response = _exchange
+            ? await postJson('/api/messages/exchange', { participant_ids: _exchange.participant_ids, organisation_concept_id: _exchange.organisation_concept_id || null, before })
+            : await getJson(`/api/messages/conversation/${encodeURIComponent(userId)}?limit=50`);
+        if (generation !== _exchangeGeneration || org !== getSessionScopedOrgId() || userId !== _currentConversationUserId) return;
+        const incoming = response.messages || [];
+        const compare = (a, b) => new Date(a.created_at) - new Date(b.created_at) || String(a.concept_id).localeCompare(String(b.concept_id));
+        let nextMessages = incoming;
+        if (before) nextMessages = [...new Map([..._currentMessages, ...incoming].map(m => [m.concept_id, m])).values()].sort(compare);
+        else if (silent && incoming.length) {
+            // Reconcile the returned range, including deletions and edits, while
+            // retaining already loaded earlier pages. A reconnect gap remains pageable.
+            const overlap = incoming.some(m => _currentMessages.some(old => old.concept_id === m.concept_id));
+            if (!overlap && response.before) _olderCursor = response.before;
+            nextMessages = [..._currentMessages.filter(m => compare(m, incoming[0]) < 0), ...incoming];
+        }
+        const sameContent = JSON.stringify(nextMessages.map(m => [m.concept_id, m.concept_data?.content_fallback])) === JSON.stringify(_currentMessages.map(m => [m.concept_id, m.concept_data?.content_fallback]));
+        _currentMessages = nextMessages;
+        if (silent && !before && sameContent) return;
+        if (before || !silent) _olderCursor = response.before || null;
         _currentUserId = response.current_user_id || null;
         await renderMessages();
+        if (generation !== _exchangeGeneration || org !== getSessionScopedOrgId()) return;
         restoreReplyDeliveryAttemptForCurrentScope();
-
-        // Mark messages as read
-        const unreadIds = _currentMessages
-            .filter(m => {
-                const readBy = m.concept_data?.read_by || [];
-                const recipientIds = m.relationships?.['#V#has_recipient'] || [];
-                return Boolean(
-                    _currentUserId
-                    && recipientIds.includes(_currentUserId)
-                    && !readBy.includes(_currentUserId)
-                );
-            })
-            .map(m => m.concept_id);
-
-        if (unreadIds.length > 0) {
-            try {
-                await postJson('/api/messages/read/bulk', { message_ids: unreadIds });
-                await loadUnreadCount();
-            } catch (e) {
-                console.warn('[messagePanel] Failed to mark messages as read:', e);
-            }
+        if (_olderCursor && contentEl) {
+            const earlier = document.createElement('button'); earlier.type = 'button'; earlier.textContent = 'Load earlier messages';
+            earlier.onclick = () => void loadConversation(userId, { silent: true, before: _olderCursor });
+            contentEl.prepend(earlier);
         }
-
-    } catch (err) {
-        console.error('[messagePanel] Failed to load conversation:', err);
-        if (contentEl) {
-            contentEl.innerHTML = '<div class="message-error">Failed to load messages</div>';
+        if (contentEl && before) contentEl.scrollTop = oldTop + contentEl.scrollHeight - oldHeight;
+        else if (contentEl && silent && !nearBottom) {
+            contentEl.scrollTop = oldTop;
+            const jump = document.createElement('button'); jump.type = 'button'; jump.className = 'message-jump-latest'; jump.textContent = 'New messages · Jump to latest';
+            jump.onclick = () => { contentEl.scrollTop = contentEl.scrollHeight; jump.remove(); };
+            contentEl.append(jump);
         }
-    } finally {
-        _isLoading = false;
-    }
+        observeDisplayedMessages();
+    } catch (_) {
+        if (generation === _exchangeGeneration && contentEl && !silent) contentEl.innerHTML = '<div class="message-error">Could not load this conversation. Try Refresh.</div>';
+    } finally { if (generation === _exchangeGeneration) _isLoading = false; }
 }
 
 function isPaperRecommendationMessage(message) {
@@ -816,9 +925,10 @@ async function renderMessages() {
             : senderId !== _currentConversationUserId;
 
         html += `
-            <div class="message-bubble ${isSent ? 'sent' : 'received'}">
+            <div class="message-bubble ${isSent ? 'sent' : 'received'}" data-contribution-id="${escapeHtml(msg.concept_id || '')}">
+                <div class="message-author" data-participant-id="${escapeHtml(senderId)}">${escapeHtml(formatUserName(senderId))}</div>
                 ${subject ? `<div class="message-subject">${escapeHtml(subject)}</div>` : ''}
-                <div class="message-content">${escapeHtml(content)}</div>
+                <div class="message-content">${simpleMarkdownToHtml(content)}</div>
                 ${isRecommendationMessage ? `
                 <div class="message-recommendation-panel" data-message-recommendation-panel="1" data-message-id="${escapeHtml(msg.concept_id || '')}">
                     <div class="message-recommendation-header">
@@ -841,6 +951,7 @@ async function renderMessages() {
                 ` : ''}
                 <div class="message-meta">
                     <span class="message-time">${timestamp ? formatTime(timestamp) : ''}</span>
+                    <button type="button" class="message-copy-markdown" data-message-id="${escapeHtml(msg.concept_id || '')}" aria-label="Copy message as Markdown">Copy</button>
                     ${msg.concept_id ? `<button type="button" class="message-discuss-btn"
                         data-concept-id="${escapeHtml(msg.concept_id)}"
                         title="Discuss this message with Von">Discuss with Von</button>` : ''}
@@ -851,11 +962,20 @@ async function renderMessages() {
 
     html += '</div>';
     contentEl.innerHTML = html;
+    contentEl.querySelectorAll('.message-author[data-participant-id]').forEach(author => {
+        const id = author.dataset.participantId;
+        const profile = _exchange?.participant_profiles?.find(profile => profile.concept_id === id) || { display_name: formatUserName(id) };
+        author.textContent = profile.display_name;
+        author.prepend(participantAvatar(profile));
+    });
 
     const messageContentEls = Array.from(contentEl.querySelectorAll('.message-list .message-content'));
-    messageContentEls.forEach((messageContentEl, index) => {
-        const content = _currentMessages[index]?.concept_data?.content_fallback || '';
-        cartouchifyElementText(messageContentEl, content);
+    messageContentEls.forEach((messageContentEl) => {
+        // Preserve Markdown structure while decorating text nodes.
+        const walker = document.createTreeWalker(messageContentEl, NodeFilter.SHOW_TEXT);
+        const nodes = [];
+        while (walker.nextNode()) if (walker.currentNode.textContent.includes('#V#') && !walker.currentNode.parentElement.closest('code, pre, a, button')) nodes.push(walker.currentNode);
+        nodes.forEach(node => node.replaceWith(createCartoucheFragment(node.textContent)));
     });
     contentEl.querySelectorAll('[data-message-recommendation-toggle]').forEach((button) => {
         button.addEventListener('click', () => {
@@ -866,6 +986,7 @@ async function renderMessages() {
             }
         });
     });
+    contentEl.querySelectorAll('.message-copy-markdown').forEach(button => { button.onclick = async () => { const message = _currentMessages.find(m => m.concept_id === button.dataset.messageId); if (message) { const copied = await copyTextWithClipboardFallback(message.concept_data?.content_fallback || ''); button.textContent = copied ? 'Copied' : 'Copy failed'; } }; });
     contentEl.querySelectorAll('.message-discuss-btn').forEach((button) => {
         button.addEventListener('click', (event) => {
             event.preventDefault();
@@ -906,7 +1027,7 @@ function renderComposePendingUi(scope) {
     if (!button) return;
 
     const pending = isComposePending(scope);
-    button.disabled = pending;
+    button.disabled = pending || (scope === COMPOSE_SCOPE_REPLY && _exchange?.other_participant_ids?.length > 1);
     button.textContent = pending ? 'Sending…' : 'Send';
     button.setAttribute('aria-busy', pending ? 'true' : 'false');
 
@@ -1833,7 +1954,7 @@ function buildSendPayload({
         ? failureState.organisationOptions
         : [];
     const selectedOrganisationConceptId = String(
-        failureState?.selectedOrganisationConceptId || '',
+        failureState?.selectedOrganisationConceptId || (scope === COMPOSE_SCOPE_REPLY ? _exchange?.organisation_concept_id : '') || '',
     ).trim();
 
     if (organisationOptions.length > 0 && !selectedOrganisationConceptId) {
@@ -1873,6 +1994,7 @@ async function handleSendReply() {
         return;
     }
 
+    if (_exchange?.other_participant_ids?.length > 1) return;
     if (!_currentConversationUserId) {
         showToast('No conversation selected', 'warning');
         return;
@@ -1900,9 +2022,11 @@ async function handleSendReply() {
     }
 
     const submittedConversationUserId = _currentConversationUserId;
+    const submittedGeneration = _exchangeGeneration;
     setComposePending(COMPOSE_SCOPE_REPLY, true);
     try {
-        await postJsonDetailed('/api/messages/', payload);
+        const result = await postJsonDetailed('/api/messages/', payload);
+        if (submittedGeneration !== _exchangeGeneration) { document.dispatchEvent(new CustomEvent('von:conversation-contribution')); return; }
 
         resetComposeFailureUi(COMPOSE_SCOPE_REPLY);
         setDeliveryAttempt(COMPOSE_SCOPE_REPLY, null);
@@ -1913,14 +2037,20 @@ async function handleSendReply() {
         ) {
             activeReplyInput.value = '';
         }
+        _exchangeDrafts.delete(exchangeScope());
+        document.dispatchEvent(new CustomEvent('von:conversation-contribution'));
         showToast('Message sent', 'success');
 
-        // Reload conversation
-        await loadConversation(_currentConversationUserId);
+        if (_exchange && result.data?.conversation && result.data.conversation.session_id !== _exchange.session_id) {
+            // An explicit organisation recovery starts its own exchange; it
+            // must not rewrite the identity of the earlier conversation.
+            const { selectMessageConversation } = await import('./conversationCatalogue.js');
+            await selectMessageConversation(result.data.conversation);
+        } else await loadConversation(_currentConversationUserId);
 
     } catch (err) {
         console.error('[messagePanel] Failed to send message:', err);
-        recordComposeSendFailure(COMPOSE_SCOPE_REPLY, err);
+        if (submittedGeneration === _exchangeGeneration) recordComposeSendFailure(COMPOSE_SCOPE_REPLY, err);
     } finally {
         setComposePending(COMPOSE_SCOPE_REPLY, false);
     }
@@ -1947,6 +2077,12 @@ function showNewMessageModal() {
 function hideNewMessageModal({ force = false } = {}) {
     if (_newMessageSendPending && !force) {
         return;
+    }
+
+    if (composerOpenedFromChat) {
+        document.getElementById('conversationWorkspace')?.classList.remove('show-message-exchange');
+        document.body.classList.remove('viewing-message-exchange');
+        composerOpenedFromChat = false;
     }
 
     const modal = _messagesContainer?.querySelector('#newMessageModal');
@@ -2007,22 +2143,31 @@ async function handleSendNewMessage() {
         return;
     }
 
+    const submittedGeneration = _exchangeGeneration;
     setComposePending(COMPOSE_SCOPE_NEW_MESSAGE, true);
     try {
-        await postJsonDetailed('/api/messages/', payload);
+        const result = await postJsonDetailed('/api/messages/', payload);
+        if (submittedGeneration !== _exchangeGeneration) { document.dispatchEvent(new CustomEvent('von:conversation-contribution')); return; }
 
         resetComposeFailureUi(COMPOSE_SCOPE_NEW_MESSAGE);
         setDeliveryAttempt(COMPOSE_SCOPE_NEW_MESSAGE, null);
+        document.dispatchEvent(new CustomEvent('von:conversation-contribution'));
         showToast('Message sent', 'success');
         hideNewMessageModal({ force: true });
 
-        // Reload threads and select the new conversation
-        await loadMessageThreads();
-        await selectConversation(recipientId);
+        if (result.data?.conversation) {
+            const { selectMessageConversation } = await import('./conversationCatalogue.js');
+            await selectMessageConversation(result.data.conversation);
+        } else {
+            // Compatibility with an older server response.
+            _exchange = null;
+            await loadMessageThreads();
+            await selectConversation(recipientId);
+        }
 
     } catch (err) {
         console.error('[messagePanel] Failed to send new message:', err);
-        recordComposeSendFailure(COMPOSE_SCOPE_NEW_MESSAGE, err);
+        if (submittedGeneration === _exchangeGeneration) recordComposeSendFailure(COMPOSE_SCOPE_NEW_MESSAGE, err);
     } finally {
         setComposePending(COMPOSE_SCOPE_NEW_MESSAGE, false);
     }

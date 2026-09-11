@@ -361,9 +361,6 @@ def send_message() -> ResponseReturnValue:
             ),
             409,
         )
-    if not isinstance(org_id, str) or not org_id:
-        return jsonify({"error": "No organisation context"}), 400
-
     recipient_ids = _normalise_recipient_ids(data.get("recipient_ids"))
     content = data.get("content", "").strip()
 
@@ -371,6 +368,14 @@ def send_message() -> ResponseReturnValue:
         return jsonify({"error": "At least one recipient is required"}), 400
     if not content:
         return jsonify({"error": "Message content is required"}), 400
+    if not isinstance(org_id, str) or not org_id:
+        return jsonify(
+            error="Choose a shared organisation for this message",
+            error_code="message_organisation_required",
+            common_organisation_options=_build_common_organisation_options(
+                sender_id=sender_id, recipient_ids=recipient_ids
+            ),
+        ), 409
     if "idempotency_key" in data:
         return (
             jsonify(
@@ -512,6 +517,26 @@ def send_message() -> ResponseReturnValue:
 
         # Return sanitised response
         delivery_status = "reused" if reused else "created"
+        from ...services.message_catalogue_service import exchange_id
+        from ...services.chat_history_service import _coerce_datetime
+
+        participants = sorted(set([sender_id, *recipient_ids]))
+        published_at = _coerce_datetime(message.get("created_at"))
+        conversation = {
+            "session_id": exchange_id(participants, org_id),
+            "source_kind": "message_exchange",
+            "participant_ids": participants,
+            "other_participant_ids": [p for p in participants if p != sender_id],
+            "viewer_id": sender_id,
+            "organisation_concept_id": org_id,
+            "session_name": ", ".join(
+                p.removeprefix("#V#").replace("_", " ") for p in recipient_ids
+            ),
+            "last_message_id": message.get("concept_id"),
+            "last_message_at": published_at.isoformat() if published_at else None,
+            "last_author_id": sender_id,
+            "preview": content[:240],
+        }
         return (
             jsonify(
                 {
@@ -522,6 +547,7 @@ def send_message() -> ResponseReturnValue:
                     "idempotent_replay": reused,
                     "delivery_status": delivery_status,
                     "message_id": message.get("concept_id"),
+                    "conversation": conversation,
                     "sent_at": message.get("concept_data", {}).get("sent_at"),
                     "attribution": message.get("concept_data", {}).get(
                         "attribution",
@@ -920,3 +946,127 @@ def search() -> ResponseReturnValue:
         ),
         200,
     )
+
+
+@message_bp.route("/conversation-catalogue", methods=["GET"])
+def unified_conversation_catalogue():
+    from ...services.conversation_catalogue_service import list_catalogue
+
+    actor = _get_current_user_concept_id()
+    if not actor:
+        return jsonify(error="authentication_required"), 401
+    try:
+        effective = get_effective_context(
+            request.headers.get("X-Von-Window-Session"),
+            dict(session),
+            actor,
+            require_known_window=True,
+        )
+        from ...services.namespace_service import derive_namespace_for_actor
+
+        namespace = effective.get("namespace") or derive_namespace_for_actor(
+            actor, effective.get("organisation_id")
+        )
+        return jsonify(
+            list_catalogue(
+                actor,
+                namespace=namespace,
+                organisation=_get_current_org_concept_id(
+                    actor, require_known_window=True
+                ),
+                limit=request.args.get("limit", 100, type=int),
+                cursor=request.args.get("cursor"),
+                all_contexts=request.args.get("all_contexts") == "true",
+            )
+        )
+    except (ValueError, PermissionError) as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@message_bp.route("/catalogue", methods=["GET"])
+def message_catalogue():
+    from ...services.message_catalogue_service import list_exchanges
+
+    actor = _get_current_user_concept_id()
+    if not actor:
+        return jsonify(error="authentication_required"), 401
+    try:
+        result = list_exchanges(
+            actor,
+            organisation=_get_current_org_concept_id(actor, require_known_window=True),
+            limit=max(1, min(200, request.args.get("limit", 100, type=int))),
+            skip=max(0, request.args.get("skip", 0, type=int)),
+            query_text=request.args.get("q"),
+            all_contexts=request.args.get("all_contexts") == "true",
+        )
+        return jsonify(**result, current_user_id=actor)
+    except Exception:
+        _log.exception("Message catalogue unavailable")
+        return jsonify(
+            error="messages_unavailable", conversations=[], coverage_complete=False
+        ), 503
+
+
+@message_bp.route("/exchange", methods=["POST"])
+def message_exchange():
+    from ...services.message_catalogue_service import get_exchange
+
+    actor = _get_current_user_concept_id()
+    if not actor:
+        return jsonify(error="authentication_required"), 401
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = get_exchange(
+            actor,
+            payload.get("participant_ids"),
+            organisation=(
+                _normalise_concept_id(payload["organisation_concept_id"])
+                if "organisation_concept_id" in payload
+                else _get_current_org_concept_id(actor, require_known_window=True)
+            ),
+            limit=50,
+            before=payload.get("before"),
+        )
+        for message in result["messages"]:
+            message["_id"] = str(message.get("_id", ""))
+        return jsonify(result)
+    except PermissionError:
+        return jsonify(error="conversation_unavailable"), 403
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    except Exception:
+        _log.exception("Message exchange unavailable")
+        return jsonify(error="messages_unavailable"), 503
+
+
+@message_bp.route("/exchange/preference", methods=["POST"])
+def message_exchange_preference():
+    from ...services.message_catalogue_service import get_exchange, exchange_id
+    from ...services.conversation_management_service import set_conversation_preference
+
+    actor = _get_current_user_concept_id()
+    if not actor:
+        return jsonify(error="authentication_required"), 401
+    payload = request.get_json(silent=True) or {}
+    participants = payload.get("participant_ids")
+    action = payload.get("action")
+    if action not in ("pin", "unpin", "hide", "unhide"):
+        return jsonify(error="unsupported_action"), 400
+    try:
+        org = (
+            _normalise_concept_id(payload["organisation_concept_id"])
+            if "organisation_concept_id" in payload
+            else _get_current_org_concept_id(actor, require_known_window=True)
+        )
+        exchange = get_exchange(actor, participants, organisation=org, limit=1)
+        if not exchange["messages"]:
+            return jsonify(error="conversation_unavailable"), 404
+        field = "pinned" if action in ("pin", "unpin") else "hidden"
+        result = set_conversation_preference(
+            actor_user_id=actor,
+            session_id=exchange_id(participants, org),
+            **{field: action in ("pin", "hide")},
+        )
+        return jsonify(success=True, preference=result)
+    except PermissionError:
+        return jsonify(error="conversation_unavailable"), 403

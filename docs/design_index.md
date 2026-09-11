@@ -93,6 +93,7 @@ live.
 | Private Otter archive access, conversation images or research-slide reading | [Private Otter archive and conversation images](engineering/otter_archive_and_conversation_images.md) |
 | Reusing external ontology concepts with source identity and attribution | [KnowKat ontology sources and governed adoption](engineering/knowkat_ontology_sources.md) |
 | Importing external human/agent transcripts into conversation carriers | [External conversation import](engineering/external_conversation_import.md) |
+| Unified conversation discovery, message exchanges, read state or participant avatars | [Unified conversations and participant profiles](engineering/unified_conversations_and_participant_profiles.md) |
 | Durable assertions, text/logical assertion typing, propositions, context-sensitive retrieval, hypotheses, publication or promotion, or user-, organisation-, project-, source-, theory-, or time-relative knowledge | [Assertion and propositional-sentence ontology](engineering/assertion_and_propositional_sentence_ontology.md), then [contextual knowledge evolution](engineering/contextual_knowledge_evolution.md); for canonical ontology publication or scope change, the active [ontology publication authority boundary](engineering/ontology_publication_authority.md) |
 | Evaluation, benchmarks, or research-sensitive architecture | [agent evaluation and research uptake](engineering/agent_evaluation_and_research_uptake.md) |
 | Minimal imposition, elicitation, or write policy | [minimal-imposition principle](engineering/minimal_imposition_design_principle.md) |

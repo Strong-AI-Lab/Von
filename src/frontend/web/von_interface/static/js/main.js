@@ -386,13 +386,8 @@ async function syncFlaskSessionOrg() {
       // Personal is an explicit per-tab binding. Materialise it even when the
       // cookie fallback also happens to be null, so later calls cannot drift to
       // another tab's organisation through a non-window fallback.
-      if (!isWindowSessionSource && hasSessionPersonalOrgContext()) {
-        console.log('[main] Binding explicit Personal context to this window session');
-        await postJson('/von/api/session/set_organisation', {
-          organisation_concept_id: null
-        });
-      } else if (context.organisation_id && !isWindowSessionSource) {
-        console.log('[main] Clearing stale Flask session org - no org in storage');
+      if (!isWindowSessionSource) {
+        console.log('[main] Binding Personal context to this window session');
         await postJson('/von/api/session/set_organisation', {
           organisation_concept_id: null
         });
@@ -649,7 +644,7 @@ function setupDynamicLayout() {
     );
     const tabHeight = measuredTabHeight;
     const contentTop = headerHeight + tabHeight + 8; // 8px margin
-    const footerSpace = 64; // Fixed footer overlap space
+    const footerSpace = Math.max(64, Math.ceil(document.querySelector('.footer-container')?.getBoundingClientRect().height || 0));
 
     document.documentElement.style.setProperty('--von-fixed-shell-height', `${contentTop}px`);
     document.documentElement.style.setProperty('--von-fixed-footer-clearance', `${footerSpace}px`);
@@ -711,6 +706,13 @@ function setupDynamicLayout() {
     } catch (e) {
       console.warn('Dynamic layout: Tab container ResizeObserver setup failed', e);
     }
+  }
+
+  const footerEl = document.querySelector('.footer-container');
+  if (footerEl && !footerEl._dynamicLayoutObserved && typeof ResizeObserver === 'function') {
+    const footerObserver = new ResizeObserver(() => requestAnimationFrame(updateLayout));
+    footerObserver.observe(footerEl);
+    footerEl._dynamicLayoutObserved = true;
   }
 
   if (!document._dynamicTabStripLayoutListenerBound) {

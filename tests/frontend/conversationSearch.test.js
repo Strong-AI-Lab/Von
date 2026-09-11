@@ -54,6 +54,7 @@ describe('unified global conversation and concept search', () => {
 
     test('shows conversations first in the Conversations workspace, with concepts still available', async () => {
         global.fetch.mockImplementation((url) => {
+            if (String(url).includes('/api/messages/catalogue')) return Promise.resolve(jsonResponse({ conversations: [], has_more: false }));
             if (String(url).includes('/vontology/api/vontology/search')) {
                 return Promise.resolve(jsonResponse({
                     results: [{ id: '#V#detector', name: 'Detector', kind: 'type' }]
@@ -91,6 +92,7 @@ describe('unified global conversation and concept search', () => {
 
     test('one failed provider does not suppress results from the other', async () => {
         global.fetch.mockImplementation((url) => {
+            if (String(url).includes('/api/messages/catalogue')) return Promise.resolve(jsonResponse({ conversations: [], has_more: false }));
             if (String(url).includes('/vontology/api/vontology/search')) {
                 return Promise.resolve(jsonResponse({}, { ok: false, status: 503 }));
             }
@@ -110,6 +112,7 @@ describe('unified global conversation and concept search', () => {
     test('renders the fast provider while the other provider is still pending', async () => {
         let resolveConversation;
         global.fetch.mockImplementation((url) => {
+            if (String(url).includes('/api/messages/catalogue')) return Promise.resolve(jsonResponse({ conversations: [], has_more: false }));
             if (String(url).includes('/vontology/api/vontology/search')) {
                 return Promise.resolve(jsonResponse({
                     results: [{ id: '#V#fast', name: 'Fast concept', kind: 'type' }]
@@ -133,6 +136,7 @@ describe('unified global conversation and concept search', () => {
     test('passes the opaque cursor and appends more conversations', async () => {
         let conversationCall = 0;
         global.fetch.mockImplementation((url) => {
+            if (String(url).includes('/api/messages/catalogue')) return Promise.resolve(jsonResponse({ conversations: [], has_more: false }));
             const raw = String(url);
             if (raw.includes('/vontology/api/vontology/search')) {
                 return Promise.resolve(jsonResponse({ results: [] }));
@@ -162,6 +166,7 @@ describe('unified global conversation and concept search', () => {
     test('clearing the native search input immediately invalidates a late response', async () => {
         let resolveConversation;
         global.fetch.mockImplementation((url) => {
+            if (String(url).includes('/api/messages/catalogue')) return Promise.resolve(jsonResponse({ conversations: [], has_more: false }));
             if (String(url).includes('/vontology/api/vontology/search')) {
                 return Promise.resolve(jsonResponse({ results: [] }));
             }
@@ -173,6 +178,7 @@ describe('unified global conversation and concept search', () => {
         input.value = 'late';
         const pending = vontology.performVontologySearch('late');
 
+        await new Promise(resolve => setTimeout(resolve, 0));
         input.value = '';
         input.dispatchEvent(new Event('search', { bubbles: true }));
         resolveConversation(jsonResponse(conversationPayload({
@@ -187,6 +193,7 @@ describe('unified global conversation and concept search', () => {
 
     test('selecting a conversation dispatches the canonical open event', async () => {
         global.fetch.mockImplementation((url) => {
+            if (String(url).includes('/api/messages/catalogue')) return Promise.resolve(jsonResponse({ conversations: [], has_more: false }));
             if (String(url).includes('/vontology/api/vontology/search')) {
                 return Promise.resolve(jsonResponse({ results: [] }));
             }

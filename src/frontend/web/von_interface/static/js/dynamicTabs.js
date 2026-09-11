@@ -1,3 +1,4 @@
+import { profileButton } from './components/participantProfile.js';
 // Dynamic Tab Management for Von Application
 // Handles creation and management of concept tabs based on vontology selection
 
@@ -2310,6 +2311,11 @@ export async function loadDynamicConceptTabContent(tabId, conceptId) {
                 attachConceptIdCopyChip(headerDiv, conceptId, kind);
                 attachRawDataButton(headerDiv, conceptId, kind, tabInfo.content);
                 attachKeyConceptStarButton(headerDiv, conceptId);
+                if (!headerDiv.querySelector('.participant-profile-button')) {
+                    const profile = profileButton(conceptId);
+                    profile.className = 'participant-profile-button';
+                    headerDiv.append(profile);
+                }
                 if (nodeJson) {
                     attachAnalysisButtons(headerDiv, conceptId, kind, nodeJson);
                 }
