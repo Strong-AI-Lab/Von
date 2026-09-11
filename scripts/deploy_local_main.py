@@ -262,7 +262,11 @@ class _NoHealthRedirect(urllib.request.HTTPRedirectHandler):
 def _read_health(url: str, headers: dict[str, str] | None = None) -> dict[str, Any]:
     try:
         opener = urllib.request.build_opener(_NoHealthRedirect())
-        request = urllib.request.Request(url, headers=headers or {})
+        # Identify this authorised client explicitly: the public edge rejects
+        # urllib's generic bot identifier before evaluating Service Auth.
+        request = urllib.request.Request(
+            url, headers={"User-Agent": "Von-Deployment/1", **(headers or {})}
+        )
         with opener.open(request, timeout=5) as response:
             payload = json.load(response)
     except urllib.error.HTTPError as exc:

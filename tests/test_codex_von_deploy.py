@@ -10,6 +10,35 @@ pytest.importorskip("fcntl")
 from scripts import codex_von_deploy as deployer
 
 
+def test_public_health_identifies_client_and_preserves_service_credentials():
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            agent = self.headers.get("User-Agent", "")
+            seen.append((agent, self.headers.get("CF-Access-Client-Secret")))
+            self.send_response(403 if agent.startswith("Python-urllib") else 200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"healthy"}')
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        assert deployer.runtime._read_health(
+            f"http://127.0.0.1:{server.server_port}/health",
+            {"CF-Access-Client-Secret": "fixture-only"},
+        ) == {"status": "healthy"}
+        assert seen == [("Von-Deployment/1", "fixture-only")]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 def test_public_credentials_are_not_forwarded_through_redirects():
     paths = []
 
