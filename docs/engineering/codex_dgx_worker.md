@@ -23,16 +23,20 @@ An empty check makes no model request. Each task has its own Git worktree. Each
 execution is a fresh subscription-backed Codex session, using the retained
 worktree, task and previous result for continuity.
 
-Answer a question in its task message thread or add a comment to the task.
-The current Messages UI groups messages by participants: once it contains
-several task threads it may omit a thread identifier on a general reply. In
-that case use a task comment to keep the reply unambiguous. General inbox
-messages do not create new coding assignments in this pilot.
+When the operator enables the inbox, the worker also answers direct messages
+from its configured delegator in its organisation, including questions after
+task completion. It uses the new message, recent participant conversation and
+accessible canonical task records to identify the task, even when the Messages
+UI omits a thread identifier. Status questions preserve the completed state and
+record the question and answer as a task comment. A coding follow-up can reopen
+the identified task; an ambiguous reference prompts a clarification. General
+inbox messages do not create new coding assignments in this pilot.
 
 Publishing uses an operator-configured GitHub account and follows each task's
 publication authority. Missing authentication leaves changes retained and the
 task blocked; it must not claim that local code is published. Deployment of
-the public web server requires an explicit instruction in the initial task and
+the public web server requires an explicit instruction in the initial task or
+the current coding follow-up, and
 the operator-enabled deployment command described below. The chosen
 GitHub account and current authentication status belong in the Jira decision
 surface, not in the task's text.
@@ -93,8 +97,8 @@ separate. The launcher should unset `OPENAI_API_KEY` and `CODEX_API_KEY`, set
 the dedicated `CODEX_HOME`, and execute the installed official Codex CLI.
 Validate an actual agent-issued shell command before enabling polling.
 
-Install the script and adjacent `codex_von_worker_prompt.md` from the same
-reviewed revision. Run them with the project's PDM-managed Python environment.
+Install the worker, `codex_von_inbox.py`, and both adjacent `_prompt.md` files
+from the same reviewed revision. Run them with the project's PDM-managed Python environment.
 A JSON config has these fields (paths are operator-selected):
 
 ```json
@@ -118,6 +122,16 @@ The optional `python_environment` provides the existing PDM environment via a
 worktree symlink. Dependency changes needing writes outside the sandbox may
 require operator preparation. Do not replace `pdm.lock` or synchronise a Von
 project with another dependency manager.
+
+Inbox pickup is opt-in with `inbox_enabled: true` and an explicit ISO timestamp
+in `inbox_since`. Select the cutoff after inspecting outstanding messages; do
+not replay old setup messages unintentionally. Reply runs use a fresh read-only
+Codex process under the same controller lock. They return an answer and a
+semantic choice to reply or resume an identified task; the controller rechecks
+authority, records the Q/A note, and delivers an idempotent reply. The process
+does not execute coding or deployment work. Resumed coding starts on a later
+poll and uses the current follow-up as its instructions. An old deployment
+instruction does not authorise deployment of newly requested work.
 
 For publication, authenticate GitHub CLI in a dedicated `GH_CONFIG_DIR` outside
 the repository, and set that directory in both the controller and Codex launcher.
@@ -212,6 +226,13 @@ On the pilot DGX, the wrapper is
 `worker-state/runs/` contains input context, Codex JSONL events, the structured
 result and exit receipt; `worker-state/worktrees/` retains coding results.
 Keep these private: they can contain authorised conversation excerpts.
+
+`worker-state/inbox/` retains reply context, process receipts and reporting
+checkpoints. `worker-state/followups/` binds resumed task instructions to their
+source message. Interrupted reporting reconciles the existing task comment and
+message rather than repeating delivery. Empty inbox and task checks make no
+model request. The five-minute poll skips while either kind of run holds the
+controller lock.
 
 To pause pickup, remove only the tagged worker crontab entry. To retry a failed
 run, inspect its retained work and set the Von task back to pending. Do not

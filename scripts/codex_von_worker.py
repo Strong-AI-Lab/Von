@@ -172,8 +172,22 @@ class Von:
             "title": task["title"],
             "description": task.get("description"),
             "comments": comments,
-            "replies": replies,
+            "replies": [
+                message for message in replies if not self.inbox_answered(message)
+            ],
+            **self.followup_context(task_id),
         }
+
+    def inbox_answered(self, message):
+        if not self.config.get("inbox_enabled"):
+            return False
+        return inbox_module().already_answered(self.config, message["message_id"])
+
+    def followup_context(self, task_id):
+        if not self.config.get("inbox_enabled"):
+            return {}
+        followup = inbox_module().task_followup(self.config, task_id)
+        return {"followup": followup} if followup else {}
 
     def conversation(self, task):
         from src.backend.integrations.internal_mcp.catalogue import (
@@ -520,13 +534,18 @@ def apply_deployment(config, api, state, state_path, lock_fd):
     if not commit or state.get("deployment_final"):
         return
     task = api.task(state["task_id"])
+    live_inputs = api.inputs(task) if task else {}
     eligible = (
         result["status"] == "completed"
         and bool(task)
         and authorised_task(task, config)
         and task.get("status") in ACTIVE
         and api.native_writer(task)
-        and fingerprint(api.inputs(task)) == state.get("input_hash")
+        and fingerprint(live_inputs) == state.get("input_hash")
+        and (
+            not live_inputs.get("followup")
+            or live_inputs["followup"].get("deployment_requested") is True
+        )
     )
     run_dir = Path(state["run_dir"])
     receipt_path = run_dir / "deployment.json"
@@ -575,9 +594,9 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         receipt
     )
     if success:
-        result[
-            "summary"
-        ] += f" Deployed and verified the public server at {commit[:12]}."
+        result["summary"] += (
+            f" Deployed and verified the public server at {commit[:12]}."
+        )
     else:
         result["status"] = "blocked"
         result["summary"] += (
@@ -588,10 +607,21 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         )
     if recover_only:
         result["status"] = "blocked"
-        result[
-            "summary"
-        ] += " The task changed; only the interrupted deployment was reconciled."
+        result["summary"] += (
+            " The task changed; only the interrupted deployment was reconciled."
+        )
     write_json(state_path, state)
+
+
+def inbox_module():
+    try:
+        from . import codex_von_inbox
+    except ImportError:
+        try:
+            import codex_von_inbox
+        except ImportError:
+            from scripts import codex_von_inbox
+    return codex_von_inbox
 
 
 def tick(config, api, lock_fd):
@@ -607,6 +637,8 @@ def tick(config, api, lock_fd):
             apply_deployment(config, api, state, path, lock_fd)
             api.finish(state)
             write_json(path, state)
+    if config.get("inbox_enabled") and inbox_module().tick(config, api, lock_fd):
+        return
     for task in api.pending():
         if not authorised_task(task, config) or task.get("status") not in ACTIVE:
             continue
