@@ -8,11 +8,14 @@
 
 ## User workflow
 
-Select SAIL in the public Von interface. Create a native task assigned to
-**Codex DGX** (`#V#codex_dgx`), with Michael as its creator and report recipient.
-Create it from the relevant conversation's Tasks panel when context matters,
-and invite Codex DGX to that conversation. Assignment grants access to the task;
-the conversation invitation grants access to the source transcript separately.
+Select SAIL in the public Von interface. Ask Von in the relevant conversation
+to create a native task assigned to **Codex DGX** (`#V#codex_dgx`), with Michael
+as its creator and report recipient, and link the source conversation. Invite
+Codex DGX to that conversation when its context is needed. Assignment grants
+access to the task; the conversation invitation grants access to the source
+transcript separately. The current Tasks form's assignee picker offers only
+Unassigned and Von; it does not yet offer this worker. The pilot acceptance
+used labelled fixtures through canonical services, not that picker.
 
 The worker checks hourly, starts at most one coding run per check, and sends a
 pickup message followed by a result or question through Von direct messages.
