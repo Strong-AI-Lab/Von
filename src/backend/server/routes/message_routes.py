@@ -361,9 +361,6 @@ def send_message() -> ResponseReturnValue:
             ),
             409,
         )
-    if not isinstance(org_id, str) or not org_id:
-        return jsonify({"error": "No organisation context"}), 400
-
     recipient_ids = _normalise_recipient_ids(data.get("recipient_ids"))
     content = data.get("content", "").strip()
 
@@ -371,6 +368,14 @@ def send_message() -> ResponseReturnValue:
         return jsonify({"error": "At least one recipient is required"}), 400
     if not content:
         return jsonify({"error": "Message content is required"}), 400
+    if not isinstance(org_id, str) or not org_id:
+        return jsonify(
+            error="Choose a shared organisation for this message",
+            error_code="message_organisation_required",
+            common_organisation_options=_build_common_organisation_options(
+                sender_id=sender_id, recipient_ids=recipient_ids
+            ),
+        ), 409
     if "idempotency_key" in data:
         return (
             jsonify(

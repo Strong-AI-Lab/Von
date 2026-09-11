@@ -621,3 +621,16 @@ def test_send_message_rejects_ambiguous_legacy_idempotency_field(
         "error": "Use delivery_idempotency_key for direct-message retries",
         "error_code": "unsupported_idempotency_key_field",
     }
+
+
+def test_personal_window_offers_shared_organisation_recovery(monkeypatch, app_client):
+    _, client = app_client
+    _authorise_test_direct_message(monkeypatch)
+    monkeypatch.setattr(message_routes, '_get_current_org_concept_id', lambda *a, **k: None)
+    options = [{"concept_id": "#V#org_test", "name": "Test organisation"}]
+    monkeypatch.setattr(message_routes, '_build_common_organisation_options', lambda **kwargs: options)
+    monkeypatch.setattr(message_routes, 'create_message', lambda **kwargs: pytest.fail('No message may be sent before choosing an organisation'))
+    response = client.post('/api/messages/', json={"recipient_ids": ["#V#user_bob"], "content": "Retain this draft"})
+    assert response.status_code == 409
+    assert response.get_json()['error_code'] == 'message_organisation_required'
+    assert response.get_json()['common_organisation_options'] == options

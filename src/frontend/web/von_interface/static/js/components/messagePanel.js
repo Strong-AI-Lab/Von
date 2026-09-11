@@ -1027,7 +1027,7 @@ function renderComposePendingUi(scope) {
     if (!button) return;
 
     const pending = isComposePending(scope);
-    button.disabled = pending;
+    button.disabled = pending || (scope === COMPOSE_SCOPE_REPLY && _exchange?.other_participant_ids?.length > 1);
     button.textContent = pending ? 'Sending…' : 'Send';
     button.setAttribute('aria-busy', pending ? 'true' : 'false');
 
@@ -2025,7 +2025,7 @@ async function handleSendReply() {
     const submittedGeneration = _exchangeGeneration;
     setComposePending(COMPOSE_SCOPE_REPLY, true);
     try {
-        await postJsonDetailed('/api/messages/', payload);
+        const result = await postJsonDetailed('/api/messages/', payload);
         if (submittedGeneration !== _exchangeGeneration) { document.dispatchEvent(new CustomEvent('von:conversation-contribution')); return; }
 
         resetComposeFailureUi(COMPOSE_SCOPE_REPLY);
@@ -2041,8 +2041,12 @@ async function handleSendReply() {
         document.dispatchEvent(new CustomEvent('von:conversation-contribution'));
         showToast('Message sent', 'success');
 
-        // Reload conversation
-        await loadConversation(_currentConversationUserId);
+        if (_exchange && result.data?.conversation && result.data.conversation.session_id !== _exchange.session_id) {
+            // An explicit organisation recovery starts its own exchange; it
+            // must not rewrite the identity of the earlier conversation.
+            const { selectMessageConversation } = await import('./conversationCatalogue.js');
+            await selectMessageConversation(result.data.conversation);
+        } else await loadConversation(_currentConversationUserId);
 
     } catch (err) {
         console.error('[messagePanel] Failed to send message:', err);
