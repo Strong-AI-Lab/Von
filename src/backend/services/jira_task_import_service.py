@@ -1672,6 +1672,7 @@ def _resolve_existing_task_id(
         source_system=_JIRA_SOURCE_SYSTEM,
         external_id=jira_issue_key,
         organisation_concept_id=organisation_concept_id,
+        include_details=False,
     )
     task_id = None
     if isinstance(existing_task, Mapping):
