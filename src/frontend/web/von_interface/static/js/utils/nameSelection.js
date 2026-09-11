@@ -272,5 +272,25 @@ export function selectShortestNameForContext(names, preferredLanguage = getPrefe
     return filtered[0]?.text || null;
 }
 
-export { DEFAULT_LANGUAGE };
+/**
+ * Choose a represented abbreviation for dense UI while retaining a separate
+ * full label for accessible naming and descriptions.  An abbreviation is an
+ * explicit piece of concept data, not a guess made by shortening prose.
+ */
+export function selectAbbreviationForContext(names, preferredLanguage = getPreferredLanguage()) {
+    if (!Array.isArray(names) || names.length === 0) {
+        return null;
+    }
 
+    const abbreviations = names.filter((entry) => {
+        const type = (entry?.type ?? entry?.name_type ?? '')
+            .toString()
+            .trim()
+            .toUpperCase();
+        return type === 'ABBR';
+    });
+
+    return selectShortestNameForContext(abbreviations, preferredLanguage);
+}
+
+export { DEFAULT_LANGUAGE };
