@@ -37974,14 +37974,16 @@ async function handleSendPrompt(options = {}) {
             data = await response.json();
         } catch (parseError) {
             console.warn('[chatTab] Unable to parse /von/generate response JSON:', parseError);
-            if (response.ok) {
+            // A non-JSON server/gateway failure does not establish that the
+            // durable turn failed. The origin may still be completing it after
+            // the proxy lost the response; observe that same request, never
+            // resubmit its prompt or infer a terminal task outcome here.
+            if (response.ok || (response.status >= 500 && response.status < 600)) {
                 generateTransportInterrupted = true;
                 throw parseError;
             }
             data = {
-                error: response.ok
-                    ? 'Server returned an unreadable response.'
-                    : 'Server returned a non-JSON error response.',
+                error: 'Server returned a non-JSON error response.',
                 response_parse_error: parseError && parseError.message ? parseError.message : String(parseError || '')
             };
         }
