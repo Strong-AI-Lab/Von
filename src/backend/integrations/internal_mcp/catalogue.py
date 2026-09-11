@@ -36872,6 +36872,42 @@ def _task_continuation_readback(task_id, fields, task):
     }
 
 
+def _task_continuation_assignee_allowed(assignee_id, actor_id, organisation_id):
+    """Allow the creator to hand work to a represented coding-agent member."""
+    from ...services.task_execution_service import VON_SYSTEM_CONCEPT_ID
+
+    if assignee_id in (actor_id, VON_SYSTEM_CONCEPT_ID):
+        return True
+    if not organisation_id or not isinstance(assignee_id, str):
+        return False
+
+    from ...services.coding_agent_identity_bootstrap_service import (
+        CODING_AGENT_TYPE_ID,
+    )
+    from ...services.concept_service import (
+        ConceptNotFoundError,
+        get_concept_by_concept_id_exact,
+    )
+    from ...services.organisation_membership_service import (
+        is_user_member_of_organisation,
+    )
+
+    try:
+        concept = get_concept_by_concept_id_exact(assignee_id)
+    except ConceptNotFoundError:
+        return False
+    types = (concept or {}).get("relationships", {}).get("is_an_instance_of", [])
+    if isinstance(types, str):
+        types = [types]
+    if not isinstance(types, list):
+        return False
+    return (
+        CODING_AGENT_TYPE_ID in types
+        and is_user_member_of_organisation(actor_id, organisation_id)
+        and is_user_member_of_organisation(assignee_id, organisation_id)
+    )
+
+
 def _task_update_fields(**kwargs):
     from ...services.task_management_service import (
         InvalidTaskDataError,
@@ -36929,16 +36965,19 @@ def _task_update_fields(**kwargs):
                 "task_continuation_fields_denied",
                 f"Fields outside ordinary task continuation: {unsupported}",
             )
-        from ...services.task_execution_service import VON_SYSTEM_CONCEPT_ID
-
         if "assignee_concept_id" in fields:
             if (
-                fields["assignee_concept_id"] not in (actor_id, VON_SYSTEM_CONCEPT_ID)
-                or current_task.get("created_by_concept_id") != actor_id
+                current_task.get("created_by_concept_id") != actor_id
+                or not _task_continuation_assignee_allowed(
+                    fields["assignee_concept_id"],
+                    actor_id,
+                    actor_scope.organisation_concept_id,
+                )
             ):
                 return make_error_response(
                     "task_assignment_scope_denied",
-                    "The task creator may assign continuing work to themselves or Von.",
+                    "The task creator may assign continuing work to themselves, Von, "
+                    "or a coding agent belonging to the same organisation.",
                 )
         if "report_to_concept_id" in fields and fields["report_to_concept_id"] not in (
             None,
@@ -45122,7 +45161,9 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 "it to #V#von_system and set report_to_concept_id to themselves. "
                 "This preserves the task and does not launch execution or a schedule. "
                 "Ordinary chat edits only tasks created by or assigned to the "
-                "authenticated actor in the same organisation."
+                "authenticated actor in the same organisation. The creator may "
+                "assign to a represented coding agent with live membership of "
+                "that organisation."
             ),
         ),
         MethodDefinition(

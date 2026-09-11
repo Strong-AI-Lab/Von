@@ -9,7 +9,11 @@ from src.backend.integrations.internal_mcp import catalogue as handlers
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
 from src.backend.security.access_control import override_current_actor
-from src.backend.services import task_management_service
+from src.backend.services import (
+    concept_service,
+    organisation_membership_service,
+    task_management_service,
+)
 from src.backend.services.adaptive_turn_service import (
     _canonical_effect_readback_receipt,
     _canonically_verified_material_effect_ids,
@@ -28,6 +32,9 @@ def task_state(monkeypatch):
         "current_work_product": {"status": "missing"},
     }
     writes = []
+    monkeypatch.setattr(
+        concept_service, "get_concept_by_concept_id_exact", lambda _: None
+    )
     monkeypatch.setattr(task_management_service, "get_task", lambda _: deepcopy(task))
 
     def update(task_id, *, fields, actor_concept_id):
@@ -84,8 +91,13 @@ def test_ordinary_continuation_links_product_and_delegates_without_duplicate_wri
         first = handlers._task_update_fields(**payload)
         repeat = handlers._task_update_fields(**payload)
     assert first["effect_status"] == "succeeded"
-    assert first["canonical_read_back"]["task"]["current_work_product"]["status"] == "ready"
-    assert first["canonical_read_back"]["task"]["assignee_concept_id"] == "#V#von_system"
+    assert (
+        first["canonical_read_back"]["task"]["current_work_product"]["status"]
+        == "ready"
+    )
+    assert (
+        first["canonical_read_back"]["task"]["assignee_concept_id"] == "#V#von_system"
+    )
     receipt = _canonical_effect_readback_receipt(first)
     assert receipt["verified"] is True
     material, verified = _canonically_verified_material_effect_ids(
@@ -213,3 +225,43 @@ def test_continuation_schema_exposes_product_and_hides_authority_switch():
     assert "actor_bound_continuation" not in schema["properties"]
     assert "actor_concept_id" not in schema["properties"]
     assert "current_work_product_concept_id" in definition.description
+
+
+@pytest.mark.parametrize(
+    "types,member_ids,created_by,expected",
+    [
+        (["#V#coding_agent"], {"#V#alice", "#V#worker"}, "#V#alice", True),
+        (["#V#coding_agent"], {"#V#alice"}, "#V#alice", False),
+        (["#V#coding_agent"], {"#V#worker"}, "#V#alice", False),
+        (["#V#person"], {"#V#alice", "#V#worker"}, "#V#alice", False),
+        (["#V#coding_agent"], {"#V#alice", "#V#worker"}, "#V#bob", False),
+    ],
+)
+def test_continuation_uses_live_coding_agent_membership(
+    monkeypatch, task_state, types, member_ids, created_by, expected
+):
+    task, writes = task_state
+    task["created_by_concept_id"] = created_by
+    monkeypatch.setattr(
+        concept_service,
+        "get_concept_by_concept_id_exact",
+        lambda concept_id: {"relationships": {"is_an_instance_of": types}},
+    )
+    monkeypatch.setattr(
+        organisation_membership_service,
+        "is_user_member_of_organisation",
+        lambda user, org: user in member_ids and org == "#V#lab",
+    )
+    with override_current_actor("#V#alice", "#V#lab"):
+        result = handlers._task_update_fields(
+            **_payload(assignee_concept_id="#V#worker", report_to_concept_id="#V#alice")
+        )
+    assert bool(result.get("success")) is expected
+    if expected:
+        assert result["canonical_read_back"]["verified"] is True
+        assert task["assignee_concept_id"] == "#V#worker"
+        assert task["created_by_concept_id"] == "#V#alice"
+        assert len(writes) == 1
+    else:
+        assert result["error_code"] == "task_assignment_scope_denied"
+        assert not writes
