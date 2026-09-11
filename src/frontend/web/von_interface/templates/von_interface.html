@@ -17,6 +17,7 @@
     };
   </script>
 
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/participantProfile.css') }}">
 </head>
 
 <body class="von-auth-pending">
@@ -102,7 +103,7 @@
 
   <!-- Tab Structure -->
   <div class="tab-container" id="tabContainer">
-    <div class="tab-button active" data-tab="chatTab">Conversations</div>
+    <div class="tab-button active" data-tab="chatTab">Conversations <span id="conversationUnreadBadge" class="conversation-unread-badge" hidden></span></div>
     <!-- Vontology Tab Button moved before Entity -->
     {% if expert_tabs_enabled %}
     <div class="tab-button" data-tab="vontologyTab">Vontology</div>
@@ -119,12 +120,6 @@
       <span class="global-tasks-tab-icon" aria-hidden="true">📋</span>
       <span id="globalTaskCountBadge" class="task-count-badge hidden" aria-hidden="true"></span>
       All Tasks
-    </div>
-    <div id="messagesBtn" class="tab-button messages-tab-button" data-tab="messagesTab"
-      title="Direct messages" aria-label="Messages">
-      <span class="messages-tab-icon" aria-hidden="true">✉️</span>
-      <span id="unreadMessageBadge" class="message-count-badge hidden" aria-hidden="true"></span>
-      Messages
     </div>
     <button type="button" class="tab-button" data-tab="workflowStudioTab" aria-controls="workflowStudioTab">
       Workflow Studio
@@ -168,13 +163,6 @@
     <div id="globalTasksTab" class="tab-content">
       <div id="globalTasksContainer" class="global-tasks-content">
         <div class="loading">Loading tasks...</div>
-      </div>
-    </div>
-
-    <!-- Messages Tab Content -->
-    <div id="messagesTab" class="tab-content">
-      <div id="messagesContainer" class="messages-content">
-        <div class="loading">Loading messages...</div>
       </div>
     </div>
 

@@ -9,7 +9,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Iterable, Mapping
-from pymongo import ASCENDING, DESCENDING
+from pymongo import ASCENDING, DESCENDING, UpdateOne
 from pymongo.errors import (
     DuplicateKeyError,
     OperationFailure,
@@ -597,6 +597,16 @@ def _ensure_chat_history_indexes(collection) -> None:
                         ("namespace", ASCENDING),
                     ],
                     name="user_id_1_session_id_1_namespace_1",
+                )
+            if "namespace_user_contribution_session" not in existing_indexes:
+                collection.create_index(
+                    [
+                        ("namespace", ASCENDING),
+                        ("user_id", ASCENDING),
+                        ("last_contribution_at", DESCENDING),
+                        ("session_id", ASCENDING),
+                    ],
+                    name="namespace_user_contribution_session",
                 )
             if "user_id_1_updated_at_-1" not in existing_indexes:
                 collection.create_index(
@@ -1794,6 +1804,9 @@ def _split_history_into_segments_with_locations(
             "content": entry.get("content"),
             "timestamp": entry.get("timestamp"),
         }
+        precise_timestamp = _coerce_datetime(entry.get("timestamp"))
+        if precise_timestamp:
+            copied["contribution_timestamp"] = precise_timestamp.isoformat()
         if isinstance(entry.get("image_attachments"), list):
             copied["image_attachments"] = list(entry["image_attachments"])
         turn_id = entry.get("turn_id")
@@ -2993,6 +3006,13 @@ def get_chat_history_telemetry_locator_projection(
         "organisation_concept_id": 1,
         "created_at": 1,
         "updated_at": 1,
+        "last_contribution_at": 1,
+        "last_contribution_preview": 1,
+        "last_contribution_role": 1,
+        "last_contribution_author": 1,
+        "last_incoming_contribution_at": 1,
+        "last_incoming_timestamp": 1,
+        "last_incoming_turn_id": 1,
         "history": compact_history_projection,
         "conversation_situation_state": {
             "available": {
@@ -3147,6 +3167,13 @@ def get_chat_history_segments(
                 "session_name": 1,
                 "created_at": 1,
                 "updated_at": 1,
+                "last_contribution_at": 1,
+                "last_contribution_preview": 1,
+                "last_contribution_role": 1,
+                "last_contribution_author": 1,
+                "last_incoming_contribution_at": 1,
+                "last_incoming_timestamp": 1,
+                "last_incoming_turn_id": 1,
                 "conversation_situation": 1,
                 "conversation_observations": 1,
                 "conversation_observation_total": 1,
@@ -3178,6 +3205,13 @@ def get_chat_history_segments(
                                 "session_name": 1,
                                 "created_at": 1,
                                 "updated_at": 1,
+                                "last_contribution_at": 1,
+                                "last_contribution_preview": 1,
+                                "last_contribution_role": 1,
+                                "last_contribution_author": 1,
+                                "last_incoming_contribution_at": 1,
+                                "last_incoming_timestamp": 1,
+                                "last_incoming_turn_id": 1,
                                 "conversation_situation": 1,
                                 "conversation_observations": 1,
                                 "conversation_observation_total": 1,
@@ -3340,6 +3374,13 @@ def get_chat_history_transcript_page(
                         "session_name": 1,
                         "created_at": 1,
                         "updated_at": 1,
+                        "last_contribution_at": 1,
+                        "last_contribution_preview": 1,
+                        "last_contribution_role": 1,
+                        "last_contribution_author": 1,
+                        "last_incoming_contribution_at": 1,
+                        "last_incoming_timestamp": 1,
+                        "last_incoming_turn_id": 1,
                         "history_length": {"$size": _history_array_expr()},
                         "history_page": {
                             "$slice": [
@@ -3451,6 +3492,13 @@ def get_chat_history_title_evidence(
                         "session_name": 1,
                         "created_at": 1,
                         "updated_at": 1,
+                        "last_contribution_at": 1,
+                        "last_contribution_preview": 1,
+                        "last_contribution_role": 1,
+                        "last_contribution_author": 1,
+                        "last_incoming_contribution_at": 1,
+                        "last_incoming_timestamp": 1,
+                        "last_incoming_turn_id": 1,
                         "history_length": {"$size": _history_array_expr()},
                         "user_messages": {
                             "$filter": {
@@ -3467,14 +3515,17 @@ def get_chat_history_title_evidence(
                         "session_name": 1,
                         "created_at": 1,
                         "updated_at": 1,
+                        "last_contribution_at": 1,
+                        "last_contribution_preview": 1,
+                        "last_contribution_role": 1,
+                        "last_contribution_author": 1,
+                        "last_incoming_contribution_at": 1,
+                        "last_incoming_timestamp": 1,
+                        "last_incoming_turn_id": 1,
                         "history_length": 1,
                         "user_message_count": {"$size": "$user_messages"},
-                        "first_user_message": {
-                            "$arrayElemAt": ["$user_messages", 0]
-                        },
-                        "latest_user_message": {
-                            "$arrayElemAt": ["$user_messages", -1]
-                        },
+                        "first_user_message": {"$arrayElemAt": ["$user_messages", 0]},
+                        "latest_user_message": {"$arrayElemAt": ["$user_messages", -1]},
                     }
                 },
             ]
@@ -3910,6 +3961,32 @@ def _upsert_turn_execution_projection_for_message(
         )
 
 
+def _conversation_activity_fields(message, owner_user_id, published_at):
+    """Activity is a persisted visible contribution, never a tool heartbeat."""
+    role = message.get("role")
+    content = str(message.get("content") or "").strip()
+    attachments = message.get("image_attachments")
+    if role not in {"user", "assistant"} or not (content or attachments):
+        return {}
+    fields = {
+        "last_contribution_at": published_at,
+        "last_contribution_preview": content[:240] or "Image attachment",
+        "last_contribution_role": role,
+        "last_contribution_author": message.get("author_user_id"),
+    }
+    if role == "assistant" or (
+        message.get("author_user_id") and message["author_user_id"] != owner_user_id
+    ):
+        fields.update(
+            {
+                "last_incoming_contribution_at": published_at,
+                "last_incoming_timestamp": message.get("timestamp"),
+                "last_incoming_turn_id": message.get("turn_id"),
+            }
+        )
+    return fields
+
+
 def add_message_to_history(
     user_id: str,
     session_id: str,
@@ -4037,6 +4114,11 @@ def add_message_to_history(
         )
 
         set_fields: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
+        set_fields.update(
+            _conversation_activity_fields(
+                stored_message, user_id, set_fields["updated_at"]
+            )
+        )
         search_segment = _conversation_search_segment(stored_message)
         search_text = search_segment.get("text") if search_segment is not None else None
         if search_text is not None:
@@ -4318,6 +4400,9 @@ def append_message_to_history_once(
         stored_message["timestamp"] = datetime.now(timezone.utc)
 
     set_fields: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc)}
+    set_fields.update(
+        _conversation_activity_fields(stored_message, user_id, set_fields["updated_at"])
+    )
     push_fields: Dict[str, Any] = {"history": stored_message}
     search_segment = _conversation_search_segment(stored_message)
     if search_segment is not None:
@@ -5373,7 +5458,11 @@ def _build_session_summary_from_metadata(
     session_name = _normalise_session_name(doc.get("session_name"))
     focus = _focus_projection_from_doc(doc)
     created_ts = _infer_created_timestamp(doc)
-    last_ts = _coerce_datetime(doc.get("updated_at")) or created_ts
+    last_ts = (
+        _coerce_datetime(doc.get("last_contribution_at"))
+        or _coerce_datetime(doc.get("updated_at"))
+        or created_ts
+    )
 
     # Metadata-only summaries intentionally avoid history reads for resilience.
     if (
@@ -5405,7 +5494,20 @@ def _build_session_summary_from_metadata(
         "conversation_search_index_version": doc.get(
             "conversation_search_index_version"
         ),
-        "preview": None,
+        "preview": doc.get("last_contribution_preview"),
+        "last_contribution_role": doc.get("last_contribution_role"),
+        "last_contribution_author": doc.get("last_contribution_author"),
+        "last_incoming_contribution_at": _coerce_datetime(
+            doc.get("last_incoming_contribution_at")
+        ).isoformat()
+        if _coerce_datetime(doc.get("last_incoming_contribution_at"))
+        else None,
+        "last_incoming_turn_id": doc.get("last_incoming_turn_id"),
+        "last_incoming_timestamp": _coerce_datetime(
+            doc.get("last_incoming_timestamp")
+        ).isoformat()
+        if _coerce_datetime(doc.get("last_incoming_timestamp"))
+        else None,
         **focus,
         **provenance,
         **_concept_q_and_a_metadata_field(doc),
@@ -5419,6 +5521,7 @@ def _get_chat_history_session_summaries_metadata_only(
     query: Dict[str, Any],
     safe_limit: int | None,
 ) -> List[Dict[str, Any]]:
+    backfill_conversation_activity_metadata(chat_history_coll, query=query)
     projection: Dict[str, Any] = _add_chat_session_provenance_projection(
         {
             "_id": 0,
@@ -5426,6 +5529,13 @@ def _get_chat_history_session_summaries_metadata_only(
             "session_name": 1,
             "created_at": 1,
             "updated_at": 1,
+            "last_contribution_at": 1,
+            "last_contribution_preview": 1,
+            "last_contribution_role": 1,
+            "last_contribution_author": 1,
+            "last_incoming_contribution_at": 1,
+            "last_incoming_timestamp": 1,
+            "last_incoming_turn_id": 1,
             "namespace": 1,
             "organisation_concept_id": 1,
             "trashed_at": 1,
@@ -5443,7 +5553,7 @@ def _get_chat_history_session_summaries_metadata_only(
     )
     try:
         cursor = cursor.sort(
-            [("updated_at", DESCENDING), ("created_at", DESCENDING)]
+            [("last_contribution_at", DESCENDING), ("session_id", ASCENDING)]
         )
     except Exception:
         pass
@@ -5475,6 +5585,105 @@ def _get_chat_history_session_summaries_metadata_only(
     if safe_limit is None:
         return summaries
     return summaries[:safe_limit]
+
+
+def backfill_conversation_activity_metadata(collection, *, query):
+    """Materialise legacy contribution dates once, without touching meaning or mtime.
+
+    This is actor-scoped derived maintenance. Mongo projects one visible message
+    per legacy session, not full histories; writes are batched and conditional so
+    a concurrent new contribution wins. Read receipts get no historical flood.
+    """
+    if not callable(getattr(collection, "bulk_write", None)):
+        return  # Minimal read-only adapters can still return their metadata.
+    missing = {"$and": [query, {"last_contribution_at": {"$exists": False}}]}
+    while True:
+        docs = list(
+            _read_aggregate(
+                collection,
+                [
+                    {"$match": missing},
+                    {"$limit": 200},
+                    {
+                        "$project": {
+                            "_id": 1,
+                            "created_at": 1,
+                            "updated_at": 1,
+                            "last": {
+                                "$arrayElemAt": [
+                                    {
+                                        "$filter": {
+                                            "input": {"$ifNull": ["$history", []]},
+                                            "as": "entry",
+                                            "cond": {
+                                                "$and": [
+                                                    {
+                                                        "$in": [
+                                                            "$$entry.role",
+                                                            ["user", "assistant"],
+                                                        ]
+                                                    },
+                                                    {"$ne": ["$$entry.content", ""]},
+                                                ]
+                                            },
+                                        }
+                                    },
+                                    -1,
+                                ]
+                            },
+                        }
+                    },
+                    {
+                        "$project": {
+                            "_id": 1,
+                            "created_at": 1,
+                            "updated_at": 1,
+                            "timestamp": "$last.timestamp",
+                            "role": "$last.role",
+                            "author": "$last.author_user_id",
+                            "preview": {
+                                "$substrCP": [
+                                    {
+                                        "$convert": {
+                                            "input": "$last.content",
+                                            "to": "string",
+                                            "onError": "",
+                                            "onNull": "",
+                                        }
+                                    },
+                                    0,
+                                    240,
+                                ]
+                            },
+                        }
+                    },
+                ],
+                operation="backfill_conversation_activity_metadata.aggregate",
+            )
+        )
+        if not docs:
+            return
+        updates = []
+        for doc in docs:
+            timestamp = (
+                _coerce_datetime(doc.get("timestamp"))
+                or _coerce_datetime(doc.get("created_at"))
+                or datetime(1970, 1, 1, tzinfo=timezone.utc)
+            )
+            updates.append(
+                UpdateOne(
+                    {"_id": doc["_id"], "last_contribution_at": {"$exists": False}},
+                    {
+                        "$set": {
+                            "last_contribution_at": timestamp,
+                            "last_contribution_preview": doc.get("preview"),
+                            "last_contribution_role": doc.get("role"),
+                            "last_contribution_author": doc.get("author"),
+                        }
+                    },
+                )
+            )
+        collection.bulk_write(updates, ordered=False)
 
 
 def get_chat_history_session_summaries_by_ids(
@@ -5559,7 +5768,15 @@ def get_chat_history_session_summaries_page(
         {
             "$set": {
                 "_conversation_page_timestamp": {
-                    "$ifNull": ["$updated_at", {"$ifNull": ["$created_at", epoch]}]
+                    "$ifNull": [
+                        "$last_contribution_at",
+                        {
+                            "$ifNull": [
+                                "$updated_at",
+                                {"$ifNull": ["$created_at", epoch]},
+                            ]
+                        },
+                    ]
                 }
             }
         },
@@ -5595,6 +5812,13 @@ def get_chat_history_session_summaries_page(
             "session_name": 1,
             "created_at": 1,
             "updated_at": 1,
+            "last_contribution_at": 1,
+            "last_contribution_preview": 1,
+            "last_contribution_role": 1,
+            "last_contribution_author": 1,
+            "last_incoming_contribution_at": 1,
+            "last_incoming_timestamp": 1,
+            "last_incoming_turn_id": 1,
             "namespace": 1,
             "organisation_concept_id": 1,
             "trashed_at": 1,
@@ -5733,6 +5957,13 @@ def _load_chat_history_session_summaries(
                 "history": 1,
                 "created_at": 1,
                 "updated_at": 1,
+                "last_contribution_at": 1,
+                "last_contribution_preview": 1,
+                "last_contribution_role": 1,
+                "last_contribution_author": 1,
+                "last_incoming_contribution_at": 1,
+                "last_incoming_timestamp": 1,
+                "last_incoming_turn_id": 1,
                 "namespace": 1,
                 "organisation_concept_id": 1,
                 "trashed_at": 1,
@@ -6016,6 +6247,13 @@ def get_chat_history_session_summary(
             "session_name": 1,
             "created_at": 1,
             "updated_at": 1,
+            "last_contribution_at": 1,
+            "last_contribution_preview": 1,
+            "last_contribution_role": 1,
+            "last_contribution_author": 1,
+            "last_incoming_contribution_at": 1,
+            "last_incoming_timestamp": 1,
+            "last_incoming_turn_id": 1,
             "namespace": 1,
             "organisation_concept_id": 1,
             "focal_concept_ids": 1,
@@ -6065,6 +6303,13 @@ def get_chat_history_session_summary(
             "history": 1,
             "created_at": 1,
             "updated_at": 1,
+            "last_contribution_at": 1,
+            "last_contribution_preview": 1,
+            "last_contribution_role": 1,
+            "last_contribution_author": 1,
+            "last_incoming_contribution_at": 1,
+            "last_incoming_timestamp": 1,
+            "last_incoming_turn_id": 1,
             "namespace": 1,
             "organisation_concept_id": 1,
             "session_name": 1,
@@ -6539,6 +6784,13 @@ def set_chat_session_trashed(
                 "organisation_concept_id": 1,
                 "created_at": 1,
                 "updated_at": 1,
+                "last_contribution_at": 1,
+                "last_contribution_preview": 1,
+                "last_contribution_role": 1,
+                "last_contribution_author": 1,
+                "last_incoming_contribution_at": 1,
+                "last_incoming_timestamp": 1,
+                "last_incoming_turn_id": 1,
                 "trashed_at": 1,
             },
         )
@@ -6844,6 +7096,13 @@ def list_chat_sessions_for_focal_concept(
             "session_name": 1,
             "created_at": 1,
             "updated_at": 1,
+            "last_contribution_at": 1,
+            "last_contribution_preview": 1,
+            "last_contribution_role": 1,
+            "last_contribution_author": 1,
+            "last_incoming_contribution_at": 1,
+            "last_incoming_timestamp": 1,
+            "last_incoming_turn_id": 1,
             "namespace": 1,
             "organisation_concept_id": 1,
             "focal_concept_ids": 1,
@@ -6919,6 +7178,13 @@ def get_chat_history_session_summaries_for_owner_sessions(
             "session_name": 1,
             "created_at": 1,
             "updated_at": 1,
+            "last_contribution_at": 1,
+            "last_contribution_preview": 1,
+            "last_contribution_role": 1,
+            "last_contribution_author": 1,
+            "last_incoming_contribution_at": 1,
+            "last_incoming_timestamp": 1,
+            "last_incoming_turn_id": 1,
             "namespace": 1,
             "organisation_concept_id": 1,
             "trashed_at": 1,

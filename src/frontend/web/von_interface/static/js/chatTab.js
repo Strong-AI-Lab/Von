@@ -1,4 +1,7 @@
 import { createChatSteeringControls } from './components/chatSteeringControls.js';
+import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows } from './components/conversationCatalogue.js';
+import { catalogueHasMore } from './components/conversationCatalogue.js';
+import { profileButton, participantAvatar, participantIdentityAvatar } from './components/participantProfile.js';
 import { setButtonLabel } from './utils/buttonLabel.js';
 import { createConversationTray } from './components/conversationTray.js';
 import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_NARROW_QUERY, loadConversationLayoutPreferences, normaliseConversationLayout, saveConversationLayoutPreference } from './utils/conversationLayoutPreferences.js';
@@ -1546,13 +1549,15 @@ function reconcileServerConversationPreferences(sessions) {
 }
 
 async function persistConversationPreferenceAction(sessionId, action) {
+
     const sid = (typeof sessionId === 'string') ? sessionId.trim() : '';
     if (!sid) return false;
     try {
-        const response = await fetch('/von/api/session/conversation_preference', {
+        const exchange = directConversationRows().find(row => row.session_id === sid);
+        const response = await fetch(exchange ? '/api/messages/exchange/preference' : '/von/api/session/conversation_preference', {
             method: 'POST',
             headers: buildChatFetchHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({ session_id: sid, action })
+            body: JSON.stringify(exchange ? { participant_ids: exchange.participant_ids, organisation_concept_id: exchange.organisation_concept_id || null, action } : { session_id: sid, action })
         });
         const data = await response.json();
         if (!response.ok) {
@@ -27314,12 +27319,19 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     if (!container) {
         return;
     }
+    if (container.querySelector(':active') || document.querySelector('dialog[open]')) return;
     const historyControls = document.getElementById('chatSessionHistoryControls');
     if (historyControls) historyControls.innerHTML = '';
 
     const canonicalSessions = normaliseConversationSessionViewModels(sessions);
-    if (canonicalSessions.length === 0) {
+    const catalogueSessions = filterCatalogueRows([...canonicalSessions, ...directConversationRows()]);
+    activeSessionId = activeMessageConversationId() || activeSessionId;
+    const unreadBadge = document.getElementById('conversationUnreadBadge');
+    const unreadCount = [...canonicalSessions, ...directConversationRows()].filter(row => !isConversationHidden(row.session_id) && row.shared_unread_count > 0).length;
+    if (unreadBadge) { unreadBadge.hidden = !unreadCount; unreadBadge.textContent = `${unreadCount}${catalogueHasMore() ? '+' : ''}`; unreadBadge.setAttribute('aria-label', `${catalogueHasMore() ? 'At least ' : ''}${unreadCount} unread conversations`); }
+    if (canonicalSessions.length === 0 && directConversationRows().length === 0) {
         renderChatSessionTabsPlaceholder('empty');
+        mountCatalogueControls(container);
         lastRenderedSessionCount = 0;
         setChatSessionCount(0);
         sessionTabsCache = [];
@@ -27337,8 +27349,8 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
     // JVNAUTOSCI-1014: Filter hidden sessions unless showHiddenSessions is enabled.
     const sessionsAfterHiddenFilter = showHiddenSessions
-        ? canonicalSessions
-        : canonicalSessions.filter(s => !isConversationHidden(s?.session_id));
+        ? catalogueSessions
+        : catalogueSessions.filter(s => !isConversationHidden(s?.session_id));
     const agentFilterResult = filterAgentCreatedSessionsForDefaultView(sessionsAfterHiddenFilter);
     const serverAgentState = serverAgentCreatedSessionVisibilityState?.applied === true
         ? serverAgentCreatedSessionVisibilityState
@@ -27465,6 +27477,11 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     const orderedVisibleSessions = [...pinnedSessions, ...unpinnedSessions];
 
     container.hidden = false;
+    const focusedId = container.contains(document.activeElement) ? document.activeElement?.closest('[data-session-id]')?.dataset.sessionId : null;
+    const savedScroll = container.scrollTop;
+    const anchor = savedScroll > 0 ? Array.from(container.querySelectorAll('[data-session-id]')).find(el => el.offsetTop >= savedScroll) : null;
+    const anchorId = anchor?.dataset.sessionId;
+    const anchorOffset = anchor ? anchor.offsetTop - savedScroll : 0;
     container.innerHTML = '';
     lastRenderedSessionCount = orderedVisibleSessions.length;
     setChatSessionCount(Math.max(filteredResult.totalMatchingCount, orderedVisibleSessions.length));
@@ -27527,7 +27544,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     if (orderedVisibleSessions.length === 0) {
         const placeholder = document.createElement('div');
         placeholder.className = 'chat-session-tabs-placeholder chat-session-tabs-placeholder-filtered';
-        placeholder.textContent = `No conversations match the current ${filteredResult.recentWindowDays}-day window. Adjust in Settings > Conversations.`;
+        placeholder.textContent = 'No conversations match the selected filters and recent window.';
         fragment.appendChild(placeholder);
     }
 
@@ -27537,6 +27554,10 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             return;
         }
         const isPinned = isConversationPinned(sid);
+        if (session.source_kind === 'message_exchange') {
+            fragment.append(renderMessageConversationRow(session, { selected: sid === activeSessionId, pinned: isPinned, togglePin: () => toggleConversationPinned(sid), hide: () => hideConversation(sid) }));
+            return;
+        }
         const isFirstPinnedTab = pinnedSessions.length > 0 && index === 0 && isPinned;
         const isFirstRecentTab = pinnedSessions.length > 0 && unpinnedSessions.length > 0 && index === pinnedSessions.length;
         const groupLabelText = isFirstPinnedTab
@@ -27655,6 +27676,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
         const header = document.createElement('span');
         header.className = 'chat-session-tab-header';
+        header.append(participantAvatar({ display_name: session.external_conversation ? displayName : 'Von', avatar_url: session.external_conversation ? null : '/static/VonImageBig.png' }));
 
         const pinToggle = document.createElement('button');
         pinToggle.type = 'button';
@@ -27769,7 +27791,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
         // The compact rail hides visible title/metadata, but retains their accessible name.
         tab.dataset.trayInitial = Array.from(displayName || 'Conversation')[0].toLocaleUpperCase();
-        tab.setAttribute('aria-label', tab.title);
+        if (displayName) tab.setAttribute('aria-label', tab.title);
         tab.setAttribute('data-keep-title', 'true');
         tab.appendChild(header);
         tab.appendChild(meta);
@@ -27855,7 +27877,11 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         fragment.appendChild(tab);
     });
 
+    mountCatalogueControls(fragment);
     container.appendChild(fragment);
+    const restoredAnchor = anchorId ? Array.from(container.querySelectorAll('[data-session-id]')).find(el => el.dataset.sessionId === anchorId) : null;
+    container.scrollTop = restoredAnchor ? restoredAnchor.offsetTop - anchorOffset : savedScroll;
+    if (focusedId) Array.from(container.querySelectorAll('[data-session-id]')).find(el => el.dataset.sessionId === focusedId)?.focus({ preventScroll: true });
 
     // JVNAUTOSCI-1014: Context menu on container for showing/hiding hidden sessions
     // Remove any existing listener to avoid duplicates
@@ -28769,6 +28795,7 @@ async function renameChatSession(sessionId, sessionName) {
 }
 
 async function switchToChatSession(sessionId, options = {}) {
+    showChatConversation();
     stopDictation();
     const sid = String(sessionId || '').trim();
     if (!sid) {
@@ -29882,6 +29909,8 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             }
 
             const historyMessageOptions = {
+                authorConceptId: msg.author_user_id || null,
+                contributionTimestamp: msg.contribution_timestamp || null,
                 imageAttachments: msg.image_attachments,
                 ...(externalActor ? {
                     assistantMessage: msg.role === 'assistant',
@@ -33637,6 +33666,7 @@ function detachChatWorkForOrganisationSwitch() {
 }
 
 function startOrganisationSwitchForChatTab(detail = {}) {
+    resetConversationCatalogue();
     stopDictation();
     const requestedSwitchId = normaliseOrganisationSwitchId(detail);
     if (requestedSwitchId && pendingChatOrganisationSwitchId === requestedSwitchId) {
@@ -33829,6 +33859,7 @@ try {
 }
 
 function handleAuthStatusChangeForChatTab(detail) {
+    resetConversationCatalogue();
     synchroniseLlmExecutionContext({ force: true, reason: 'authenticated_actor_changed' });
     loadHiddenChatSessionIds();
     loadPinnedChatSessionIds();
@@ -33891,6 +33922,14 @@ export function initializeChatTab() {
         return;
     }
     chatTabInitialised = true;
+    initialiseConversationCatalogue({ render: (fresh) => { if (fresh === true) reconcileServerConversationPreferences(directConversationRows()); renderChatSessionTabs(sessionTabsCache, activeChatSessionId); }, acceptChats: (rows) => {
+        serverAgentCreatedSessionVisibilityState = null;
+        const selected = sessionTabsCache.find(row => row.session_id === activeChatSessionId);
+        const pinned = sessionTabsCache.filter(row => isConversationPinned(row.session_id));
+        sessionTabsCache = normaliseConversationSessionViewModels([...new Map([...pinned, ...(selected ? [selected] : []), ...rows.map(row => ({ ...sessionTabsCache.find(previous => previous.session_id === row.session_id), ...row }))].map(row => [row.session_id, row])).values()]);
+        reconcileServerConversationPreferences(sessionTabsCache);
+    }, currentChat: () => sessionTabsCache.find(row => row.session_id === activeChatSessionId) });
+    document.querySelector('.chat-header-controls')?.append(profileButton());
     console.log("Initializing chat tab...");
     bindFocusedConversationEvents();
 
@@ -33912,7 +33951,9 @@ export function initializeChatTab() {
     if (!conversationSearchSelectionListenerBound) {
         conversationSearchSelectionListenerBound = true;
         document.addEventListener('von:open-conversation-search-result', event => {
-            void openConversationSearchResult(event?.detail?.conversation || {});
+            const result = event?.detail?.conversation || {};
+            if (result.source_kind === 'message_exchange') { activateTab('chatTab'); void selectMessageConversation(result); }
+            else void openConversationSearchResult(result);
         });
         document.addEventListener('von:conversation-trash-changed', event => {
             if (event?.detail?.action === 'restored') {
@@ -38326,6 +38367,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageContainer.style.cssText = 'display: flex; align-items: flex-start; margin-bottom: 15px; padding: 10px; background-color: #f8f9fa; border-radius: 8px; border-left: 4px solid #007bff;';
             messageContainer.className = 'message-container';
             messageContainer.classList.add('assistant-turn');
+            if (options.contributionTimestamp || timestampStr) messageContainer.dataset.contributionTimestamp = options.contributionTimestamp || timestampStr;
             let assistantAvatar;
             if (externalActor) {
                 assistantAvatar = document.createElement('span');
@@ -38805,6 +38847,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageContainer.style.cssText = 'margin-bottom: 15px; padding: 10px; background-color: #fff; border-radius: 8px; border-left: 4px solid #28a745;';
             messageContainer.className = 'message-container';
             messageContainer.classList.add(sender === 'Error' ? 'error-turn' : 'user-turn');
+            if (options.contributionTimestamp || timestampStr) messageContainer.dataset.contributionTimestamp = options.contributionTimestamp || timestampStr;
 
             if (sender === 'Error') {
                 messageContainer.style.borderLeftColor = '#dc3545';
@@ -38815,6 +38858,8 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageHeader.className = 'message-header';
             messageHeader.style.cssText = 'font-weight: bold; margin-bottom: 5px; font-size: 0.9em; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0;';
             messageHeader.style.color = sender === 'Error' ? '#dc3545' : '#28a745';
+            const authorId = options.authorConceptId || (!isHistory ? getCurrentUserConceptId() : null);
+            if (sender !== 'Error' && !externalActor && authorId) messageHeader.append(participantIdentityAvatar(authorId, sender));
 
             const headerText = document.createElement('span');
             headerText.textContent = `${sender} • ${displayTimestamp}${historySuffix}`;

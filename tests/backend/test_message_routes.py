@@ -511,7 +511,12 @@ def test_send_message_returns_explicit_reused_receipt_without_duplicate_episode(
     )
 
     assert response.status_code == 200
-    assert response.get_json() == {
+    body = response.get_json()
+    conversation = body.pop("conversation")
+    assert conversation["participant_ids"] == ["#V#user_alice", "#V#user_bob"]
+    assert conversation["organisation_concept_id"] == "#V#org_test"
+    assert conversation["source_kind"] == "message_exchange"
+    assert body == {
         "success": True,
         "effect_status": "succeeded",
         "changed": False,

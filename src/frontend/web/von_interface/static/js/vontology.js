@@ -3549,7 +3549,7 @@ async function fetchConceptSearchItems(q, signal) {
   return sortConceptSearchItems(items);
 }
 
-async function fetchConversationSearchPage(query, {
+async function fetchChatConversationSearchPage(query, {
   cursor = null,
   signal = null,
   trashedOnly = false,
@@ -3576,6 +3576,30 @@ async function fetchConversationSearchPage(query, {
     throw new Error(data?.error || `Conversation search failed (HTTP ${response.status})`);
   }
   return data;
+}
+
+async function fetchConversationSearchPage(query, options = {}) {
+  if (options.trashedOnly) return fetchChatConversationSearchPage(query, options);
+  let position = { chat: options.cursor || null, messageSkip: 0, chatDone: false, messageDone: false };
+  if (String(options.cursor || '').startsWith('catalogue:')) position = JSON.parse(decodeURIComponent(options.cursor.slice(10)));
+  const size = options.pageSize || 8;
+  const [chat, messages] = await Promise.allSettled([
+    position.chatDone ? Promise.resolve({ results: [] }) : fetchChatConversationSearchPage(query, { ...options, cursor: position.chat }),
+    position.messageDone ? Promise.resolve({ conversations: [] }) : vontologyFetch(`/api/messages/catalogue?all_contexts=true&q=${encodeURIComponent(query)}&limit=${size}&skip=${position.messageSkip}`, { signal: options.signal }).then(async response => {
+      if (!response.ok) throw new Error('Message search unavailable.');
+      return response.json();
+    })
+  ]);
+  if (chat.status === 'rejected' && messages.status === 'rejected') throw chat.reason;
+  const data = chat.status === 'fulfilled' ? chat.value : { results: [] };
+  const direct = messages.status === 'fulfilled' ? messages.value : { conversations: [] };
+  const next = { chat: data.next_cursor || null, chatDone: !data.next_cursor, messageSkip: direct.next_skip || 0, messageDone: !direct.has_more };
+  return {
+    ...data,
+    results: [...(data.results || []), ...(direct.conversations || []).map(row => ({ ...row, display_name: row.session_name, match: { snippet: row.preview } }))],
+    next_cursor: next.chatDone && next.messageDone ? null : `catalogue:${encodeURIComponent(JSON.stringify(next))}`,
+    index_coverage: { ...data.index_coverage, complete_for_accessible_window: chat.status === 'fulfilled' && messages.status === 'fulfilled' && data.index_coverage?.complete_for_accessible_window !== false },
+  };
 }
 
 export async function performVontologySearch(q) {

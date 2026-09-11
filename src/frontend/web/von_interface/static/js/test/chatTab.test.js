@@ -382,6 +382,7 @@ jest.mock('../domUtils.js', () => ({
     renderSpanSuggestions: jest.fn()
 }));
 jest.mock('../utils/sessionScopedStorage.js', () => ({
+    getSessionScopedOrgId: jest.fn(() => null),
     getSessionScopedNamespace: jest.fn(),
     getSessionScopedOrgContext: jest.fn()
 }));

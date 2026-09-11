@@ -386,13 +386,8 @@ async function syncFlaskSessionOrg() {
       // Personal is an explicit per-tab binding. Materialise it even when the
       // cookie fallback also happens to be null, so later calls cannot drift to
       // another tab's organisation through a non-window fallback.
-      if (!isWindowSessionSource && hasSessionPersonalOrgContext()) {
-        console.log('[main] Binding explicit Personal context to this window session');
-        await postJson('/von/api/session/set_organisation', {
-          organisation_concept_id: null
-        });
-      } else if (context.organisation_id && !isWindowSessionSource) {
-        console.log('[main] Clearing stale Flask session org - no org in storage');
+      if (!isWindowSessionSource) {
+        console.log('[main] Binding Personal context to this window session');
         await postJson('/von/api/session/set_organisation', {
           organisation_concept_id: null
         });

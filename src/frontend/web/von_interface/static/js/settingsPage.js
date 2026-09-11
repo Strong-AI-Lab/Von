@@ -1,3 +1,4 @@
+import { profileButton } from './components/participantProfile.js';
 import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_TRAY_HOVER_KEY, loadConversationLayoutPreferences, normaliseConversationLayout, saveConversationLayoutPreference } from './utils/conversationLayoutPreferences.js';
 import { supportsAudioRecording } from './dictation.js';
 import { ensureUniqueWindowSessionId, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
@@ -6857,3 +6858,10 @@ async function shutdownServer() {
     if (statusEl) { statusEl.textContent = 'Shutdown failed: ' + e.message; statusEl.className = 'status-message error'; }
   }
 }
+
+function mountParticipantSettings() {
+  const host = document.getElementById('participantProfileSettings');
+  if (host && !host.children.length) host.append(profileButton(null, 'Edit my profile and avatar'));
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mountParticipantSettings);
+else mountParticipantSettings();

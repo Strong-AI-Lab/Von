@@ -187,7 +187,7 @@ def test_light_session_summaries_sort_and_limit_before_materialising(monkeypatch
 
     assert collection.cursor is not None
     assert collection.cursor.sort_calls == [
-        [("updated_at", -1), ("created_at", -1)]
+        [("last_contribution_at", -1), ("session_id", 1)]
     ]
     assert collection.cursor.limit_calls == [3]
     assert collection.cursor.max_time_ms_calls == []

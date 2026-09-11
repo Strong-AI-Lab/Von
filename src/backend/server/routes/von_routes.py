@@ -18128,6 +18128,10 @@ def history_sessions():
             reverse=True,
         )
 
+        from ...services.conversation_read_service import project_unread
+
+        combined = project_unread(user_concept_id, combined)
+
         response_payload: dict[str, Any] = {
             "authenticated": True,
             "sessions": combined,
@@ -21581,3 +21585,50 @@ def _contains_openai_quota_error(message: object) -> bool:
 from .conversation_image_routes import register_image_routes
 
 register_image_routes(von_bp)
+
+from .participant_profile_routes import register_participant_profile_routes
+
+register_participant_profile_routes(von_bp)
+
+
+@von_bp.route("/history/read", methods=["POST"])
+def acknowledge_conversation_read():
+    from ...security.access_control import get_effective_user_concept_id
+    from ...services.conversation_read_service import acknowledge
+
+    actor = get_effective_user_concept_id()
+    if not actor:
+        return jsonify(error="authentication_required"), 401
+    payload = request.get_json(silent=True) or {}
+    sid = payload.get("session_id")
+    if not isinstance(sid, str) or not sid:
+        return jsonify(error="session_required"), 400
+    effective = get_effective_context(
+        request.headers.get("X-Von-Window-Session"),
+        dict(session),
+        actor,
+        require_known_window=True,
+    )
+    summary = chat_history_service.get_chat_history_session_summary(
+        actor,
+        sid,
+        namespace=effective.get("namespace"),
+        include_legacy=False,
+        summary_mode="light",
+    )
+    if not summary:
+        return jsonify(error="conversation_unavailable"), 404
+    observed = chat_history_service._coerce_datetime(payload.get("observed_timestamp"))
+    expected = chat_history_service._coerce_datetime(
+        summary.get("last_incoming_timestamp")
+    )
+    turn_matches = bool(
+        payload.get("observed_turn_id")
+        and payload["observed_turn_id"] == summary.get("last_incoming_turn_id")
+    )
+    if not turn_matches and (not observed or not expected or observed != expected):
+        return jsonify(error="contribution_changed"), 409
+    return jsonify(
+        success=True,
+        read_at=acknowledge(actor, sid, summary["last_incoming_contribution_at"]),
+    )

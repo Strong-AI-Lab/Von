@@ -50,6 +50,7 @@ export function setupTabNavigation() {
 }
 
 export function activateTab(tabId) {
+  if (tabId === 'messagesTab') tabId = 'chatTab';
   console.log(`Activating tab: ${tabId}`);
   if (isTabGuarded(tabId)) {
     console.warn(`[tabNavigation] Tab ${tabId} is disabled by feature flag; falling back to chat.`);
