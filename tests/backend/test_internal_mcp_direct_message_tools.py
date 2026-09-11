@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 
 def _message_doc(
     *,
@@ -327,7 +329,9 @@ def test_task_status_retry_reports_no_change(monkeypatch):
     }
     update_calls = {"count": 0}
     observed_actor: dict[str, Any] = {}
-    monkeypatch.setattr(task_management_service, "get_task", lambda _task_id: dict(state))
+    monkeypatch.setattr(
+        task_management_service, "get_task", lambda _task_id: dict(state)
+    )
 
     def fake_update(_task_id: str, status: str, *, actor_concept_id=None):
         update_calls["count"] += 1
@@ -371,7 +375,9 @@ def test_task_comment_retry_reuses_canonical_comment(monkeypatch):
         task_management_service,
         "find_task_comment_by_effect_fingerprint",
         lambda _task_id, fingerprint: (
-            persisted.get("comment") if persisted.get("fingerprint") == fingerprint else None
+            persisted.get("comment")
+            if persisted.get("fingerprint") == fingerprint
+            else None
         ),
     )
 
@@ -631,3 +637,37 @@ def test_task_create_reconciles_late_first_write_after_create_failure(monkeypatc
     assert result["changed"] is False
     assert result["idempotent_replay"] is True
     assert result["canonical_read_back"] == canonical_task
+    assert result["canonical_readback"]["verified"] is True
+    assert result["canonical_readback"]["verified_outcome"] == "task_record_exists"
+    assert result["canonical_readback"]["task_execution_verified"] is False
+
+
+def test_task_create_retry_does_not_certify_an_incomplete_record(monkeypatch):
+    from src.backend.integrations.internal_mcp import catalogue
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.services import task_management_service
+
+    partial = {**_owned_task(), "description": ""}
+    monkeypatch.setattr(
+        task_management_service,
+        "find_task_by_agent_creation_fingerprint",
+        lambda **_: partial,
+    )
+    monkeypatch.setattr(
+        task_management_service,
+        "create_task",
+        lambda **_: pytest.fail("retry must not create a duplicate"),
+    )
+    with override_current_actor("#V#user_alice", "#V#org_test"):
+        result = catalogue._task_create(
+            title="Agent task",
+            description="Test",
+            assignee_id="#V#user_alice",
+            created_by_concept_id="#V#user_alice",
+            request_id="retry",
+            **_task_actor_arguments(),
+        )
+    assert result["success"] is False
+    assert result["effect_status"] == "indeterminate"
+    assert result["changed"] is False
+    assert "canonical_readback" not in result

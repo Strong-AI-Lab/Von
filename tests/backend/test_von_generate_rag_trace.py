@@ -18,6 +18,11 @@ class _StubGateway:
 def app(monkeypatch):
     from src.backend.server.routes import von_routes
 
+    monkeypatch.setattr(
+        "src.backend.services.conversation_model_context_service.conversation_participants",
+        lambda **_: {"status": "available", "participants": []},
+    )
+
     evidence = {
         "schema_version": "turn_evidence_envelope.v1",
         "evidence_id": "ev_rag_trace",
@@ -300,14 +305,17 @@ def test_generate_projects_structured_history_content_as_text_without_rewriting_
         for message in adaptive_kwargs["context"]
         if message.get("name") == "prior_debug_result"
     )
-    assert prior_tool_message["content"] == (
-        '{"recorded_at":"2026-09-03T07:09:45Z",'
-        '"schema_version":"debug_payload.v1"}'
+    assert "historical_tool_result" in prior_tool_message["content"]
+    assert prior_tool_message["content"].endswith(
+        '{"recorded_at":"2026-09-03T07:09:45Z","schema_version":"debug_payload.v1"}'
     )
     assert stored_message["content"] is stored_content
-    assert response.get_json()["llm_debug"]["namespace_report"][
-        "structured_history_content_normalised_count"
-    ] == 1
+    assert (
+        response.get_json()["llm_debug"]["namespace_report"][
+            "structured_history_content_normalised_count"
+        ]
+        == 1
+    )
 
 
 def test_model_context_projection_preserves_string_content_exactly() -> None:
@@ -376,8 +384,20 @@ def test_generate_prefers_window_effective_namespace_and_reports_mismatch(
     assert namespace_report["session_namespace"] == "#V#user@flask_org"
     assert namespace_report["namespace"] == "#V#user@window_org"
 
+    model_context = app.config["_ADAPTIVE_STATE"]["adaptive_kwargs"]["context"]
+    participant_header = next(
+        row["content"]
+        for row in model_context
+        if row["content"].startswith("CONVERSATION CONTEXT")
+    )
+    assert '"namespace": "#V#user@window_org"' in participant_header
+    assert '"organisation_concept_id": "#V#window_org"' in participant_header
+    assert "#V#user@flask_org" not in participant_header
+
     assert captured_namespaces
-    assert all(ns == "#V#user@window_org" for ns in captured_namespaces if ns is not None)
+    assert all(
+        ns == "#V#user@window_org" for ns in captured_namespaces if ns is not None
+    )
 
 
 def test_generate_namespace_resolution_keeps_personal_window_over_stale_flask_org():
