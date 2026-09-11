@@ -57,6 +57,7 @@ EXECUTION_ENVELOPE_VERSION = 1
 MAX_EXECUTION_ENVELOPE_CHARS = 100_000
 EXECUTION_ENVELOPE_ALLOWED_FIELDS = frozenset(
     {
+        "client_context",
         "initiation_id",
         "language",
         "model",
@@ -452,6 +453,9 @@ def _normalise_execution_envelope(value: Any) -> dict[str, Any]:
     decoded = json.loads(encoded)
     if not isinstance(decoded, dict):  # pragma: no cover - guarded above
         raise InvalidChatPromptQueueInput("execution_envelope must be an object")
+    if "client_context" in decoded:
+        from .speech_telemetry_service import sanitise_client_context
+        decoded["client_context"] = sanitise_client_context(decoded["client_context"])
     return decoded
 
 
@@ -3644,6 +3648,11 @@ def requeue_prompt_record(
             "completed_at": None,
             "last_error": None,
             "source": "restart",
+            "interrupted_attempt": existing.get("interrupted_attempt") or {
+                "client_request_id": existing.get("client_request_id"),
+                "attempt_id": existing.get("attempt_id"),
+                "server_instance_id": existing.get("server_instance_id"),
+            },
         },
         "$unset": {
             "active_conversation_key": "",
@@ -4137,3 +4146,173 @@ def cancel_prompt_record(
             fallback_message="cancellable prompt was not found",
         )
     return record
+
+
+def resume_legacy_prompt_record(
+    *,
+    scope,
+    queue_id,
+    current_server_instance_id,
+    execution_envelope,
+    resolve_conversation=None,
+):
+    """Reconcile an interrupted legacy turn, then use the existing durable handoff.
+
+    A continuation carries the original request and exact receipt observations;
+    it is not a claim that an interrupted external effect failed or is replayable.
+    """
+    query = {**_compatible_scope_query(scope), "queue_id": queue_id}
+    coll = _collection()
+    source = coll.find_one(query)
+    if not source:
+        raise ChatPromptQueueRecordNotFound("Interrupted prompt was not found")
+    successor = coll.find_one(
+        {
+            **_compatible_scope_query(scope),
+            "handoff_source_queue_id": queue_id,
+            "dispatch_mode": DISPATCH_MODE_SERVER,
+        }
+    )
+    if successor:
+        if successor.get("status") == STATUS_QUEUED and not successor.get(
+            "dispatch_ready"
+        ):
+            return complete_server_dispatch_handoff(
+                scope=scope, queue_id=successor["queue_id"]
+            )
+        return serialise_queue_record(successor)
+    if source.get("dispatch_mode") == DISPATCH_MODE_SERVER:
+        raise ChatPromptQueueReconciliationRequired(
+            "This server-owned turn must reconcile its executing attempt"
+        )
+    if source.get("status") not in ACTIVE_STATUSES:
+        return serialise_queue_record(source)
+    if source.get("status") == STATUS_QUEUED and source.get("source") != "restart":
+        raise InvalidChatPromptQueueInput(
+            "Only interrupted work can use this continuation path"
+        )
+    binding = (
+        resolve_conversation(source.get("session_id")) if resolve_conversation else {}
+    )
+    conversation_key = binding.get("conversation_key") or source.get("conversation_key")
+    if not conversation_key:
+        raise InvalidChatPromptQueueInput(
+            "Resolve the interrupted conversation before resuming work"
+        )
+    attempt = source.get("interrupted_attempt") or {
+        key: source.get(key)
+        for key in ("client_request_id", "attempt_id", "server_instance_id")
+    }
+    request_id = attempt.get("client_request_id")
+    observed = None
+    if request_id:
+        from .chat_history_service import (
+            build_chat_history_query,
+            get_chat_history_collection_service,
+        )
+
+        history = get_chat_history_collection_service(read_only=True)
+        if history is None:
+            raise ChatPromptQueueUnavailable("History reconciliation is unavailable")
+        completed = history.find_one(
+            {
+                **build_chat_history_query(
+                    user_id=binding.get("history_user_id") or scope["user_concept_id"],
+                    session_id=source.get("session_id"),
+                    namespace=binding.get("history_namespace")
+                    or scope.get("namespace"),
+                    include_legacy=False,
+                ),
+                "history": {
+                    "$elemMatch": {
+                        "role": "assistant",
+                        "llm_debug_data.request_id": request_id,
+                    }
+                },
+            },
+            {"_id": 1},
+        )
+        if completed:
+            record = finish_prompt_record(
+                scope=scope,
+                queue_id=queue_id,
+                status=STATUS_COMPLETED,
+                attempt_id=source.get("attempt_id"),
+            )
+            return {**record, "recovered_terminal": True}
+        from .turn_execution_record_service import get_turn_execution_record_projection
+
+        record = get_turn_execution_record_projection(
+            request_id=request_id, namespace=scope.get("namespace")
+        )
+        if (
+            isinstance(record, Mapping)
+            and record.get("user_id") == scope["user_concept_id"]
+        ):
+            observed = {
+                key: record.get(key)
+                for key in (
+                    "request_id",
+                    "terminal_status",
+                    "tool_invocations",
+                    "tool_observation_ledger",
+                    "evidence_index",
+                    "reference_manifest",
+                    "required_effects",
+                    "terminal_outcome_receipt",
+                    "completion_report",
+                    "effect_observation_journal",
+                )
+                if record.get(key) is not None
+            }
+            # Preserve the exact locator even if a large record needs later reads.
+            if len(json.dumps(observed, default=str)) > 24000:
+                observed = {
+                    "request_id": request_id,
+                    "details": "available_through_exact_turn_telemetry",
+                }
+    if source.get("status") == STATUS_IN_PROGRESS:
+        requeue_prompt_record(
+            scope=scope,
+            queue_id=queue_id,
+            current_server_instance_id=current_server_instance_id,
+        )
+        source = coll.find_one(query)
+    if source.get("conversation_key") != conversation_key:
+        # Reuse the canonical queued-record mutation before the handoff compares
+        # source and successor identity. Old restart rows can lack this binding.
+        update_queued_record(
+            scope=scope,
+            queue_id=queue_id,
+            session_id=source.get("session_id"),
+            conversation_key=conversation_key,
+        )
+        source = coll.find_one(query)
+    envelope = _normalise_execution_envelope(execution_envelope)
+    envelope["workflow_inputs"] = {
+        **(envelope.get("workflow_inputs") or {}),
+        "interrupted_turn": {
+            "intent": "continue_from_observed_state",
+            "source_queue_id": queue_id,
+            "original_attempt": attempt,
+            "receipt_observations": observed,
+            "unobserved_effect_outcome": "unknown_not_failed",
+            "next_step": "reconcile_previous_outcomes_then_complete_remaining_work",
+        },
+    }
+    replacement = create_queue_record(
+        scope=scope,
+        prompt_raw=source["prompt_raw"],
+        session_id=source.get("session_id"),
+        session_name=source.get("session_name"),
+        conversation_key=conversation_key,
+        source="interrupted_continuation",
+        dispatch_mode=DISPATCH_MODE_SERVER,
+        execution_envelope_version=1,
+        execution_envelope=envelope,
+        enqueue_submission_id="resume:" + queue_id,
+        handoff_source_queue_id=queue_id,
+    )
+    return complete_server_dispatch_handoff(
+        scope=scope, queue_id=replacement["queue_id"]
+    )

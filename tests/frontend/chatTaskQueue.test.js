@@ -2,6 +2,10 @@
 
 const chatTabModulePath = '../../src/frontend/web/von_interface/static/js/chatTab.js';
 
+jest.mock('../../src/frontend/web/von_interface/static/js/voiceConversation.js', () => ({
+    createVoiceConversation: jest.fn(() => ({ end: jest.fn(), dispose: jest.fn(), isActive: () => false, reply: jest.fn() }))
+}));
+
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
     annotateTurn: jest.fn(),
     fetchWithTimeout: jest.fn(),
@@ -71,6 +75,29 @@ describe('chat task queue', () => {
         }
         jest.restoreAllMocks();
         delete global.fetch;
+    });
+
+    test('voice utterances use canonical server enqueue with frozen speech correlation and a stable submission ID', async () => {
+        const chat = require(chatTabModulePath);
+        document.body.insertAdjacentHTML('beforeend', '<button id="resetButton"></button><button id="voiceConversationButton"></button><p id="voiceConversationStatus"></p>');
+        const calls = [];
+        global.fetch = jest.fn(async (url, options = {}) => {
+            calls.push({ url, options });
+            const payload = JSON.parse(options.body || '{}');
+            const item = { ...payload, queue_id: 'voice-queue', status: 'queued' };
+            return { ok: true, status: 200, json: async () => ({ success: true, item, items: [], history: [] }) };
+        });
+        require('../../src/frontend/web/von_interface/static/js/apiService.js').fetchWithTimeout
+            .mockImplementation((...args) => global.fetch(...args));
+        chat.initializeChatTab();
+        const { createVoiceConversation } = require('../../src/frontend/web/von_interface/static/js/voiceConversation.js');
+        const options = createVoiceConversation.mock.calls.at(-1)[0];
+        await options.onSubmit('Discuss Vontology', { attemptId: 'speech-attempt', itemId: 'item-one', submissionId: 'speech-attempt-item-one' });
+        const enqueue = calls.find(c => c.url === '/von/api/chat_prompt_queue' && c.options.method === 'POST');
+        const body = JSON.parse(enqueue.options.body);
+        expect(body).toMatchObject({ prompt_raw: 'Discuss Vontology', dispatch_mode: 'server', enqueue_submission_id: 'speech-attempt-item-one',
+            execution_envelope: { client_context: { speech_attempt_ids: ['speech-attempt'], speech_item_id: 'item-one' } } });
+        expect(calls.some(c => String(c.url).startsWith('/von/generate'))).toBe(false);
     });
 
     test('sends the stored Gemini choice as a bare model with its exact provider', async () => {
@@ -1182,9 +1209,10 @@ describe('chat task queue', () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
         await flushMicrotasks();
 
+        expect(JSON.parse(global.fetch.mock.calls.find(([url]) => String(url).endsWith('/requeue'))[1].body).execution_envelope).toBeTruthy();
         expect(generateBodies).toHaveLength(0);
         expect(document.querySelector('.chat-task-queue-item-label')?.textContent)
-            .toBe('Next up • Recovered');
+            .toBe('Ready to resume • Recovered');
         expect(document.querySelector('.chat-task-queue-item')).toBeTruthy();
         expect(global.fetch.mock.calls.some(([url]) => String(url).endsWith('/claim'))).toBe(false);
         expect(global.fetch.mock.calls.some(([url]) => String(url).endsWith('/finish'))).toBe(false);
@@ -1238,7 +1266,7 @@ describe('chat task queue', () => {
         expect(document.getElementById('chatTaskQueueCount')?.textContent).toBe('1 queued');
         const labels = Array.from(document.querySelectorAll('.chat-task-queue-item-label'))
             .map((node) => node.textContent);
-        expect(labels).toEqual(['Next up • Current']);
+        expect(labels).toEqual(['Ready to resume • Current']);
         expect(document.querySelector('.chat-task-queue-item-running')).toBeNull();
         expect(document.querySelector(
             '#chatSessionTabs [data-session-id="session-2"] .chat-session-tab-activity'

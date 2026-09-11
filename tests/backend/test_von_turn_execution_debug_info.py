@@ -9,6 +9,10 @@ def test_finalise_llm_debug_info_records_observations_without_rebuilding_a_gate(
     monkeypatch,
 ) -> None:
     from src.backend.server.routes import von_routes
+    from src.backend.services import speech_telemetry_service
+
+    client_context = {"device_model": "Pixel 8", "speech_attempt_ids": ["speech-attempt"]}
+    monkeypatch.setattr(speech_telemetry_service, "request_client_context", lambda: client_context)
 
     monkeypatch.setattr(
         von_routes,
@@ -153,6 +157,9 @@ def test_finalise_llm_debug_info_records_observations_without_rebuilding_a_gate(
     )
 
     record = result["turn_execution_record"]
+    assert result["client_context"] == client_context
+    assert result["turn_execution_diagnostics"]["client_context"] == client_context
+    assert record["turn_execution_diagnostics"]["client_context"] == client_context
     assert record["schema_version"] == "turn_execution_record.observational.v1"
     assert record["record_kind"] == "observational"
     assert record["actor"] == {

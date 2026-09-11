@@ -89,6 +89,39 @@ def test_chat_prompt_queue_routes_restore_and_complete_record(client) -> None:
     assert final_list_resp.get_json()["items"] == []
 
 
+def test_resume_old_requeued_prompt_rebuilds_missing_conversation_binding(client):
+    from src.backend.services.conversation_turn_admission_service import (
+        build_conversation_key,
+    )
+
+    created = client.post(
+        "/von/api/chat_prompt_queue",
+        json={
+            "prompt_raw": "Is that task available in Tasks?",
+            "session_id": "legacy-conversation",
+        },
+    ).json["item"]
+    chat_prompt_queue_service._collection().update_one(
+        {"queue_id": created["queue_id"]},
+        {"$set": {"source": "restart"}, "$unset": {"conversation_key": ""}},
+    )
+    result = client.post(
+        f"/von/api/chat_prompt_queue/{created['queue_id']}/requeue",
+        json={"execution_envelope": {"client_context": {"device_model": "Pixel 8"}}},
+    )
+    assert result.status_code == 200
+    row = chat_prompt_queue_service._collection().find_one(
+        {"queue_id": result.json["item"]["queue_id"]}
+    )
+    assert row["conversation_key"] == build_conversation_key(
+        owner_user_id="#V#test_user",
+        history_namespace="#V#test_user@test_org",
+        conversation_session_id="legacy-conversation",
+    )
+    assert row["dispatch_mode"] == "server" and row["dispatch_ready"]
+    assert row["execution_envelope"]["client_context"]["device_model"] == "Pixel 8"
+
+
 def test_chat_prompt_queue_create_returns_typed_backpressure(
     client, monkeypatch: pytest.MonkeyPatch
 ) -> None:

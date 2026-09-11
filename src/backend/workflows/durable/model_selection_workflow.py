@@ -129,9 +129,9 @@ def _enabled_model_pool(
         provider = _context_string(entry.get("provider"))
         model = _context_string(entry.get("model"))
         host = _context_string(entry.get("host"))
-        from ...languagemodels.model_defaults import is_transcription_model
+        from ...languagemodels.model_defaults import is_audio_only_model
 
-        if not provider or not model or is_transcription_model(provider, model):
+        if not provider or not model or is_audio_only_model(provider, model):
             continue
         key = (provider.lower(), model, host)
         if key in seen:

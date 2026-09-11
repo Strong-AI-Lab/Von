@@ -1,3 +1,5 @@
+import { createStreamingInput } from './streamingSpeech.js';
+import { createSpeechReporter } from './clientContext.js';
 import { isSpeechRecognitionSupported, startSpeechRecognition, stopSpeaking } from './speech.js';
 
 const RECORDING_TYPES = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm'];
@@ -38,9 +40,12 @@ export function createDictationController({ input, button, status, cancelButton,
     let capability = null;
     let state = 'idle';
     let disposed = false;
+    const attemptIds = [];
+    let engineChosen = false;
 
     function render(next, message = '') {
         state = next;
+        current?.reporter?.event('state', { state: next });
         const busy = ['requesting', 'recording', 'transcribing'].includes(next);
         button.textContent = next === 'recording' ? 'Finish dictation' : next === 'transcribing' ? 'Transcribing…' : next === 'requesting' ? 'Opening microphone…' : 'Dictate';
         button.disabled = next === 'transcribing' || next === 'requesting';
@@ -65,6 +70,8 @@ export function createDictationController({ input, button, status, cancelButton,
         const capture = current;
         current = null;
         if (capture) {
+            capture.reporter?.event('ended', { reason: 'cancelled' });
+            capture.live?.cancel();
             capture.abort?.abort();
             capture.recognition?.abort();
             if (capture.recorder?.state === 'recording') capture.recorder.stop();
@@ -74,9 +81,14 @@ export function createDictationController({ input, button, status, cancelButton,
         render('idle');
     }
 
-    function fail(capture, message) {
+    function fail(capture, message, reason = 'input_failed') {
         if (!valid(capture)) return;
         release(capture);
+        capture.reporter?.event('error', { reason });
+        if (!capture.blob) {
+            current = null;
+            capture.recognition?.abort();
+        }
         render('error', message);
         capture.resolve?.(false);
     }
@@ -86,6 +98,11 @@ export function createDictationController({ input, button, status, cancelButton,
         const value = String(input.value || '');
         const selection = value === capture.base ? capture.selection : null;
         setValue(insertDictation(value, text.trim(), selection));
+        if (text.trim() && capture.reporter) {
+            attemptIds.push(capture.reporter.attemptId);
+            if (attemptIds.length > 8) attemptIds.shift();
+        }
+        capture.reporter?.event('committed', { text_length: text.trim().length, final: true });
         current = null;
         render('idle', text.trim() ? 'Dictation added. Edit it or send when ready.' : 'No speech was detected. Try again.');
         capture.resolve?.(!!text.trim());
@@ -121,10 +138,28 @@ export function createDictationController({ input, button, status, cancelButton,
             selection: { start: input.selectionStart, end: input.selectionEnd }, chunks: [], bytes: 0 };
         capture.completion = new Promise(resolve => { capture.resolve = resolve; });
         current = capture;
+        capture.reporter = createSpeechReporter({ fetchImpl, getContext: () => capture.context, root });
+        capture.reporter.event('started', { engine: engineSelect.value });
         onStart();
         render('requesting', 'Allow microphone access to dictate.');
         try {
-            if (engineSelect.value === 'browser') {
+            if (engineSelect.value === 'streaming') {
+                if (!capability?.streaming?.available) throw new Error(capability?.streaming?.reason || 'Live transcription is unavailable. Choose recorded audio.');
+                capture.live = createStreamingInput({ context, fetchImpl, root,
+                    onPartial: text => { if (valid(capture)) status.textContent = text || 'Listening…'; },
+                    onFinal: () => { if (valid(capture)) status.textContent = capture.live.completedText(); },
+                    onState: (next, message) => {
+                        if (!valid(capture)) return;
+                        if (next === 'error') {
+                            const recovered = capture.live.completedText();
+                            if (recovered) { commit(capture, recovered); status.textContent = message + ' Completed text added to your draft.'; }
+                            else fail(capture, message);
+                        } else render(next === 'listening' ? 'recording' : next === 'finishing' ? 'transcribing' : 'requesting', message);
+                    },
+                    onEvent: (name, values) => capture.reporter.event(name, values)
+                });
+                await capture.live.start();
+            } else if (engineSelect.value === 'browser') {
                 if (!isSpeechRecognitionSupported()) throw new Error('Browser recognition is unavailable. Choose recorded audio.');
                 capture.recognition = startSpeechRecognition({
                     language: context.language, continuous: context.continuous ?? false, interimResults: context.interimResults ?? true,
@@ -132,9 +167,10 @@ export function createDictationController({ input, button, status, cancelButton,
                     onResult: ({ finalText, interimText }) => {
                         if (!valid(capture)) return;
                         capture.finalText = finalText;
+                        capture.reporter.event('revision', { text_length: (finalText + interimText).length, final: !interimText });
                         status.textContent = [finalText, interimText].filter(Boolean).join(' ') || 'Listening…';
                     },
-                    onError: error => { capture.failed = true; fail(capture, microphoneError(error)); },
+                    onError: error => { capture.failed = true; fail(capture, microphoneError(error), error?.error || error?.name); },
                     onEnd: () => { if (!capture.failed) commit(capture, capture.finalText || ''); }
                 });
             } else {
@@ -144,6 +180,9 @@ export function createDictationController({ input, button, status, cancelButton,
                 if (!valid(capture)) { release(capture); return; }
                 const mimeType = recordingMimeType(root);
                 capture.recorder = new root.MediaRecorder(capture.stream, mimeType ? { mimeType } : undefined);
+                const settings = capture.stream.getAudioTracks?.()[0]?.getSettings?.() || {};
+                capture.reporter.event('started', { engine: 'recorded', format: capture.recorder.mimeType || mimeType,
+                    sample_rate: settings.sampleRate, channel_count: settings.channelCount });
                 capture.recorder.ondataavailable = event => {
                     if (!valid(capture) || !event.data?.size) return;
                     capture.chunks.push(event.data);
@@ -170,16 +209,21 @@ export function createDictationController({ input, button, status, cancelButton,
                 }));
                 capture.recorder.start(1000);
             }
-            if (valid(capture) && state !== 'error') render('recording', 'Listening. Select Finish dictation when you are ready.');
+            if (!capture.live && valid(capture) && state !== 'error') render('recording', 'Listening. Select Finish dictation when you are ready.');
         } catch (error) {
-            fail(capture, microphoneError(error));
+            fail(capture, microphoneError(error), error?.name || 'input_failed');
         }
     }
 
     async function finish() {
-        if (!current) return true;
         if (state === 'error') return false;
+        if (!current) return true;
         const capture = current;
+        if (capture.live) {
+            try { const text = await capture.live.finish(); if (text !== null) commit(capture, text); }
+            catch (_) { /* onState exposes the error and retains completed text. */ }
+            return capture.completion;
+        }
         if (capture.recorder?.state === 'recording') capture.recorder.stop();
         capture.recognition?.stop();
         if (state === 'requesting') { cancel(); return false; }
@@ -190,11 +234,15 @@ export function createDictationController({ input, button, status, cancelButton,
         try {
             const response = await fetchImpl('/api/speech/capabilities', { credentials: 'same-origin', cache: 'no-store' });
             const data = await response.json();
-            capability = response.ok ? data.transcription : { available: false, reason: 'Sign in to use recorded transcription.' };
+            capability = response.ok ? { ...data.transcription, streaming: data.streaming } : { available: false, reason: 'Sign in to use recorded transcription.' };
         } catch (_) {
             capability = { available: false, reason: 'Unable to check recorded transcription. Try again when connected.' };
         }
         if (!disposed && !current) {
+            if (!engineChosen && capability?.streaming?.available && engineSelect.querySelector('option[value="streaming"]')) {
+                engineSelect.value = 'streaming';
+                engineChosen = true;
+            }
             render('idle', capability?.available
                 ? 'Recorded audio and visible conversation context are sent to OpenAI for transcription. Audio is not saved by Von.'
                 : capability?.reason || 'Recorded transcription is unavailable.');
@@ -207,6 +255,8 @@ export function createDictationController({ input, button, status, cancelButton,
         void transcribe(current);
     } };
     const visibility = () => { if (root.document?.hidden && current) void finish(); };
+    const chooseEngine = () => { engineChosen = true; };
+    engineSelect.addEventListener('change', chooseEngine);
     button.addEventListener('click', click);
     cancelButton.addEventListener('click', cancel);
     retryButton.addEventListener('click', retry);
@@ -216,8 +266,10 @@ export function createDictationController({ input, button, status, cancelButton,
     root.document?.addEventListener('visibilitychange', visibility);
     render('idle');
     void refreshCapabilities();
-    return { cancel, finish, start, refreshCapabilities, getState: () => state,
+    return { cancel, finish, start, refreshCapabilities, getAttemptIds: () => [...attemptIds], clearAttemptIds: () => { attemptIds.length = 0; },
+        getState: () => state, hasPendingInput: () => !!current,
         dispose: () => { cancel(); disposed = true;
+            engineSelect.removeEventListener('change', chooseEngine);
             button.removeEventListener('click', click); cancelButton.removeEventListener('click', cancel);
             retryButton.removeEventListener('click', retry); root.removeEventListener?.('pagehide', cancel);
             root.removeEventListener?.('focus', refreshCapabilities);

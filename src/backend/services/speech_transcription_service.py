@@ -74,6 +74,15 @@ def normalise_context(context, vocabulary) -> tuple[str, list[str]]:
     return context, terms
 
 
+def normalise_language(language):
+    language = language.strip() if isinstance(language, str) else ""
+    if language and not re.fullmatch(r"[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*", language):
+        raise ValueError(
+            "Use a language tag such as en-NZ, mi or zh-CN, or leave it empty."
+        )
+    return language.split("-", 1)[0].lower()
+
+
 def transcribe_audio(
     *, actor, organisation, audio, mime_type, context="", vocabulary=None, language=""
 ):
@@ -104,19 +113,16 @@ def transcribe_audio(
         "prompt": prompt,
     }
     language = language.strip() if isinstance(language, str) else ""
-    if language and not re.fullmatch(r"[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*", language):
-        raise ValueError(
-            "Use a language tag such as en-NZ, mi or zh-CN, or leave it empty."
-        )
+    provider_language = normalise_language(language)
     if model == "gpt-transcribe":
         options["extra_body"] = {
             "keywords": terms,
             # The provider accepts language codes, not browser locales: a live
             # en-NZ request is rejected while the otherwise identical en works.
-            **({"languages": [language.split("-", 1)[0].lower()]} if language else {}),
+            **({"languages": [provider_language]} if provider_language else {}),
         }
     elif language:
-        options["language"] = language.split("-", 1)[0].lower()
+        options["language"] = provider_language
     start = time.monotonic()
     # Explicit transport bound protects occupied HTTP workers; no client timer
     # discards a usable result. Users can cancel or retry the retained recording.

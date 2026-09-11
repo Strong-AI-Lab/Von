@@ -1,3 +1,4 @@
+import { getClientContext } from './clientContext.js';
 // Client capability reporting (browser-only)
 //
 // JVNAUTOSCI-954: Safely report bounded, non-authoritative client capability hints
@@ -106,6 +107,7 @@ export function __testOnly_buildClientCapabilitiesPayload() {
 
     return {
         client_reported_timestamp: safeIsoNow(),
+        client_context: getClientContext(),
         speech_synthesis: {
             supported: ttsSupported,
             voices_count: Array.isArray(voices) ? voices.length : 0,

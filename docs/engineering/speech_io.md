@@ -1,14 +1,18 @@
-# Recorded dictation and speech playback
+# Contextual dictation and conversational speech
 
 - **Kind:** Bounded implementation and operating contract
-- **Reviewed:** 10 September 2026
+- **Reviewed:** 11 September 2026
 - **Owner / review trigger:** Speech workstream; review on audio-provider,
   authentication, browser capture or presenter changes.
 - **Current decisions:** [JVNAUTOSCI-888](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-888)
   owns the recorded-dictation repair;
+  native Von task `#V#task_deliver_contextual_streaming_dictation_and_709eb2df`
+  owns the current streaming, conversational speech and client diagnostics
+  delivery. Find it in Tasks by its title, **Deliver contextual streaming
+  dictation and conversational speech on mobile and desktop**.
   [JVNAUTOSCI-812](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-812)
-  owns the current conversational speech plan. Streaming voice is planned,
-  not provided by the block-dictation implementation.
+  remains historical planning context. The native programme was explicitly
+  requested; it does not change the project's migration writer.
 
 ## User flow
 
@@ -19,6 +23,30 @@ finishes transcription first and only sends on success. **Cancel dictation**
 releases the microphone and prevents late permission or transcription results
 from changing the draft. A failed upload retains audio in the active page and
 offers **Retry recording** without another microphone request.
+
+When `gpt-live-transcribe` is enabled, live transcription becomes the initial
+dictation choice. Provisional captions update as audio arrives. Finish commits
+the outstanding buffer and waits for final text. Completed items are ordered by
+their commit events and deduplicated by provider item ID. A stream failure adds
+already completed text to the draft; an unfinished utterance may need repeating.
+**More actions → Dictation** retains recorded audio and browser recognition as
+explicit alternatives. Live audio has no retained recording to retry.
+
+Select **Start voice** (or **Alt+Shift+V**) for conversational mode. It opens a
+conversation if needed, keeps listening, and submits completed utterances through
+the existing durable prompt queue with stable submission IDs. Von's ordinary
+agent, tools, scoped model choice and presenter channels produce each reply.
+Its spoken channel is synthesised as streamed PCM. This starts audio before the
+audio response finishes downloading; it does not start narration before the
+ordinary agent has produced its reply.
+
+Speaking interrupts playback. Only the reply to the latest utterance in the
+same active voice session may speak. **End voice** releases microphone and
+playback immediately; changing conversation/organisation, hiding the page or
+leaving it ends voice too. Already authorised tool work continues through its
+normal queue and result path. Its Stop control remains available in the Thinking
+card. Select Start voice to reconnect; reconnect never resubmits old utterances.
+Typing and editable dictation remain available alongside voice.
 
 Changing conversation or organisation cancels the capture. Leaving the page
 releases it; backgrounding finishes a recording. Raw audio is not saved by Von.
@@ -40,6 +68,10 @@ in the scoped model pool. Add it as an additional model, not the primary
 conversational model. Audio models are excluded from automatic chat fallback
 and selection candidates. This does not change the main conversational model.
 No credentials or enabled-model settings are changed by this feature.
+Live input additionally needs `gpt-live-transcribe`; conversational playback
+needs `gpt-4o-mini-tts` (preferred) or `tts-1`. These are audio-only models and
+are excluded from ordinary chat selection. Spoken replies are bounded to 4,096
+characters; an output failure preserves the full answer in chat.
 
 `GET /api/speech/capabilities` reports actor-specific availability. The composer
 refreshes it on initialisation, focus and preference changes. A configured key
@@ -60,8 +92,9 @@ SDK retry. A failed request can be retried from retained browser audio. This is
 an initial operational bound, not a speech-turn duration or a latency claim;
 revisit it against actual successful recording/transcription durations.
 
-Context is the recent visible conversation and current draft (up to 6,000
-characters), plus up to 80 visible literal concept names. The service does not
+Context is the recent visible conversation, current draft and conversation focus
+(up to 6,000 characters), plus up to 80 visible literal concept/focal task names.
+Voice refreshes this context after replies. The service does not
 scan Vontology or fetch private conversations. Context/keywords are recognition
 hints, not required output or tool instructions. Transcription uses one audio
 model call and no semantic rewriting pass. `gpt-transcribe` receives plural
@@ -81,6 +114,68 @@ pause/resume workaround is restricted to desktop Chromium; it must not run on
 Android or iOS/iPadOS. Mobile playback is invoked synchronously with the user
 gesture, and playback errors offer a visible retry. Automatic narration can
 still be blocked by device autoplay policy; tap **Speak** in that case.
+
+Conversational voice uses Web Audio PCM playback, with the audio context opened
+in the Start voice gesture. Playback queues at most two seconds ahead and aborts
+both the fetch and scheduled audio nodes on interruption. It discloses the
+provider and that Von's voice is AI-generated.
+
+## Streaming transport and endpointing
+
+`POST /api/speech/connection` authenticates the existing session/window actor,
+checks the exact enabled audio model and exchanges a bounded SDP offer for a
+transcription-only WebRTC session. The standard provider key remains on the
+server. Browser audio goes directly to the provider; the connection has no Von
+agent or tool authority. `POST /api/speech/speak` uses the same actor binding and
+streams signed 16-bit mono PCM at 24 kHz. Provider streams close on completion or
+client disconnect.
+
+Live provider verification found that `gpt-live-transcribe` rejects server-side
+turn detection, despite the generic transcription guide referring to it. The
+session therefore uses `turn_detection: null`. Browser audio analysis detects a
+sustained onset (120 ms) and commits after 900 ms of quiet, using echo/noise
+suppression and an adaptive energy floor. This is acoustic pause detection,
+not a semantic judgement that the user has finished a thought. Brief gaps and
+isolated clicks are covered by tests; natural pauses, soft speech, noisy rooms
+and accents need physical-device evaluation before making quality claims.
+Explicit Finish and End remain available. The initial transport bounds are 30
+seconds to establish WebRTC and 60 seconds for an unacknowledged final commit;
+the latter releases a stuck paid media connection and preserves completed text.
+Revisit these bounds using observed successful durations, not whole-task budgets.
+
+## Client and input diagnostics
+
+`client_context.v1` travels with each direct or queued prompt into actor-scoped
+history debug and turn-execution diagnostics. It records a per-page client ID,
+browser family/major, browser-exposed Client Hints, platform/version/model when
+available, touch points, viewport, orientation, display mode, visibility, locale,
+secure-context state and the versioned frontend asset path. Missing hardware
+model information remains unknown; a reduced Android user agent is not proof of
+a Pixel model. Client-supplied fields are bounded observations, never authority.
+
+Input events also survive failures before a chat message exists.
+`POST /api/speech/attempts/<attempt_id>` stores lifecycle, revision counts,
+commit/submission IDs, engine/model/context sizes, audio format/rate and elapsed
+times in `speech_input_attempts`. Exact actor-and-organisation GET read-back is
+available at the same path. Events retain a maximum of 100 entries per attempt
+and expire after 30 days; provisional browser revisions are throttled. The
+snapshot includes backend version. Raw user-agent strings, transcripts and
+audio are excluded from diagnostic storage. Full diagnostic histories keep their
+existing actor-scoped visibility; shared transcript broadcasts omit them.
+
+## Interrupted queue recovery
+
+Legacy interrupted rows can be resumed through the existing requeue route. The
+server first reconciles an exact prior assistant result. Otherwise it preserves
+the original attempt and bounded tool/effect observations in the continuation,
+retires the legacy row, and activates one idempotent server-owned successor
+through the existing handoff service. Repeated resume requests return that same
+successor. Unknown effect outcomes stay unknown; they are not evidence of failure
+or permission to repeat a write. This repairs missing execution ownership, not
+a general guarantee that every interrupted external effect is automatically
+reconciled. Legacy client-owned queued rows say **Ready to resume**; **Next up**
+is reserved for server-owned queue work. Queue rows and native Tasks remain
+distinct objects.
 
 ## Evidence boundary
 
@@ -119,3 +214,20 @@ establish physical-device microphone or autoplay behaviour.
 
 Provider reference: [OpenAI file transcription](https://developers.openai.com/api/docs/guides/speech-to-text).
 Browser reference: [MDN SpeechRecognition](https://developer.mozilla.org/en-US/docs/Web/API/SpeechRecognition).
+
+On 11 September 2026, the new streaming path was exercised in installed Chrome
+152 at 1280 × 900 and 390 × 844, using the actual composer template, browser
+controllers and authenticated speech routes with a loopback synthetic actor/model
+pool, synthetic WAV microphone and real OpenAI media providers. Both live
+dictation and voice recognised “Von uses Vontology and Wikidata for research.”
+The mobile-size voice replay submitted it once, streamed a fixture-supplied
+reply, and End released every microphone track. Neither viewport overflowed.
+A separate streamed synthesis check received its first 8,192 PCM bytes in
+1,111 ms. These are bounded protocol, layout and lifecycle observations; they
+do not measure ordinary-agent response latency, physical Pixel/iOS acoustics,
+or deployment on the DGX. Targeted tests additionally exercise duplicate and
+out-of-order finals, permission/cancel races, barge-in/late replies, queue
+handoff/reconciliation, actor denial and telemetry isolation/read-back.
+
+Streaming references: [OpenAI realtime transcription](https://developers.openai.com/api/docs/guides/realtime-transcription),
+[WebRTC transport](https://developers.openai.com/api/docs/guides/voice-webrtc?api=realtime).

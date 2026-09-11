@@ -3976,6 +3976,14 @@ def add_message_to_history(
             else None
         )
 
+        # Keep diagnostics in the existing actor-scoped debug channel, not the
+        # shared transcript. The request/enqueued envelope freezes its own client.
+        from .speech_telemetry_service import request_client_context
+        client_context = request_client_context()
+        if client_context:
+            llm_debug_data = llm_debug_data if isinstance(llm_debug_data, dict) else {}
+            llm_debug_data["client_context"] = client_context
+
         # Add timestamp to message (and llm_debug_data if present)
         message_with_timestamp = {**message, "timestamp": datetime.now(timezone.utc)}
         author_user_id = message.get("author_user_id")

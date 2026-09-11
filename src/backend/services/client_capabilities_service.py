@@ -102,6 +102,9 @@ def sanitise_client_capabilities(
         "user_agent_summary": _summarise_user_agent(user_agent),
     }
 
+    from .speech_telemetry_service import sanitise_client_context
+    snapshot["client_context"] = sanitise_client_context(payload.get("client_context"), user_agent)
+
     speech_raw = payload.get("speech_synthesis")
     speech: dict[str, Any] = speech_raw if isinstance(speech_raw, dict) else {}
 

@@ -4,7 +4,15 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from flask import Blueprint, current_app, jsonify, request, session
+from flask import (
+    Blueprint,
+    Response,
+    current_app,
+    jsonify,
+    request,
+    session,
+    stream_with_context,
+)
 
 from ...services.chat_history_service import (
     ChatHistoryServiceError,
@@ -49,7 +57,13 @@ def speech_capabilities():
             "available": False,
             "reason": "Speech configuration is temporarily unavailable.",
         }
-    response = jsonify(transcription=data)
+    from ...services.speech_session_service import media_capabilities
+
+    try:
+        media = media_capabilities(actor, organisation)
+    except Exception:
+        media = {}
+    response = jsonify(transcription=data, **media)
     response.headers["Cache-Control"] = "private, no-store"
     return response
 
@@ -282,3 +296,121 @@ def record_speech_telemetry():
             "history_update": {"updated": updated, "reason": update_reason},
         }
     )
+
+
+@speech_bp.route("/connection", methods=["POST"])
+def create_speech_connection():
+    from ...services.speech_session_service import create_transcription_connection
+
+    return _media_request(
+        create_transcription_connection, ("sdp", "context", "vocabulary", "language")
+    )
+
+
+def _media_request(operation, fields):
+    from ...languagemodels.llm_interface import ModelExecutionEligibilityError
+    from ...services.speech_transcription_service import SpeechUnavailable
+
+    actor, organisation = _speech_actor()
+    if not actor:
+        return jsonify(error="authentication_required"), 401
+    request.max_content_length = 100000
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(error="invalid_media_request"), 400
+    try:
+        result = operation(
+            actor=actor,
+            organisation=organisation,
+            **{key: payload.get(key, "") for key in fields},
+        )
+        response = jsonify(success=True, **result)
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+    except ValueError as exc:
+        return jsonify(error="invalid_media_request", message=str(exc)), 400
+    except (SpeechUnavailable, ModelExecutionEligibilityError) as exc:
+        return jsonify(error="speech_unavailable", message=str(exc)), 503
+    except Exception as exc:
+        current_app.logger.warning("Speech connection failed (%s)", type(exc).__name__)
+        return jsonify(
+            error="speech_connection_failed",
+            message="Live speech could not connect. Try recorded dictation.",
+        ), 502
+
+
+@speech_bp.route("/speak", methods=["POST"])
+def stream_spoken_audio():
+    from ...languagemodels.llm_interface import ModelExecutionEligibilityError
+    from ...services.speech_session_service import open_spoken_audio
+    from ...services.speech_transcription_service import SpeechUnavailable
+
+    actor, organisation = _speech_actor()
+    if not actor:
+        return jsonify(error="authentication_required"), 401
+    request.max_content_length = 50000
+    payload = request.get_json(silent=True) or {}
+    try:
+        chunks, model, close = open_spoken_audio(
+            actor=actor,
+            organisation=organisation,
+            text=payload.get("text") if isinstance(payload, dict) else None,
+        )
+    except ValueError as exc:
+        return jsonify(error="invalid_speech", message=str(exc)), 400
+    except (SpeechUnavailable, ModelExecutionEligibilityError) as exc:
+        return jsonify(error="speech_unavailable", message=str(exc)), 503
+    except Exception as exc:
+        current_app.logger.warning("Speech playback failed (%s)", type(exc).__name__)
+        return jsonify(
+            error="speech_failed",
+            message="Speech could not start. The response remains in chat.",
+        ), 502
+    response = Response(
+        stream_with_context(chunks), mimetype="application/octet-stream"
+    )
+    response.headers.update(
+        {
+            "Cache-Control": "private, no-store",
+            "X-Accel-Buffering": "no",
+            "X-Speech-Format": "pcm_s16le_24000",
+            "X-Speech-Model": model,
+        }
+    )
+    response.call_on_close(close)
+    return response
+
+
+@speech_bp.route("/attempts/<attempt_id>", methods=["POST", "GET"])
+def speech_attempt(attempt_id):
+    from ...services.speech_telemetry_service import get_attempt, record_attempt
+
+    actor, organisation = _speech_actor()
+    if not actor:
+        return jsonify(error="authentication_required"), 401
+    request.max_content_length = 12000
+    try:
+        if request.method == "POST":
+            result = record_attempt(
+                actor=actor,
+                organisation=organisation,
+                attempt_id=attempt_id,
+                payload=request.get_json(silent=True),
+                user_agent=request.headers.get("User-Agent"),
+            )
+        else:
+            result = get_attempt(
+                actor=actor, organisation=organisation, attempt_id=attempt_id
+            )
+            if result is None:
+                return jsonify(error="attempt_not_found"), 404
+    except ValueError as exc:
+        return jsonify(error="invalid_attempt", message=str(exc)), 400
+    except Exception as exc:
+        current_app.logger.warning(
+            "Speech diagnostics unavailable (%s)", type(exc).__name__
+        )
+        return jsonify(error="telemetry_unavailable", stored=False), 503
+    response = jsonify(result)
+    response.headers["Cache-Control"] = "private, no-store"
+    return response

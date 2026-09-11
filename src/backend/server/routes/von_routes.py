@@ -1743,17 +1743,62 @@ def claim_chat_prompt_queue_route(queue_id: str):
     )
 
 
+def _queue_resume_conversation_binding(scope, session_id):
+    if not session_id:
+        raise chat_prompt_queue_service.InvalidChatPromptQueueInput(
+            "The interrupted prompt has no conversation to resume"
+        )
+    actor = scope["user_concept_id"]
+    owner, invite = _resolve_shared_conversation_owner(
+        user_concept_id=actor, session_id=session_id
+    )
+    owner = owner or actor
+    namespace = _canonical_conversation_history_namespace(
+        owner_user_id=owner,
+        actor_namespace=scope.get("namespace"),
+        shared_invite=invite,
+    )
+    if chat_history_service.is_external_conversation_read_only(
+        user_id=owner, session_id=session_id, namespace=namespace
+    ):
+        raise chat_prompt_queue_service.InvalidChatPromptQueueInput(
+            "Continue the imported conversation before resuming work"
+        )
+    return {
+        "history_user_id": owner,
+        "history_namespace": namespace,
+        "conversation_key": build_conversation_key(
+            owner_user_id=owner,
+            history_namespace=namespace,
+            conversation_session_id=session_id,
+        ),
+    }
+
+
 @von_bp.route("/api/chat_prompt_queue/<queue_id>/requeue", methods=["POST"])
 def requeue_chat_prompt_queue_route(queue_id: str):
     scope = _get_current_chat_prompt_queue_scope()
     if isinstance(scope, tuple):
         return scope
     try:
-        record = chat_prompt_queue_service.requeue_prompt_record(
-            scope=scope,
-            queue_id=queue_id,
-            current_server_instance_id=SERVER_INSTANCE_ID,
-        )
+        payload = _chat_prompt_queue_payload()
+        if isinstance(payload.get("execution_envelope"), Mapping):
+            record = chat_prompt_queue_service.resume_legacy_prompt_record(
+                scope=scope,
+                queue_id=queue_id,
+                current_server_instance_id=SERVER_INSTANCE_ID,
+                execution_envelope=payload["execution_envelope"],
+                resolve_conversation=lambda session_id: (
+                    _queue_resume_conversation_binding(scope, session_id)
+                ),
+            )
+            wake_chat_prompt_queue_dispatcher()
+        else:
+            record = chat_prompt_queue_service.requeue_prompt_record(
+                scope=scope,
+                queue_id=queue_id,
+                current_server_instance_id=SERVER_INSTANCE_ID,
+            )
         return jsonify({"success": True, "item": record})
     except Exception as exc:
         return _chat_prompt_queue_error_response(
@@ -8513,6 +8558,15 @@ def _finalise_llm_debug_info(
 
     if not isinstance(llm_debug_info, dict):
         return llm_debug_info
+
+    from ...services.speech_telemetry_service import request_client_context
+
+    client_context = request_client_context()
+    if client_context:
+        llm_debug_info["client_context"] = client_context
+        diagnostics = llm_debug_info.setdefault("turn_execution_diagnostics", {})
+        if isinstance(diagnostics, dict):
+            diagnostics["client_context"] = client_context
 
     tool_invocations_payload = (
         llm_debug_info.get("tool_invocations")

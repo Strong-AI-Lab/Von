@@ -55,6 +55,8 @@ def test_model_selection_action_returns_enabled_pool_and_workflow_policy_choice(
         lambda **_kwargs: [
             {"provider": "openai", "model": "gpt-5.2-chat-latest", "scope": "user"},
             {"provider": "openai", "model": "gpt-transcribe", "scope": "user"},
+            {"provider": "openai", "model": "gpt-live-transcribe", "scope": "user"},
+            {"provider": "openai", "model": "gpt-4o-mini-tts", "scope": "user"},
             {"provider": "ollama", "model": "granite3.3:2b", "scope": "user"},
         ],
     )
