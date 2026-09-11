@@ -2606,6 +2606,19 @@ def test_workflow_definitions_list_refresh_in_progress_without_stale_returns_503
     assert resp.headers.get("Retry-After") == "1"
 
 
+def test_workflow_studio_bookmark_opens_tab_and_fragment_contains_monitor(app_client):
+    response = app_client.get("/von/workflow-studio")
+    assert response.status_code == 302
+    assert response.headers["Location"] == "/von/#workflowStudioTab"
+    response = app_client.get("/von/workflow-studio/content")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert 'id="workflowStatusPanel"' in html
+    assert 'id="workflowEpisodesPopup"' in html
+    assert 'id="workflowStudioCatalogue"' in html
+    assert '<body' not in html
+
+
 def test_workflow_studio_catalogue_endpoint(monkeypatch, app_client):
     import src.backend.server.routes.workflows_routes as workflows_routes
 

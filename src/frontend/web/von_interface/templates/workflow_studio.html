@@ -1,22 +1,10 @@
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Workflow Studio</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
-  <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
-</head>
-
-<body class="workflow-studio-body">
+<section class="workflow-studio-body" aria-label="Workflow Studio">
   <header class="workflow-studio-header">
     <div class="workflow-studio-header-copy">
-      <a class="workflow-studio-backlink" href="{{ url_for('von.serve_page') }}">Von</a>
       <div>
         <h1>Workflow Studio</h1>
         <p class="workflow-studio-subtitle">
-          Independent workflow catalogue, topology visualisation, operational overlays, and proposal-reviewed workflow authoring.
+          Inspect workflows, monitor live runs, and manage workflow proposals.
         </p>
       </div>
     </div>
@@ -26,7 +14,31 @@
     </div>
   </header>
 
-  <main class="workflow-studio-shell">
+    <div id="workflowStatusPanel" class="workflow-status-panel" aria-live="polite" aria-label="Workflow status">
+      <div class="workflow-status-header">
+        <div class="workflow-status-titlebar">
+          <button id="workflowStatusFurlToggle" class="workflow-status-furl-toggle" type="button"
+            title="Furl workflow monitor" aria-label="Furl workflow monitor" aria-pressed="false" aria-expanded="true"><span
+              class="workflow-status-furl-icon" aria-hidden="true"></span></button>
+          <span class="workflow-status-title">Workflow Monitor</span>
+        </div>
+        <div class="workflow-status-actions">
+          <button id="workflowStatusToggleAvailable" class="btn-mini" type="button" title="Show available workflows"
+            aria-pressed="false">Show available</button>
+          <button id="workflowStatusRefresh" class="btn-mini" type="button" title="Refresh workflows">Refresh</button>
+          <label class="workflow-status-checkbox-label" title="Show non-executable design artefacts in the available workflows list">
+            <input id="workflowStatusShowDesigns" type="checkbox" />
+            <span>Show designs</span>
+          </label>
+          <button id="workflowStatusCopyJson" class="btn-mini" type="button" title="Copy workflow monitor JSON">Copy JSON</button>
+        </div>
+      </div>
+      <div id="workflowStatusBody" class="workflow-status-body">
+        <div class="workflow-status-empty">No active workflows</div>
+      </div>
+    </div>
+
+  <div class="workflow-studio-shell">
     <aside class="workflow-studio-sidebar">
       <div class="workflow-studio-sidebar-header">
         <label class="workflow-studio-search-label" for="workflowStudioSearchInput">Search workflows</label>
@@ -85,9 +97,20 @@
         </aside>
       </div>
     </section>
-  </main>
+  </div>
 
-  <script type="module" src="{{ url_for('static', filename='js/workflowStudioPage.js') }}"></script>
-</body>
+  <div id="workflowEpisodesPopup" class="llm-popup hidden workflow-episodes-popup" aria-hidden="true">
+    <div class="llm-popup-header">
+      <span id="workflowEpisodesTitle">Workflow episodes</span>
+      <div class="workflow-episodes-header-actions">
+        <button id="copyWorkflowEpisodesJson" class="btn-mini" title="Copy episodes JSON">Copy JSON</button>
+        <button id="closeWorkflowEpisodes" class="btn-mini" title="Close">✕</button>
+      </div>
+    </div>
+    <div class="llm-popup-body">
+      <div id="workflowEpisodesStatus" class="invite-status" aria-live="polite"></div>
+      <div id="workflowEpisodesList" class="workflow-episodes-list" role="list"></div>
+    </div>
+  </div>
 
-</html>
+</section>

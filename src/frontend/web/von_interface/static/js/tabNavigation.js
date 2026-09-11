@@ -117,6 +117,12 @@ async function loadTabContent(tabId, contentElement) {
     return;
   }
 
+  if (tabId === 'workflowStudioTab') {
+    const { loadWorkflowStudioTab } = await import('./workflowStudioTab.js');
+    await loadWorkflowStudioTab(contentElement);
+    return;
+  }
+
   // Prevent duplicate parallel loads
   if (contentElement.dataset.loading === 'true') {
     console.log(`loadTabContent: ${tabId} already loading, skipping.`);
@@ -277,6 +283,9 @@ export async function loadTabData(tabId) {
         const { showMessagesTab } = await import('./components/messagePanel.js');
         await showMessagesTab();
       }
+      break;
+    case 'workflowStudioTab':
+      // Studio loads once through loadTabContent and retains its editor state.
       break;
     case 'chatTab':
     case 'settingsTab':

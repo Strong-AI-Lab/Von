@@ -1586,6 +1586,19 @@ describe('workflow monitor definitions refresh contention handling', () => {
 });
 
 describe('workflow monitor active snapshot degradation handling', () => {
+    test('does not fetch snapshots or definitions while the Studio tab is inactive', async () => {
+        document.body.innerHTML = '<section id="workflowStudioTab" class="tab-content"><div id="workflowStatusPanel"><div id="workflowStatusBody"></div></div></section>';
+        __testOnly_resetWorkflowStatusState();
+        __testOnly_resetWorkflowDefinitionsState();
+        global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ items: [] }) });
+        await __testOnly_refreshWorkflowStatusSnapshot();
+        await __testOnly_refreshAvailableWorkflowDefinitions();
+        expect(global.fetch).not.toHaveBeenCalled();
+        document.getElementById('workflowStudioTab').classList.add('active');
+        await __testOnly_refreshWorkflowStatusSnapshot();
+        expect(global.fetch.mock.calls.some(([url]) => url.startsWith('/api/workflows/instances?'))).toBe(true);
+    });
+
     async function flushMicrotasks() {
         await Promise.resolve();
         await Promise.resolve();
