@@ -126,6 +126,9 @@
       <span id="unreadMessageBadge" class="message-count-badge hidden" aria-hidden="true"></span>
       Messages
     </div>
+    <button type="button" class="tab-button" data-tab="workflowStudioTab" aria-controls="workflowStudioTab">
+      Workflow Studio
+    </button>
     <div class="tab-button settings-tab-button" data-tab="settingsTab">
       <span class="settings-tab-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" focusable="false" role="img" stroke-linecap="round" stroke-linejoin="round">
@@ -136,9 +139,6 @@
       </span>
       Settings
     </div>
-    <a class="workflow-studio-launch-link" href="{{ url_for('von.serve_workflow_studio_page') }}">
-      Workflow Studio
-    </a>
   </div>
 
   <!-- Tab Content Area -->
@@ -176,6 +176,10 @@
       <div id="messagesContainer" class="messages-content">
         <div class="loading">Loading messages...</div>
       </div>
+    </div>
+
+    <div id="workflowStudioTab" class="tab-content" data-src="{{ url_for('von.serve_workflow_studio_content') }}">
+      <div class="loading" role="status">Loading Workflow Studio…</div>
     </div>
 
     <!-- Settings Tab Content -->

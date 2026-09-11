@@ -151,30 +151,6 @@
       <div id="conversationReferenceInspectorBody" class="chat-reference-inspector-body" aria-busy="false"></div>
     </aside>
 
-    <div id="workflowStatusPanel" class="workflow-status-panel" aria-live="polite" aria-label="Workflow status">
-      <div class="workflow-status-header">
-        <div class="workflow-status-titlebar">
-          <button id="workflowStatusFurlToggle" class="workflow-status-furl-toggle" type="button"
-            title="Furl workflow monitor" aria-label="Furl workflow monitor" aria-pressed="false" aria-expanded="true"><span
-              class="workflow-status-furl-icon" aria-hidden="true"></span></button>
-          <span class="workflow-status-title">Workflow Monitor</span>
-        </div>
-        <div class="workflow-status-actions">
-          <button id="workflowStatusToggleAvailable" class="btn-mini" type="button" title="Show available workflows"
-            aria-pressed="false">Show available</button>
-          <button id="workflowStatusRefresh" class="btn-mini" type="button" title="Refresh workflows">Refresh</button>
-          <label class="workflow-status-checkbox-label" title="Show non-executable design artefacts in the available workflows list">
-            <input id="workflowStatusShowDesigns" type="checkbox" />
-            <span>Show designs</span>
-          </label>
-          <button id="workflowStatusCopyJson" class="btn-mini" type="button" title="Copy workflow monitor JSON">Copy JSON</button>
-        </div>
-      </div>
-      <div id="workflowStatusBody" class="workflow-status-body">
-        <div class="workflow-status-empty">No active workflows</div>
-      </div>
-    </div>
-
     <div id="historyBanner" class="history-banner hidden" role="status" aria-live="polite">
       <span id="historyBannerText" class="history-banner-text">Older conversation available</span>
       <button id="loadOlderHistoryBtn" class="history-banner-btn" type="button">
@@ -384,20 +360,6 @@
     <div class="llm-popup-body">
       <div id="incomingInvitesList" class="invite-list" role="list"></div>
       <div id="incomingInvitesStatus" class="invite-status" aria-live="polite"></div>
-    </div>
-  </div>
-
-  <div id="workflowEpisodesPopup" class="llm-popup hidden workflow-episodes-popup" aria-hidden="true">
-    <div class="llm-popup-header">
-      <span id="workflowEpisodesTitle">Workflow episodes</span>
-      <div class="workflow-episodes-header-actions">
-        <button id="copyWorkflowEpisodesJson" class="btn-mini" title="Copy episodes JSON">Copy JSON</button>
-        <button id="closeWorkflowEpisodes" class="btn-mini" title="Close">✕</button>
-      </div>
-    </div>
-    <div class="llm-popup-body">
-      <div id="workflowEpisodesStatus" class="invite-status" aria-live="polite"></div>
-      <div id="workflowEpisodesList" class="workflow-episodes-list" role="list"></div>
     </div>
   </div>
 

@@ -1187,9 +1187,16 @@ function shouldMaintainSharedConversationStream(sessionId) {
     });
 }
 
+function isWorkflowMonitorTabActive() {
+    const { panel } = getWorkflowStatusElements();
+    if (!panel) return false;
+    const tab = panel.closest('.tab-content');
+    return !tab || tab.classList.contains('active');
+}
+
 function shouldMaintainWorkflowStatusStream() {
     const { panel } = getWorkflowStatusElements();
-    if (!panel || typeof EventSource === 'undefined') return false;
+    if (!panel || !isWorkflowMonitorTabActive() || typeof EventSource === 'undefined') return false;
     return isDocumentVisibleForRealtimeConnections();
 }
 
@@ -32801,7 +32808,7 @@ function applyWorkflowStatusUpdate(payload) {
 
 async function refreshWorkflowStatusSnapshot({ silent = false, preserveRetryAttempt = false } = {}) {
     const { panel } = getWorkflowStatusElements();
-    if (!panel) return;
+    if (!panel || !isWorkflowMonitorTabActive()) return;
     if (workflowStatusStreamState.loading) return;
     if (shouldDeferWorkflowStatusSnapshotRefresh({ silent })) return;
 
@@ -32944,7 +32951,7 @@ function parseWorkflowStatusSnapshotRetryAfterSeconds(payload, response) {
 
 function shouldAutoRefreshWorkflowStatusSnapshot() {
     const { panel } = getWorkflowStatusElements();
-    if (!panel || workflowDefinitionsState.visible || workflowStatusGroupUiState.globallyFurled) return false;
+    if (!panel || !isWorkflowMonitorTabActive() || workflowDefinitionsState.visible || workflowStatusGroupUiState.globallyFurled) return false;
     return isDocumentVisibleForRealtimeConnections();
 }
 
@@ -33051,7 +33058,7 @@ function clearWorkflowDefinitionsRetryTimer() {
 }
 
 function scheduleWorkflowDefinitionsRetry({ delayMs, silent = true } = {}) {
-    if (workflowStatusGroupUiState.globallyFurled) {
+    if (!isWorkflowMonitorTabActive() || workflowStatusGroupUiState.globallyFurled) {
         clearWorkflowDefinitionsRetryTimer();
         return;
     }
@@ -33115,7 +33122,7 @@ function applyWorkflowDefinitionsRetryableState({
 
 async function refreshAvailableWorkflowDefinitions({ silent = false } = {}) {
     const { panel } = getWorkflowStatusElements();
-    if (!panel) return;
+    if (!panel || !isWorkflowMonitorTabActive()) return;
     if (workflowDefinitionsState.loading) return;
     clearWorkflowDefinitionsRetryTimer();
 
@@ -33366,7 +33373,7 @@ function startWorkflowStatusStream() {
     });
 }
 
-function initializeWorkflowStatusPanel() {
+export function initializeWorkflowStatusPanel() {
     const {
         panel,
         refreshButton,
@@ -33379,9 +33386,9 @@ function initializeWorkflowStatusPanel() {
     if (workflowStatusPanelInitialised) return;
     workflowStatusPanelInitialised = true;
     ensureWorkflowCapabilityIndexStatusSubscription();
-    // Keep the diagnostic surface compact on first load; users can unfurl it
-    // when they need the full operational detail.
-    workflowStatusGroupUiState.globallyFurled = true;
+    // Studio is the dedicated monitoring surface; show live runs on opening.
+    workflowStatusGroupUiState.globallyFurled = false;
+    document.addEventListener('von:tab-activated', syncWorkflowMonitorTabActivity);
     const {
         closeButton: closeEpisodesButton,
         copyJsonButton: copyEpisodesJsonButton
@@ -33468,6 +33475,22 @@ function initializeWorkflowStatusPanel() {
     startWorkflowStatusStream();
     void refreshWorkflowCapabilityIndexStatus({ silent: true });
     void refreshWorkflowStatusSnapshot({ silent: true });
+}
+
+function syncWorkflowMonitorTabActivity() {
+    if (!isWorkflowMonitorTabActive()) {
+        stopWorkflowStatusStream('workflow_studio_hidden');
+        clearWorkflowStatusSnapshotRetryTimer();
+        clearWorkflowDefinitionsRetryTimer();
+        setWorkflowEpisodesPopupVisible(false);
+        return;
+    }
+    startWorkflowStatusStream();
+    if (workflowDefinitionsState.visible) {
+        void refreshAvailableWorkflowDefinitions({ silent: true });
+    } else {
+        void refreshWorkflowStatusSnapshot({ silent: true });
+    }
 }
 
 function startIncomingInvitePolling() {
@@ -34243,8 +34266,6 @@ export function initializeChatTab() {
     // Load initial unread count for badge
     loadUnreadCount();
 
-    // Phase 5: Workflow monitor panel
-    initializeWorkflowStatusPanel();
     handleRealtimeConnectionsVisibilityChange();
 
     // Load annotation toggle state from localStorage (default: false)

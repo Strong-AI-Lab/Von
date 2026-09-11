@@ -1,4 +1,5 @@
 import {
+  initialiseWorkflowStudio,
   buildDraftSource,
   buildPolicyEditors,
   buildWorkflowStudioRequestHeaders,
@@ -148,7 +149,7 @@ describe('actor schedule operations', () => {
       return reply({});
     });
     try {
-      document.dispatchEvent(new Event('DOMContentLoaded'));
+      await initialiseWorkflowStudio();
       await flush();
       document.querySelector('[data-view="operations"]').click();
       document.querySelector('[data-action="create-schedule"]').click();
@@ -209,6 +210,14 @@ describe('actor schedule operations', () => {
       await flush();
       expect(document.getElementById('workflowStudioSummary').textContent).toBe('Loaded description');
       consoleError.mockRestore();
+      loadedCard.click();
+      await flush();
+      document.dispatchEvent(new CustomEvent('orgSwitchStarted'));
+      resolveOther();
+      await flush();
+      expect(document.getElementById('workflowStudioTitle').textContent).toBe('Select a workflow');
+      expect(document.getElementById('workflowStudioCatalogue').textContent).not.toContain('Loaded description');
+      expect(document.querySelector('[data-action="create-schedule"]')).toBeNull();
     } finally {
       jest.restoreAllMocks();
       delete global.fetch;

@@ -1,8 +1,4 @@
 import { ensureUniqueWindowSessionId, getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
-import {
-  syncNamespaceFromLocalStorage,
-  syncOrgContextFromLocalStorage
-} from './utils/sessionScopedStorage.js';
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -280,6 +276,8 @@ const state = {
   catalogueStatus: 'loading',
   detailStatus: 'idle',
   detailRequest: 0,
+  catalogueRequest: 0,
+  needsRefresh: false,
   graphZoom: 1,
   scheduleForm: null,
   scheduleReceipt: null,
@@ -1134,11 +1132,13 @@ function renderAll() {
 }
 
 async function loadCatalogue({ selectFirst = false } = {}) {
+  const request = ++state.catalogueRequest;
   state.catalogueStatus = 'loading';
   renderCatalogue();
   setConnectionBadge('Loading', 'loading');
   try {
     const data = await fetchJson(`/api/workflow-studio/catalogue?include_designs=${state.showDesigns ? 'true' : 'false'}&limit=300`);
+    if (request !== state.catalogueRequest) return;
     state.catalogue = asArray(data.items);
     state.catalogueStatus = 'ready';
     if (!state.selectedWorkflowId && selectFirst && state.catalogue[0]?.workflow_id) {
@@ -1147,6 +1147,7 @@ async function loadCatalogue({ selectFirst = false } = {}) {
     renderCatalogue();
     setConnectionBadge('Ready', 'ready');
   } catch (error) {
+    if (request !== state.catalogueRequest) return;
     state.catalogueStatus = 'error';
     renderCatalogue();
     console.error('Workflow studio catalogue failed:', error);
@@ -1673,24 +1674,41 @@ function bindEvents() {
   });
 }
 
-async function initialiseWorkflowStudio() {
-  // Keep the standalone studio page aligned with the main Von window-scoped context model.
-  syncOrgContextFromLocalStorage();
-  syncNamespaceFromLocalStorage();
-  await ensureUniqueWindowSessionId?.();
+export async function initialiseWorkflowStudio() {
+  // The tab shares the authenticated parent window and its current scope.
   cacheElements();
   bindEvents();
+  const clearScope = () => {
+    ++state.catalogueRequest;
+    ++state.detailRequest;
+    state.catalogue = [];
+    state.selectedWorkflowId = '';
+    state.workflowDetail = null;
+    state.draftSpec = null;
+    state.preview = null;
+    state.scheduleReceipt = null;
+    state.scheduleForm = null;
+    state.detailStatus = 'idle';
+    state.catalogueStatus = 'loading';
+    state.needsRefresh = true;
+    setStatusBanner('', 'info');
+    renderAll();
+  };
+  const refreshIfActive = () => {
+    if (state.needsRefresh && document.getElementById('workflowStudioTab')?.classList.contains('active')) {
+      state.needsRefresh = false;
+      void loadCatalogue();
+    }
+  };
+  document.addEventListener('orgSwitchStarted', clearScope);
+  document.addEventListener('orgSwitched', () => { clearScope(); refreshIfActive(); });
+  document.addEventListener('authStatusChanged', (event) => {
+    if (event.detail?.authenticated === false) clearScope();
+  });
+  document.addEventListener('von:tab-activated', refreshIfActive);
   renderAll();
   await loadCatalogue({ selectFirst: true });
-  if (state.selectedWorkflowId) {
-    await loadWorkflowDetail(state.selectedWorkflowId);
-  }
-}
-
-if (typeof document !== 'undefined') {
-  document.addEventListener('DOMContentLoaded', () => {
-    void initialiseWorkflowStudio();
-  });
+  if (state.selectedWorkflowId) await loadWorkflowDetail(state.selectedWorkflowId);
 }
 
 export {

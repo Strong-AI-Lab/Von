@@ -17534,13 +17534,30 @@ body.settings-body {
 
 /* Workflow Studio */
 
+.tab-button[data-tab="workflowStudioTab"] {
+    font: inherit;
+}
+
+#workflowStudioTab {
+    padding: 0;
+}
+
+.workflow-studio-body > .workflow-status-panel {
+    margin: 16px 20px 0;
+}
+
+.workflow-studio-body .workflow-status-header,
+.workflow-studio-body .workflow-status-actions {
+    flex-wrap: wrap;
+}
+
 .workflow-studio-body,
 .workflow-studio-body * {
     box-sizing: border-box;
 }
 
 .workflow-studio-body {
-    min-height: 100vh;
+    min-height: 0;
     padding: 0;
     background:
         radial-gradient(circle at top left, rgba(236, 253, 245, 0.8), transparent 32%),
@@ -17575,19 +17592,6 @@ body.settings-body {
     margin: 8px 0 0;
     max-width: 760px;
     color: #475569;
-}
-
-.workflow-studio-backlink {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 70px;
-    padding: 10px 14px;
-    border-radius: 999px;
-    background: #dbeafe;
-    color: #1d4ed8;
-    font-weight: 700;
-    text-decoration: none;
 }
 
 .workflow-studio-header-actions {
@@ -17821,24 +17825,6 @@ body.settings-body {
     background: #0f766e;
     border-color: #0f766e;
     color: #fff;
-}
-
-.workflow-studio-launch-link {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    margin-left: auto;
-    padding: 9px 14px;
-    border-radius: 999px;
-    background: #ccfbf1;
-    color: #0f766e;
-    font-weight: 700;
-    text-decoration: none;
-    border: 1px solid rgba(15, 118, 110, 0.24);
-}
-
-.workflow-studio-launch-link:hover {
-    background: #99f6e4;
 }
 
 .workflow-studio-status-banner {

@@ -7,6 +7,8 @@ from flask import (
     session,
     send_file,
     make_response,
+    redirect,
+    url_for,
     g,
 )
 import os
@@ -11333,7 +11335,13 @@ def serve_page():
 
 @von_bp.route("/workflow-studio")
 def serve_workflow_studio_page():
-    """Serve the independent workflow studio surface."""
+    """Keep existing Studio bookmarks on the authenticated application surface."""
+    return redirect(url_for("von.serve_page", _anchor="workflowStudioTab"))
+
+
+@von_bp.route("/workflow-studio/content")
+def serve_workflow_studio_content():
+    """Serve Studio markup on first tab activation; APIs retain actor checks."""
     return render_template("workflow_studio.html")
 
 
