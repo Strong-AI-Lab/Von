@@ -8054,6 +8054,69 @@ describe('thinking card toggle accessibility', () => {
         expect(fetchCalls.some(({ url }) => String(url).includes('/finish'))).toBe(false);
     });
 
+    test.each([false, true])('sending reveals the new turn and respects manual scrolling during the response (scroll away: %s)', async (scrollAway) => {
+        const { getUserContext } = require('../apiService.js');
+        getUserContext.mockReturnValue({ user_id: 'user', org_id: 'org', language: 'en-NZ' });
+        document.getElementById('promptInput').value = 'Show the latest turn';
+        const originalHeight = Object.getOwnPropertyDescriptor(document.documentElement, 'scrollHeight');
+        const originalViewport = Object.getOwnPropertyDescriptor(window, 'innerHeight');
+        const originalScroll = Object.getOwnPropertyDescriptor(window, 'scrollY');
+        Object.defineProperty(document.documentElement, 'scrollHeight', {
+            configurable: true,
+            get: () => 1800 + document.querySelectorAll('.message-container').length * 300
+        });
+        Object.defineProperty(window, 'innerHeight', { value: 600, configurable: true });
+        Object.defineProperty(window, 'scrollY', { value: 100, writable: true, configurable: true });
+        jest.spyOn(window, 'scrollTo').mockImplementation(({ top }) => {
+            window.scrollY = Math.min(top, document.documentElement.scrollHeight - window.innerHeight);
+        });
+        let resolveGenerate;
+        global.fetch = jest.fn((url, options = {}) => {
+            if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
+                return Promise.resolve({ ok: true, json: async () => ({ item: {
+                    queue_id: 'queue-scroll-test', session_id: 'thinking-card-test-session',
+                    prompt_raw: 'Show the latest turn', status: 'queued'
+                } }) });
+            }
+            if (String(url).startsWith('/von/generate')) {
+                return new Promise((resolve) => {
+                    resolveGenerate = () => resolve({ ok: true, json: async () => ({ response: 'Latest answer' }) });
+                });
+            }
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+        });
+        try {
+            const sending = sendMessage();
+            for (let flush = 0; flush < 40 && !resolveGenerate; flush += 1) {
+                await Promise.resolve();
+            }
+            expect(resolveGenerate).toBeDefined();
+            expect(document.querySelector('.user-turn').textContent).toContain('Show the latest turn');
+            expect(window.scrollY).toBe(document.documentElement.scrollHeight - window.innerHeight);
+            if (scrollAway) window.scrollY = 100;
+            window.scrollTo.mockClear();
+            resolveGenerate();
+            await sending;
+            expect(document.querySelector('.assistant-turn')).toBeTruthy();
+            if (scrollAway) {
+                expect(window.scrollTo).not.toHaveBeenCalled();
+                expect(window.scrollY).toBe(100);
+            } else {
+                expect(window.scrollTo).toHaveBeenCalled();
+                expect(window.scrollY).toBe(document.documentElement.scrollHeight - window.innerHeight);
+            }
+        } finally {
+            for (const [target, key, descriptor] of [
+                [document.documentElement, 'scrollHeight', originalHeight],
+                [window, 'innerHeight', originalViewport],
+                [window, 'scrollY', originalScroll]
+            ]) {
+                if (descriptor) Object.defineProperty(target, key, descriptor);
+                else delete target[key];
+            }
+        }
+    });
+
     test('preserves the active user turn when a delayed history load finishes after send', async () => {
         const { getUserContext } = require('../apiService.js');
         jest.spyOn(window, 'scrollTo').mockImplementation(() => {});
