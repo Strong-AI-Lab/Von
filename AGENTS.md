@@ -4,7 +4,7 @@
 - **Lifecycle:** Active
 - **Authority:** Governing instructions for work in this repository, subordinate
   to current explicit user direction and higher-level safety rules
-- **Last reviewed:** 4 September 2026
+- **Last reviewed:** 11 September 2026
 - **Review trigger:** A material change to Von's product focus, authority model,
   security posture, or acceptance doctrine
 
@@ -517,6 +517,17 @@ Include associated Von task links when available, what was delivered, relevant
 validation and deployment evidence, and any material limitation. This is
 standing authorisation for those completion messages. Verify delivery through
 canonical message read-back before reporting that the summary was sent.
+
+For work requested by Michael, also send major blockers and significant
+milestones to him in Von, alongside updates in the normal coding interface.
+Michael explicitly authorises these reports; do not ask again for each message.
+Keep reports concise and useful, distinguish partial progress from completion,
+and include any action needed from him. Routine tool steps do not need separate
+messages. Use the agent's own registered identity and the
+[coding-agent messaging route](docs/engineering/codex_dgx_worker.md#interactive-coding-agent-messages),
+with host-specific configuration in the operator's personal `AGENTS.md`.
+If delivery fails, report that in the normal interface, retain the pending
+message for a safe retry and continue independent authorised work.
 
 Update current guidance when a durable invariant or routing rule changes. Put
 incident-specific commands, identities, paths, and outputs in dated incident
