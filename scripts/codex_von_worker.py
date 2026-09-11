@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import uuid
@@ -87,6 +88,15 @@ class Von:
     def task(self, task_id):
         return self.tasks.get_task(task_id)
 
+    def native_writer(self, task):
+        project_id = task.get("project_concept_id")
+        if project_id:
+            from src.backend.services.task_project_service import get_task_project
+
+            project = get_task_project(project_id)
+            return bool(project and project.get("writer") == "von")
+        return not task.get("is_imported_jira_task", False)
+
     def pending(self):
         offset = 0
         while True:
@@ -98,7 +108,21 @@ class Von:
                 limit=200,
                 offset=offset,
             )
-            yield from page["tasks"]
+            for task in page["tasks"]:
+                if not authorised_task(task, self.config):
+                    continue
+                if self.native_writer(task):
+                    yield task
+                else:
+                    self.send(
+                        task,
+                        fingerprint(
+                            [task["task_concept_id"], task["title"], "external-writer"]
+                        ),
+                        "This task is assigned to me, but its tracking authority is not native Von. "
+                        "This worker currently processes native Von tasks. Its imported task state "
+                        "has been left unchanged; please provide a native task for this worker.",
+                    )
             offset += len(page["tasks"])
             if not page["tasks"] or offset >= page["total"]:
                 break
@@ -267,7 +291,9 @@ class Von:
             }
         result = state["result"]
         scope_valid = (
-            authorised_task(task, self.config) and task.get("status") in ACTIVE
+            authorised_task(task, self.config)
+            and task.get("status") in ACTIVE
+            and self.native_writer(task)
         )
         content = (
             f"{result['summary']}\n\n{result['evidence']}\n\n"
@@ -355,22 +381,63 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
     state.pop("report_task", None)
     state.pop("report_content", None)
     write_json(state_path, state)
-    if not worktree.exists():
+    if not state.get("checkout_prepared"):
         worktree.parent.mkdir(parents=True, exist_ok=True)
-        command(["git", "-C", config["source_repo"], "fetch", "origin"])
+        origin = command(
+            ["git", "-C", config["source_repo"], "remote", "get-url", "origin"]
+        )
+        # Independent Git metadata permits scoped commits without granting
+        # writes to the live web checkout's shared .git directory. Objects are
+        # borrowed read-only from the stable source repo to avoid full copies.
+        if not worktree.exists():
+            command(
+                [
+                    "git",
+                    "clone",
+                    "--shared",
+                    "--no-checkout",
+                    config["source_repo"],
+                    str(worktree),
+                ]
+            )
+        command(["git", "-C", str(worktree), "remote", "set-url", "origin", origin])
+        command(["git", "-C", str(worktree), "fetch", "origin"])
+        branch = f"codex/von-{task_key}"
+        exists = command(["git", "-C", str(worktree), "branch", "--list", branch])
+        checkout = [branch] if exists else ["-b", branch, "origin/main"]
+        command(["git", "-C", str(worktree), "checkout", *checkout])
+        state["checkout_prepared"] = True
+        write_json(state_path, state)
+    if config.get("github_command") and (worktree / ".git").is_dir():
+        helper = "!" + shlex.quote(config["github_command"]) + " auth git-credential"
         command(
             [
                 "git",
                 "-C",
-                config["source_repo"],
-                "worktree",
-                "add",
-                "-b",
-                f"codex/von-{task_key}",
                 str(worktree),
-                "origin/main",
+                "config",
+                "--replace-all",
+                "credential.https://github.com.helper",
+                "",
             ]
         )
+        command(
+            [
+                "git",
+                "-C",
+                str(worktree),
+                "config",
+                "--add",
+                "credential.https://github.com.helper",
+                helper,
+            ]
+        )
+    for field, setting in (
+        ("git_author_name", "user.name"),
+        ("git_author_email", "user.email"),
+    ):
+        if config.get(field) and (worktree / ".git").is_dir():
+            command(["git", "-C", str(worktree), "config", setting, config[field]])
     if config.get("python_environment") and not (worktree / ".venv").exists():
         (worktree / ".venv").symlink_to(
             config["python_environment"], target_is_directory=True
@@ -385,8 +452,6 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         "--strict-config",
         "--model",
         config["model"],
-        "--sandbox",
-        "workspace-write",
         "--cd",
         str(worktree),
         "--json",
@@ -398,6 +463,13 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         str(run_dir / "result.json"),
         "-",
     ]
+    if config.get("permission_profile"):
+        args[2:2] = [
+            "-c",
+            "default_permissions=" + json.dumps(config["permission_profile"]),
+        ]
+    else:
+        args[2:2] = ["--sandbox", "workspace-write"]
     with (
         (run_dir / "events.jsonl").open("w") as events,
         (run_dir / "stderr.log").open("w") as errors,

@@ -22,11 +22,13 @@ private databases, or unrelated conversations. Never print secrets. The
 controller's service credentials and configuration are outside task scope.
 
 Use the subscription-backed Codex session. Do not invoke Sol-family models or
-start other coding agents. Do not deploy/restart the web service. This initial
-worker has read-only GitHub access: retain coding changes in the worktree and
-report that publication needs a working authorised GitHub credential when
-publication is part of the task's requested completion. Do not mark such a task
-completed merely because local changes/tests succeeded.
+start other coding agents. Do not deploy/restart the web service. Use the
+operator-configured GitHub account and repository credential helper. Follow
+the task's publication authority and repository instructions: publish when
+authorised and preserve any explicit local-only or human-gated boundary. If
+authentication or publication fails, retain the changes and report the actual
+blocker. Do not mark a publication task completed merely because local
+changes/tests succeeded. Do not replace credentials or change GitHub accounts.
 
 Return the required JSON result. `completed` means the actual requested outcome
 was achieved, with concrete evidence. Use `needs_input` for a question that must

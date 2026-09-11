@@ -2,11 +2,14 @@
 
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip("fcntl", reason="The DGX worker uses a Unix host lock")
 spec = importlib.util.spec_from_file_location(
     "codex_von_worker",
     Path(__file__).resolve().parents[2] / "scripts/codex_von_worker.py",
@@ -57,6 +60,21 @@ def test_empty_poll_has_no_model_or_message(config, monkeypatch):
         worker, "launch", lambda *a: pytest.fail("empty poll launched Codex")
     )
     worker.tick(config, SimpleNamespace(pending=list), 0)
+
+
+@pytest.mark.parametrize("writer", ["jira", "von", None])
+def test_project_tracking_authority_is_read_live(config, monkeypatch, writer):
+    from src.backend.services import task_project_service
+
+    api = object.__new__(worker.Von)
+    api.config = config
+    monkeypatch.setattr(
+        task_project_service, "get_task_project", lambda pid: {"writer": writer}
+    )
+    assert api.native_writer(task(config, project_concept_id="#V#project")) is (
+        writer == "von"
+    )
+    assert not api.native_writer(task(config, is_imported_jira_task=True))
 
 
 @pytest.mark.parametrize(
@@ -242,3 +260,96 @@ def test_git_preparation_failure_is_reported_without_losing_checkpoint(
     assert reports[0]["status"] == "blocked"
     state_path = next((Path(config["state_root"]) / "tasks").glob("*.json"))
     assert json.loads(state_path.read_text())["phase"] == "waiting"
+
+
+def test_interrupted_clone_recovers_with_independent_metadata_and_no_service_secrets(
+    config, tmp_path, monkeypatch
+):
+    source = tmp_path / "source"
+    run = worker.command
+    run(["git", "init", "-b", "main", str(source)])
+    (source / "AGENTS.md").write_text("Fixture repository instructions.\n")
+    run(["git", "-C", str(source), "add", "AGENTS.md"])
+    run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-m",
+            "Fixture",
+        ]
+    )
+    run(["git", "-C", str(source), "remote", "add", "origin", str(source)])
+    fake = tmp_path / "fake-codex"
+    fake.write_text(f"#!{sys.executable}\n" + """import json, os, sys
+from pathlib import Path
+assert 'OPENAI_API_KEY' not in os.environ
+assert 'MONGO_URI' not in os.environ
+assert '--sandbox' not in sys.argv
+assert 'default_permissions="test-profile"' in sys.argv
+result = Path(sys.argv[sys.argv.index('--output-last-message') + 1])
+result.write_text(json.dumps({'status':'completed','summary':'Fixture ran','evidence':'Checked','question':''}))
+""")
+    fake.chmod(0o700)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-sentinel")
+    monkeypatch.setenv("MONGO_URI", "test-sentinel")
+    config.update(
+        source_repo=str(source),
+        codex_command=str(fake),
+        model="gpt-5.6-terra",
+        permission_profile="test-profile",
+        github_command="/configured/gh",
+        git_author_name="Fixture",
+        git_author_email="fixture@example.invalid",
+    )
+    state = {"task_id": "#V#task"}
+    state_path = tmp_path / "state.json"
+
+    def fail_fetch(args, **kwargs):
+        if "fetch" in args:
+            raise OSError("Simulated fetch interruption after clone")
+        return run(args, **kwargs)
+
+    with (tmp_path / "lock").open("w") as lock:
+        monkeypatch.setattr(worker, "command", fail_fetch)
+        with pytest.raises(OSError):
+            worker.launch(config, state, {}, {}, state_path, lock.fileno())
+        assert (Path(state["worktree"]) / ".git").is_dir()
+        assert not state.get("checkout_prepared")
+        monkeypatch.setattr(worker, "command", run)
+        worker.launch(config, state, {}, {}, state_path, lock.fileno())
+    checkout = Path(state["worktree"])
+    assert state["result"]["status"] == "completed"
+    assert state["checkout_prepared"]
+    assert (checkout / "AGENTS.md").read_text() == (source / "AGENTS.md").read_text()
+    assert run(["git", "-C", str(checkout), "remote", "get-url", "origin"]) == str(
+        source
+    )
+    assert "/configured/gh auth git-credential" in run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "config",
+            "--get-all",
+            "credential.https://github.com.helper",
+        ]
+    )
+    untouched = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source),
+            "config",
+            "--get",
+            "credential.https://github.com.helper",
+        ],
+        check=False,
+        capture_output=True,
+    )
+    assert untouched.returncode == 1
