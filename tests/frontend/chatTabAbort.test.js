@@ -102,6 +102,8 @@ describe('chat abort behaviour', () => {
     });
 
     afterEach(() => {
+        __testOnly_resetChatRequestState();
+        require('../../src/frontend/web/von_interface/static/js/apiService.js').fetchWithTimeout.mockReset();
         jest.restoreAllMocks();
         delete global.fetch;
     });
@@ -194,7 +196,10 @@ describe('chat abort behaviour', () => {
         await expect(sendPromise).resolves.toBeUndefined();
     });
 
-    test('non-json generate failure shows controlled server response error', async () => {
+    test.each([
+        [403, null, 'Server returned a non-JSON error response.'],
+        [500, { error: 'The original task failed.' }, 'The original task failed.']
+    ])('HTTP %i application failure is displayed without transport recovery', async (status, body, message) => {
         const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         getUserContext.mockReturnValue({
             user_id: 'user',
@@ -222,7 +227,9 @@ describe('chat abort behaviour', () => {
             if (typeof url === 'string' && url.startsWith('/von/generate')) {
                 return Promise.resolve({
                     ok: false,
+                    status,
                     json: async () => {
+                        if (body) return body;
                         throw new SyntaxError('Unexpected token <');
                     }
                 });
@@ -236,12 +243,75 @@ describe('chat abort behaviour', () => {
         await sendMessage();
         await new Promise((resolve) => setTimeout(resolve, 0));
 
-        expect(document.getElementById('scrollableField').textContent).toContain(
-            'Server returned a non-JSON error response.'
-        );
+        expect(document.getElementById('scrollableField').textContent).toContain(message);
         expect(document.getElementById('scrollableField').textContent).not.toContain(
             'Unexpected token <'
         );
+        expect(global.fetch.mock.calls.some(([url]) => url.startsWith('/von/api/task/status/'))).toBe(false);
+    });
+
+    test.each([
+        [502, 'completed'],
+        [503, 'completed'],
+        [504, 'completed'],
+        [524, 'completed'],
+        [502, 'failed']
+    ])('unreadable HTTP %i observes the original request until %s without resubmitting', async (status, outcome) => {
+        const { fetchWithTimeout, getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({ user_id: 'user', org_id: 'org', language: 'en-NZ' });
+        __testOnly_setActiveChatSession('session-gateway-recovery', 'Gateway recovery');
+        let generateBody;
+        let resolveStatus;
+        const message = outcome === 'completed' ? 'The original task completed.' : 'The original task failed.';
+        global.fetch = jest.fn(async (url, options = {}) => {
+            if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
+                return { ok: true, status: 201, json: async () => ({ success: true, item: {
+                    ...JSON.parse(options.body), queue_id: 'queue-original', status: 'queued'
+                } }) };
+            }
+            if (url === '/von/generate') {
+                generateBody = JSON.parse(options.body);
+                return { ok: false, status, json: async () => { throw new SyntaxError('Unexpected token <'); } };
+            }
+            if (url.startsWith('/von/api/task/status/')) {
+                return new Promise(resolve => {
+                    resolveStatus = () => resolve({ ok: true, status: 200, json: async () => ({
+                        status: outcome, ...(outcome === 'failed' ? { error: message } : {})
+                    }) });
+                });
+            }
+            if (url.startsWith('/von/api/task/result/')) {
+                return { ok: true, status: 200, json: async () => ({ status: 'completed', result: { response: message } }) };
+            }
+            if (url.startsWith('/von/api/render_markdown')) {
+                return { ok: true, json: async () => ({ html: String(JSON.parse(options.body || '{}').text || '') }) };
+            }
+            return { ok: true, status: 200, json: async () => ({}) };
+        });
+        fetchWithTimeout.mockImplementation((...args) => global.fetch(...args));
+        document.getElementById('promptInput').value = 'Complete this task once';
+        const sending = sendMessage();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(resolveStatus).toEqual(expect.any(Function));
+        expect(document.getElementById('scrollableField').textContent).not.toContain('Server returned a non-JSON');
+        expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('false');
+        resolveStatus();
+        await sending;
+        await new Promise(resolve => setTimeout(resolve, 0));
+
+        const calls = global.fetch.mock.calls;
+        expect(calls.filter(([url]) => url === '/von/generate')).toHaveLength(1);
+        expect(calls.filter(([url, opts]) => url === '/von/api/chat_prompt_queue' && opts.method === 'POST')).toHaveLength(1);
+        expect(generateBody.prompt_queue_id).toBe('queue-original');
+        expect(calls.filter(([url]) => url.startsWith('/von/api/task/status/')).map(([url]) => url))
+            .toEqual([`/von/api/task/status/${generateBody.client_request_id}`]);
+        expect(calls.filter(([url]) => url.startsWith('/von/api/task/result/')).map(([url]) => url))
+            .toEqual(outcome === 'completed' ? [`/von/api/task/result/${generateBody.client_request_id}`] : []);
+        const deliveredMessages = [...document.querySelectorAll('.chat-message-text')]
+            .filter(element => (element.dataset.originalText || element.textContent) === message);
+        expect(deliveredMessages).toHaveLength(1);
+        expect(document.getElementById('scrollableField').textContent).not.toContain('Server returned a non-JSON');
+        expect(document.getElementById('abortButton').getAttribute('aria-hidden')).toBe('true');
     });
 });
 
