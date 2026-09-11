@@ -1260,6 +1260,20 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:  # type: ig
                     "author_concept_id",
                     "user_concept_id",
                 )
+                if name == "task_search":
+                    # These arguments select tasks; they do not select the
+                    # authenticated principal. Keep omitted filters omitted
+                    # and permit searching other people within canonical ACLs.
+                    actor_fields = tuple(
+                        key
+                        for key in actor_fields
+                        if key
+                        not in {
+                            "user_concept_id",
+                            "created_by_concept_id",
+                            "creator_concept_id",
+                        }
+                    )
                 if any(
                     parsed_arguments.get(key) not in (None, "", configured_actor)
                     for key in actor_fields
@@ -4816,6 +4830,51 @@ async def _handle_otter_collection_status(arguments: dict[str, Any]) -> list[Tex
     return [_json_text(call_collection("status", **arguments))]
 
 
+def _task_search_summary(task):
+    """Keep search navigation bounded; task_get retains the full task details."""
+    fields = (
+        "task_concept_id",
+        "title",
+        "status",
+        "priority",
+        "assignee_concept_id",
+        "created_by_concept_id",
+        "reporter_concept_id",
+        "report_to_concept_id",
+        "project_concept_id",
+        "collection_concept_ids",
+        "organisation_concept_id",
+        "reference_code",
+        "task_type_ids",
+        "primary_task_type_label",
+        "task_source_id",
+        "task_source_label",
+        "parent_task_concept_id",
+        "epic_task_concept_id",
+        "start_date",
+        "due_date",
+        "created_at",
+        "updated_at",
+        "comments_count",
+        "attachments_count",
+        "worklog_entries_count",
+        "is_imported_jira_task",
+    )
+    summary = {key: task[key] for key in fields if key in task}
+    description = task.get("description")
+    if isinstance(description, str):
+        summary["description_preview"] = description[:300]
+        summary["description_truncated"] = len(description) > 300
+    summary["external_references"] = {
+        source: {
+            key: ref[key] for key in ("external_id", "issue_id", "url") if key in ref
+        }
+        for source, ref in (task.get("external_references") or {}).items()
+        if isinstance(ref, dict)
+    }
+    return summary
+
+
 def _native_task_handler(name):
     async def handle(arguments):
         from src.backend.integrations.internal_mcp import catalogue
@@ -4824,6 +4883,15 @@ def _native_task_handler(name):
         # by call_tool before reaching this adapter; actor-bound callers retain
         # their context and ordinary continuation checks.
         result = getattr(catalogue, f"_{name}")(**arguments)
+        if name == "task_search" and result.get("success"):
+            result = {
+                **result,
+                "tasks": [
+                    _task_search_summary(task) for task in result.get("tasks", [])
+                ],
+                "projection": "task_search_summary",
+                "detail_tool": "task_get",
+            }
         return [_json_text(result)]
 
     return handle

@@ -111,6 +111,10 @@ same canonical services, including `task_list_projects`, `task_get_project`,
 `task_get` accepts legacy Jira keys as well as Von task concept IDs.
 Project listings return navigation metadata and descriptions; retrieve source
 archives, retained-document references and their histories with `task_get_project`.
+Stdio `task_search` returns task summaries, short description previews and source
+identities; use `task_get` for the full task and `task_get_source_archive` for its
+retained original. Assignee and creator filters are optional query criteria,
+independent of the configured authenticated task actor.
 
 A local stdio connection can bind the trusted operator once in its server
 environment:
