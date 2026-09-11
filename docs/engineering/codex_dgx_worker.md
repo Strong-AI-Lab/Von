@@ -26,11 +26,12 @@ several task threads it may omit a thread identifier on a general reply. In
 that case use a task comment to keep the reply unambiguous. General inbox
 messages do not create new coding assignments in this pilot.
 
-The initial DGX GitHub account has read access to Von only. The worker can
-produce and test local changes; tasks requiring publication remain blocked
-with their changes retained until suitable GitHub credentials are configured.
-It must not claim that local code is published. Deployment of the public web
-server is outside this worker's initial execution profile.
+Publishing uses an operator-configured GitHub account and follows each task's
+publication authority. Missing authentication leaves changes retained and the
+task blocked; it must not claim that local code is published. Deployment of
+the public web server is outside this worker's execution profile. The chosen
+GitHub account and current authentication status belong in the Jira decision
+surface, not in the task's text.
 
 ## Controller and authority
 
@@ -41,6 +42,10 @@ repository, state directory and Codex launcher before processing any task.
 The worker selects tasks assigned to that actor, created by that delegator,
 in that organisation, and reporting to that delegator or with no explicit
 report recipient. Retrieved task or model text cannot change these selectors.
+For project-backed tasks, the live project writer must be `von`. Standalone
+Jira imports are also excluded. An assignment with another tracking authority
+receives a message explaining the unsupported route; its imported state is
+left unchanged. This pilot does not become a second Jira writer.
 
 Conversation concept identities remain owner-private. When access-control
 redaction hides a task's source relation, the adapter matches only actual
@@ -59,8 +64,9 @@ prevents the worker from changing the task state. Its result still goes to the
 original configured delegator. This is a single-host worker, not a distributed
 claim/lease protocol.
 
-The Codex process uses `workspace-write` sandboxing and an explicit non-Sol
-model. Its environment omits the controller's Mongo credentials and unrelated
+The Codex process defaults to `workspace-write` sandboxing and an explicit non-Sol
+model. Publication installations use the scoped profile below. Its environment
+omits the controller's Mongo credentials and unrelated
 API keys. Its MCP connection is disabled during assigned executions; selected
 task/conversation context is supplied in a local file. The operational prompt
 is a versioned input for this external Codex worker, not a duplicate of a
@@ -88,6 +94,10 @@ A JSON config has these fields (paths are operator-selected):
   "source_repo": "/home/mjw/von-codex-runtime",
   "codex_command": "/home/mjw/.local/bin/von-codex",
   "model": "gpt-5.6-terra",
+  "permission_profile": "von-coding",
+  "github_command": "/home/mjw/.local/bin/gh",
+  "git_author_name": "Your configured commit author",
+  "git_author_email": "your-verified-email@example.org",
   "python_environment": "/home/mjw/Von/.venv"
 }
 ```
@@ -96,6 +106,37 @@ The optional `python_environment` provides the existing PDM environment via a
 worktree symlink. Dependency changes needing writes outside the sandbox may
 require operator preparation. Do not replace `pdm.lock` or synchronise a Von
 project with another dependency manager.
+
+For publication, authenticate GitHub CLI in a dedicated `GH_CONFIG_DIR` outside
+the repository, and set that directory in both the controller and Codex launcher.
+Keep other host accounts separate. The adapter configures each new clone's Git
+credential helper to use `github_command`; credentials remain in the dedicated
+CLI store. New task checkouts have independent Git metadata and borrow source
+objects read-only. Keep the source repository available; to remove that
+dependency before retiring it, repack the retained clones first.
+
+Ordinary workspace sandboxing protects `.git`, preventing commits. A publishing
+installation may permit the isolated checkout's own metadata with this profile:
+
+```toml
+default_permissions = "von-coding"
+
+[permissions.von-coding]
+extends = ":workspace"
+[permissions.von-coding.filesystem.":workspace_roots"]
+".git" = "write"
+[permissions.von-coding.network]
+enabled = true
+```
+
+Remove legacy `sandbox_mode` and `[sandbox_workspace_write]` settings from that
+dedicated Codex home before selecting `permission_profile` in worker config;
+otherwise those older settings take precedence. Other workspace protections
+remain inherited. Validate both Git writes inside the isolated checkout and
+write denial outside it. Legacy linked worktrees retain their original Git
+restrictions; preserve their work and migrate them explicitly if publication
+is required. Never grant writes to the live web checkout's shared `.git` as a
+shortcut. See [Codex permissions](https://learn.chatgpt.com/docs/permissions).
 
 The DGX operator wrapper reads the existing web runtime's database credential
 in-process, checks that the configured database target still matches the
