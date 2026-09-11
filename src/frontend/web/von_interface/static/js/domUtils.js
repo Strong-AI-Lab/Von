@@ -13,7 +13,10 @@ import {
   subscribeToWorkflowCapabilityIndexStatus,
 } from './utils/workflowCapabilityStatusCoordinator.js';
 import { createFooterOrganisationSwitcher } from './components/footerOrganisationSwitcher.js';
-import { selectShortestNameForContext } from './utils/nameSelection.js';
+import {
+  selectAbbreviationForContext,
+  selectShortestNameForContext,
+} from './utils/nameSelection.js';
 
 export const elements = {};
 
@@ -92,6 +95,58 @@ const VON_SYSTEM_CONCEPT_ID = '#V#von_system';
 const VON_DOCUMENT_TITLE = 'Von';
 
 let _documentTitleRequestGeneration = 0;
+const footerCompactIdentityLabelRequests = new Map();
+
+function normaliseFooterIdentityText(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function getFooterCompactIdentityLabel(conceptId) {
+  const normalisedConceptId = normaliseFooterIdentityText(conceptId);
+  if (!normalisedConceptId) return Promise.resolve(null);
+
+  const existing = footerCompactIdentityLabelRequests.get(normalisedConceptId);
+  if (existing) return existing;
+
+  const request = fetch(`/api/concepts/${encodeURIComponent(normalisedConceptId)}`)
+    .then(async (response) => {
+      if (!response.ok) return null;
+      const concept = await response.json();
+      const names = Array.isArray(concept?.names) && concept.names.length
+        ? concept.names
+        : (Array.isArray(concept?.raw_doc?.names) ? concept.raw_doc.names : []);
+      return normaliseFooterIdentityText(selectAbbreviationForContext(names));
+    })
+    .catch(() => null);
+
+  footerCompactIdentityLabelRequests.set(normalisedConceptId, request);
+  return request;
+}
+
+function queueFooterCompactIdentityLabel({
+  button,
+  identityKind,
+  conceptId,
+  fullName,
+}) {
+  if (!button || !conceptId) return;
+  const semanticName = normaliseFooterIdentityText(fullName) || conceptId;
+  button.dataset.footerIdentityConceptId = conceptId;
+
+  void getFooterCompactIdentityLabel(conceptId).then((compactName) => {
+    if (!compactName || button.dataset.footerIdentityConceptId !== conceptId) return;
+
+    button.textContent = compactName;
+    button.setAttribute(
+      'aria-label',
+      `${identityKind}: ${semanticName}. Compact label: ${compactName}. Open in Vontology.`,
+    );
+    setKeptNativeTitle(
+      button,
+      `${identityKind}: ${semanticName}\nCompact label: ${compactName}\nID: ${conceptId}`,
+    );
+  });
+}
 
 function formatVonDocumentTitle(organisationName) {
   const name = typeof organisationName === 'string' ? organisationName.trim() : '';
@@ -1494,6 +1549,7 @@ export async function setModelInfoFooterText() {
 
   // Build dynamic segments (User / Org as concept buttons)
   const segments = [];
+  const footerIdentityTargets = [];
 
   function makeConceptButton(labelPrefix, displayName, conceptId, conceptName) {
     const span = document.createElement('span');
@@ -1728,13 +1784,32 @@ export async function setModelInfoFooterText() {
     // Always render a user segment with a button so downstream highlight logic and tests have a consistent target.
     const dName = (userInfo && (userInfo.name || userInfo.conceptId)) ? (userInfo.name || userInfo.conceptId) : 'User';
     // We do not pass concept id unless actually known to avoid misleading navigation.
-    segments.push(makeConceptButton('User', dName, userInfo?.conceptId || null, userInfo?.name || null));
+    const userSegment = makeConceptButton(
+      'User',
+      dName,
+      userInfo?.conceptId || null,
+      userInfo?.name || null,
+    );
+    footerIdentityTargets.push({
+      button: userSegment.querySelector('.concept-footer-button'),
+      identityKind: 'User',
+      conceptId: userInfo?.conceptId || null,
+      fullName: userInfo?.name || dName,
+    });
+    segments.push(userSegment);
   }
   // Organisation segment: retain concept navigation and add direct switching.
-  segments.push(createFooterOrganisationSwitcher({
+  const organisationSegment = createFooterOrganisationSwitcher({
     organisationInfo: orgInfo,
     onOpenConcept: openFooterConcept,
-  }));
+  });
+  footerIdentityTargets.push({
+    button: organisationSegment.querySelector('.footer-org-current-button'),
+    identityKind: 'Organisation',
+    conceptId: orgInfo?.conceptId || null,
+    fullName: orgInfo?.name || orgInfo?.conceptId || null,
+  });
+  segments.push(organisationSegment);
 
   if (workflowCapabilityStatus && workflowCapabilityStatus.ready === false) {
     const workflowIndexSegment = makeActionButton(
@@ -1856,6 +1931,10 @@ export async function setModelInfoFooterText() {
       }
     }
   } catch (_) { /* non-fatal */ }
+
+  // Apply abbreviations only after the authentication status pass so it cannot
+  // replace the full identity tooltip with a generic login-only one.
+  footerIdentityTargets.forEach(queueFooterCompactIdentityLabel);
 
   // Clicking empty space (not concept buttons) still opens settings
   footer.style.cursor = 'pointer';

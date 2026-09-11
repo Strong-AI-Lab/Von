@@ -1,4 +1,7 @@
-import { selectBestNameForContext } from '../../src/frontend/web/von_interface/static/js/utils/nameSelection.js';
+import {
+    selectAbbreviationForContext,
+    selectBestNameForContext,
+} from '../../src/frontend/web/von_interface/static/js/utils/nameSelection.js';
 
 describe('nameSelection', () => {
     test('prefers exact language match over others', () => {
@@ -83,5 +86,21 @@ describe('nameSelection', () => {
         ];
 
         expect(selectBestNameForContext(names, 'en-NZ')).toBe('#V#thing');
+    });
+
+    test('selects an explicitly represented abbreviation for compact identity UI', () => {
+        const names = [
+            { name: 'Michael Witbrock', language: 'en-NZ', type: 'NL' },
+            { name: 'MJW', language: 'en-NZ', type: 'ABBR' },
+            { name: 'MW', language: 'en-US', type: 'ABBR' },
+        ];
+
+        expect(selectAbbreviationForContext(names, 'en-NZ')).toBe('MJW');
+    });
+
+    test('does not invent a compact name when no abbreviation is represented', () => {
+        expect(selectAbbreviationForContext([
+            { name: 'University of Auckland Strong AI Lab', language: 'en-NZ', type: 'NL' },
+        ], 'en-NZ')).toBeNull();
     });
 });
