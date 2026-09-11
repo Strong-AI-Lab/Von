@@ -3634,6 +3634,7 @@ deploy_main() {
     "$py" "${ROOT}/scripts/deploy_local_main.py" \
         --primary-root "$ROOT" \
         --runtime-worktree "$runtime_path" \
+        --health-url "http://127.0.0.1:${PORT}/health" \
         --health-timeout-seconds "$HEALTH_TIMEOUT_SEC"
 }
 

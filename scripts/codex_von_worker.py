@@ -29,8 +29,9 @@ RESULT_SCHEMA = {
         "summary": {"type": "string"},
         "evidence": {"type": "string"},
         "question": {"type": "string"},
+        "deploy_commit": {"type": "string"},
     },
-    "required": ["status", "summary", "evidence", "question"],
+    "required": ["status", "summary", "evidence", "question", "deploy_commit"],
     "additionalProperties": False,
 }
 
@@ -62,7 +63,11 @@ def authorised_task(task, config):
 
 
 def validate_result(value):
-    if not isinstance(value, dict) or set(value) != set(RESULT_SCHEMA["required"]):
+    fields = set(RESULT_SCHEMA["required"])
+    if not isinstance(value, dict) or set(value) not in (
+        fields,
+        fields - {"deploy_commit"},
+    ):
         raise ValueError("Codex did not return the required result fields")
     if any(not isinstance(v, str) for v in value.values()):
         raise ValueError("Codex result fields must be text")
@@ -380,6 +385,7 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
     state.pop("result", None)
     state.pop("report_task", None)
     state.pop("report_content", None)
+    state.pop("deployment_final", None)
     write_json(state_path, state)
     if not state.get("checkout_prepared"):
         worktree.parent.mkdir(parents=True, exist_ok=True)
@@ -507,6 +513,87 @@ def recover_result(state):
     state.update(phase="reporting", result=result)
 
 
+def apply_deployment(config, api, state, state_path, lock_fd):
+    """Execute only an operator-enabled request; retain the canonical receipt."""
+    result = state["result"]
+    commit = result.get("deploy_commit", "").strip()
+    if not commit or state.get("deployment_final"):
+        return
+    task = api.task(state["task_id"])
+    eligible = (
+        result["status"] == "completed"
+        and bool(task)
+        and authorised_task(task, config)
+        and task.get("status") in ACTIVE
+        and api.native_writer(task)
+        and fingerprint(api.inputs(task)) == state.get("input_hash")
+    )
+    run_dir = Path(state["run_dir"])
+    receipt_path = run_dir / "deployment.json"
+    try:
+        prior_receipt = json.loads(receipt_path.read_text())
+    except (OSError, ValueError):
+        prior_receipt = {}
+    recover_only = not eligible and prior_receipt.get("status") == "started"
+    if (not eligible and not recover_only) or not config.get("deployment_command"):
+        detail = (
+            "The task authority or instructions changed before deployment."
+            if not eligible
+            else "Deployment is not enabled for this worker."
+        )
+        result.update(status="blocked", summary=result["summary"] + " " + detail)
+        state["deployment_final"] = "not_authorised"
+        write_json(state_path, state)
+        return
+    with (run_dir / "deployment.log").open("a") as log:
+        completed = subprocess.run(
+            [
+                config["deployment_command"],
+                "--commit",
+                commit,
+                "--receipt",
+                str(receipt_path),
+                *(["--recover-only"] if recover_only else []),
+            ],
+            check=False,
+            stdout=log,
+            stderr=log,
+            pass_fds=(lock_fd,),
+        )
+    try:
+        receipt = json.loads(receipt_path.read_text())
+    except (OSError, ValueError):
+        receipt = {"status": "failed_without_receipt"}
+    success = (
+        completed.returncode == 0
+        and receipt.get("status") == "deployed"
+        and receipt.get("requested_commit") == commit
+        and receipt.get("verification", {}).get("commit") == commit
+    )
+    state["deployment_final"] = receipt.get("status", "unknown")
+    result["evidence"] += f"\nDeployment receipt: {receipt_path}\n" + json.dumps(
+        receipt
+    )
+    if success:
+        result[
+            "summary"
+        ] += f" Deployed and verified the public server at {commit[:12]}."
+    else:
+        result["status"] = "blocked"
+        result["summary"] += (
+            " Deployment did not complete: " + state["deployment_final"] + "."
+        )
+        result["question"] = (
+            "Inspect the retained deployment receipt/log before requeuing this task."
+        )
+    if recover_only:
+        result["status"] = "blocked"
+        result[
+            "summary"
+        ] += " The task changed; only the interrupted deployment was reconciled."
+    write_json(state_path, state)
+
+
 def tick(config, api, lock_fd):
     states_dir = Path(config["state_root"]) / "tasks"
     states_dir.mkdir(parents=True, exist_ok=True)
@@ -517,6 +604,7 @@ def tick(config, api, lock_fd):
             recover_result(state)
             write_json(path, state)
         if state["phase"] == "reporting":
+            apply_deployment(config, api, state, path, lock_fd)
             api.finish(state)
             write_json(path, state)
     for task in api.pending():
@@ -559,6 +647,7 @@ def tick(config, api, lock_fd):
             )
             recover_result(state)
             write_json(path, state)
+        apply_deployment(config, api, state, path, lock_fd)
         api.finish(state)
         write_json(path, state)
         print(

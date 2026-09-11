@@ -39,6 +39,7 @@ def app(monkeypatch, signing_key):
     monkeypatch.setenv("VON_CLOUDFLARE_ACCESS_HOSTNAME", "von.example.test")
     monkeypatch.setenv("VON_CLOUDFLARE_ACCESS_TEAM_DOMAIN", TEAM)
     monkeypatch.setenv("VON_CLOUDFLARE_ACCESS_AUDIENCE", "aud1")
+    monkeypatch.setenv("VON_CLOUDFLARE_HEALTH_SERVICE_IDS", "health-client.access")
     app = Flask(__name__)
     app.secret_key = "test-only-secret-not-for-deployment"
     app.testing = True
@@ -54,7 +55,36 @@ def app(monkeypatch, signing_key):
             return jsonify(error="no actor"), 401
         return jsonify(actor=session.get("user_concept_id"), org=session.get("organisation_concept_id"), provider=session.get("auth_provider"))
 
+    @app.get("/health")
+    def health_check():
+        return jsonify(status="healthy", actor=session.get("user_concept_id"))
+
     return app
+
+
+@pytest.mark.parametrize("audience", [["aud1"], "aud1"])
+def test_signed_configured_health_service_never_becomes_a_user(app, signing_key, audience):
+    client=app.test_client()
+    headers={"Cf-Access-Jwt-Assertion":token(signing_key[0],sub="",email=None,common_name="health-client.access",aud=audience)}
+    health=client.get("/health",base_url=HOST,headers=headers)
+    assert health.status_code==200
+    assert health.json["actor"] is None
+    assert client.get("/private",base_url=HOST,headers=headers).status_code==403
+    assert client.get("/von/api/auth/status",base_url=HOST,headers=headers).status_code==403
+    assert client.post("/health",base_url=HOST,headers=headers).status_code==403
+    with client.session_transaction(base_url=HOST) as session:
+        assert not session.get("user_concept_id")
+
+
+@pytest.mark.parametrize("overrides",[
+    {"common_name":"another-client.access"}, {"aud":["another-app"]},
+    {"iss":"https://another.cloudflareaccess.com"}, {"exp":int(time.time())-1},
+])
+def test_health_service_still_requires_exact_signed_scope(app,signing_key,overrides):
+    claims={"sub":"","email":None,"common_name":"health-client.access",**overrides}
+    response=app.test_client().get("/health",base_url=HOST,
+        headers={"Cf-Access-Jwt-Assertion":token(signing_key[0],**claims)})
+    assert response.status_code==403
 
 
 def test_normal_issuance_binding_and_scope_retention(app, signing_key):

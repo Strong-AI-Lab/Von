@@ -92,6 +92,19 @@ def test_prepare_refuses_primary_that_is_not_main(tmp_path: Path) -> None:
         _prepare_primary(primary.resolve(), remote="origin", branch="main")
 
 
+def test_stale_expected_revision_does_not_advance_primary(tmp_path: Path) -> None:
+    _, seed, primary, _ = _setup_repositories(tmp_path)
+    before = _git(primary, "rev-parse", "HEAD")
+    (seed / "tracked.txt").write_text("newer\n")
+    _git(seed, "commit", "-am", "newer")
+    _git(seed, "push", "origin", "main")
+    with pytest.raises(DeploymentError, match="no longer origin/main"):
+        _prepare_primary(
+            primary, remote="origin", branch="main", expected_commit=before
+        )
+    assert _git(primary, "rev-parse", "HEAD") == before
+
+
 def test_prepare_allows_registered_nested_worktree(tmp_path: Path) -> None:
     _, _, primary, _ = _setup_repositories(tmp_path)
     nested_worktree = primary / ".worktrees" / "feature"
@@ -165,9 +178,7 @@ def test_health_verification_requires_exact_clean_durable_build() -> None:
     assert "running commit=" in (_health_error(wrong_commit, commit) or "")
 
     no_scheduler = json.loads(json.dumps(payload))
-    no_scheduler["runtime_authority"]["durable_workflows"][
-        "scheduler_running"
-    ] = False
+    no_scheduler["runtime_authority"]["durable_workflows"]["scheduler_running"] = False
     assert _health_error(no_scheduler, commit) == (
         "durable workflow readiness false: scheduler_running"
     )
@@ -244,14 +255,15 @@ def test_deploy_reconciles_target_runtime_before_server_start(
     )
     monkeypatch.setattr(
         "scripts.deploy_local_main._reconcile_startup_seed_materialisations",
-        lambda *_args, **_kwargs: events.append("reconcile")
-        or {"success": True},
+        lambda *_args, **_kwargs: events.append("reconcile") or {"success": True},
     )
 
     def _record_run(args, **_kwargs):
         if "start" in args:
+            assert args[args.index("-Port") + 1] == "5000"
             events.append("start")
         elif "stop" in args:
+            assert args[args.index("-Port") + 1] == "5000"
             events.append("stop_runtime")
         return subprocess.CompletedProcess(args, 0, "", "")
 
@@ -265,7 +277,11 @@ def test_deploy_reconciles_target_runtime_before_server_start(
         lambda *_args, **_kwargs: (2345, 3456),
     )
 
-    result = deploy(primary_root=primary, runtime_root=runtime)
+    result = deploy(
+        primary_root=primary,
+        runtime_root=runtime,
+        health_url="http://127.0.0.1:5000/health",
+    )
 
     assert result.commit == commit
     assert events.index("prepare_runtime") < events.index("reconcile")
@@ -297,11 +313,14 @@ def test_matching_von_process_root_accepts_only_exact_checkout_and_port(
 
     monkeypatch.setattr("scripts.deploy_local_main.psutil.Process", _Process)
 
-    assert _matching_von_process_root(
-        pid=4242,
-        expected_port=5001,
-        allowed_roots=(primary, runtime),
-    ) == primary
+    assert (
+        _matching_von_process_root(
+            pid=4242,
+            expected_port=5001,
+            allowed_roots=(primary, runtime),
+        )
+        == primary
+    )
 
     with pytest.raises(DeploymentError, match="does not select port 5010"):
         _matching_von_process_root(
@@ -376,12 +395,15 @@ def test_stop_verified_predecessor_uses_exact_matching_root_and_pid(
         _missing_process,
     )
 
-    assert _stop_verified_predecessor(
-        primary_root=primary,
-        runtime_root=runtime,
-        current_launcher=launcher,
-        health_url="http://127.0.0.1:5001/health",
-    ) == 4444
+    assert (
+        _stop_verified_predecessor(
+            primary_root=primary,
+            runtime_root=runtime,
+            current_launcher=launcher,
+            health_url="http://127.0.0.1:5001/health",
+        )
+        == 4444
+    )
     assert calls[0]["args"] == [
         "bash",
         launcher,
