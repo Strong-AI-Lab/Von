@@ -41,6 +41,45 @@ the operator-enabled deployment command described below. The chosen
 GitHub account and current authentication status belong in the Jira decision
 surface, not in the task's text.
 
+## Interactive coding-agent messages
+
+The reporting requirement lives in [AGENTS.md](../../AGENTS.md#9-completion-and-maintenance).
+Interactive Codex VS Code uses `#V#codex_vscode` (Codex VS Code); the DGX worker
+uses `#V#codex_dgx` (Codex DGX). Keep these identities distinct. Michael's
+recipient identity is `#V#michael_witbrock`; the existing SAIL organisation is
+`#V#university_of_auckland_strong_ai_lab`.
+
+Use an available canonical Von message tool or the existing trusted operator
+helper for the intended Von instance. Absence of an exposed MCP message tool
+does not establish that messaging is unavailable. A local development or
+migration database can lack an identity that exists in the user's running Von;
+check the configured delivery route before declaring the identity missing or
+asking for account setup. Do not recreate identities or grant memberships to
+repair a connection to the wrong instance.
+
+The verified interactive helper accepts an operator-owned JSON file containing
+`key`, `subject`, `content` and an optional native `task_id`. It binds the sender,
+recipient and organisation itself, checks membership, calls
+`message_service.create_message_idempotently`, and reads the result back as the
+recipient. Use a unique key for each milestone or report; preserve both key and
+exact payload when retrying the same delivery. A changed message needs a new
+key. Include a task link when available; omit `task_id` if that native task has
+not been verified in the destination instance.
+
+Keep host aliases, installed helper/environment paths, credentials and delivery
+receipts in operator-owned configuration outside Git. The operator's personal
+`AGENTS.md` records the concrete route and recovery instructions. Invoke the
+helper with its PDM-managed Python environment. Reporting alone must not start
+the coding worker, a model request or unrelated event workflows. Keep normal
+coding-interface updates as well as Von messages; the delivery receipt proves
+message persistence, not completion of the work being reported.
+
+For an explicitly requested recurring report, record the actual scheduler,
+cadence, completion trigger, retry/idempotency state and host-availability
+dependency. Verify an immediate delivery and the installed schedule separately.
+Do not treat an imported task, a passive assignment or an enabled schedule as
+proof of execution, or stop reports at an intermediate migration milestone.
+
 ## Controller and authority
 
 [`scripts/codex_von_worker.py`](../../scripts/codex_von_worker.py) uses the
