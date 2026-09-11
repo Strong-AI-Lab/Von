@@ -1,8 +1,64 @@
 import copy
+import json
 
 import pytest
 
 from src.backend.services import task_project_service as projects
+
+
+def test_project_catalogue_does_not_grow_with_retained_source_history(monkeypatch):
+    record = {
+        "name": "Research project",
+        "key": "RESEARCH",
+        "description": "The complete project description",
+        "writer": "jira",
+        "source_id": "123",
+        "collection_concept_ids": ["#V#research_tasks"],
+        "source_archive_history": [{"manifest": "x" * 100_000}],
+        "external_document_archives": [{"manifest": "y" * 100_000}],
+    }
+    query_seen = {}
+
+    def find(query, *, projection, limit, skip):
+        query_seen.update(query=query, limit=limit, skip=skip)
+        selected = {
+            key: value
+            for key, value in record.items()
+            if projection.get("attributes.task_project")
+            or projection.get(f"attributes.task_project.{key}")
+        }
+        return [
+            {
+                "concept_id": f"#V#project_{index}",
+                "attributes": {"task_project": selected},
+            }
+            for index in range(skip, min(skip + limit, 43))
+        ]
+
+    monkeypatch.setattr(projects.ConceptsRepository, "find", find)
+    result = projects.list_task_projects()
+    assert len(result) == 43
+    assert len(json.dumps({"success": True, "projects": result})) < 100_000
+    assert result[0]["description"] == record["description"]
+    assert result[0]["collection_concept_ids"] == record["collection_concept_ids"]
+    assert result[0]["writer"] == "jira"
+    assert result[0]["source_id"] == "123"
+    assert projects.list_task_projects(limit=2, offset=41) == result[41:]
+    assert query_seen == {
+        "query": {"attributes.task_project": {"$exists": True}},
+        "limit": 2,
+        "skip": 41,
+    }
+
+    monkeypatch.setattr(projects, "can_access_concept", lambda key: True)
+    monkeypatch.setattr(
+        projects,
+        "get_concept_by_concept_id_exact",
+        lambda key: {"attributes": {"task_project": copy.deepcopy(record)}},
+    )
+    detail = projects.get_task_project("#V#project_0")
+    assert detail["source_archive_history"] == record["source_archive_history"]
+    assert detail["external_document_archives"] == record["external_document_archives"]
 
 
 def test_project_collection_rerun_preserves_identity_and_writer(monkeypatch):
