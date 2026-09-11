@@ -10926,11 +10926,13 @@ describe('chat session composer state', () => {
         });
 
         await expect(__testOnly_refreshChatSessionTabs()).resolves.toBeUndefined();
+        document.getElementById('sendButton').innerHTML = '<svg></svg><span class="button-label sr-only">Send Prompt</span>';
         document.querySelector('.chat-session-tab-new').click();
 
         const sendButton = document.getElementById('sendButton');
         expect(sendButton.disabled).toBe(true);
         expect(sendButton.textContent).toBe('Creating conversation…');
+        expect(sendButton.querySelector('svg')).not.toBeNull();
         expect(sendButton.getAttribute('aria-busy')).toBe('true');
 
         const sendPromise = sendMessage();
@@ -12716,7 +12718,7 @@ describe('scroll to latest message affordance', () => {
                     <div class="chat-session-tabs-row">
                         <div id="chatSessionTabs"></div>
                     </div>
-                    <div id="scrollableField"></div>
+                    <div id="scrollableField"></div><div class="chat-composer"></div>
                 </div>
             </div>
         `;
@@ -12733,6 +12735,7 @@ describe('scroll to latest message affordance', () => {
         __testOnly_updateScrollToEndButtonVisibility(scrollableField);
         const button = __testOnly_ensureScrollToEndButton(scrollableField);
         expect(button).toBeTruthy();
+        expect(button.parentElement).toBe(document.querySelector('.chat-composer'));
         expect(button.classList.contains('visible')).toBe(true);
         expect(button.getAttribute('aria-hidden')).toBe('false');
 

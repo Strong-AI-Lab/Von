@@ -5574,6 +5574,13 @@ h1 {
     }
 }
 
+/* Follow the composer's actual top edge, including resized drafts and open actions. */
+.chat-composer > .chat-scroll-to-end-btn {
+    position: absolute;
+    right: 10px;
+    bottom: calc(100% + 10px);
+}
+
 /* Dropdown */
 select {
     background-color: #fff;
@@ -11599,10 +11606,49 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     display: none;
 }
 
-#dictateButton,
 #cancelDictationButton,
 #retryDictationButton {
     min-height: 44px;
+}
+
+.chat-composer .composer-icon-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 44px;
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
+    padding: 0;
+    margin: 0;
+    border-radius: 50%;
+}
+
+.composer-icon-button svg {
+    width: 24px;
+    height: 24px;
+    pointer-events: none;
+}
+
+.composer-icon-button .dictation-stop-icon,
+.composer-icon-button.dictation-recording .microphone-icon {
+    display: none;
+}
+
+.composer-icon-button.dictation-recording .dictation-stop-icon {
+    display: block;
+}
+
+.composer-icon-button.active-dictation,
+.composer-icon-button.active-voice {
+    background: #b91c1c;
+    color: #fff;
+    box-shadow: 0 0 0 3px #fecaca;
+}
+
+.composer-icon-button:focus-visible {
+    outline: 3px solid #2563eb;
+    outline-offset: 3px;
 }
 
 #dictationStatus {
@@ -11678,7 +11724,6 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 /* Narrow screens: allow wrap but maintain spacing */
 @media (max-width: 520px) {
 
-    #sendButton,
     #resetButton {
         margin-bottom: 8px;
     }
