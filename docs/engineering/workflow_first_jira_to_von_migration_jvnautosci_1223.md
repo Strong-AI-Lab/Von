@@ -154,6 +154,12 @@ dump spanning an in-progress file-copy creation can contain its concept before
 its locator relations; a successful document restore alone does not establish
 a usable content restore.
 
+Database backup encryption and restore decryption stream the existing Fernet
+file format through private temporary files. Restore authenticates the complete
+ciphertext before decrypting or publishing plaintext, so large archives do not
+require a whole-file memory allocation. Run the paired restore after bulk
+imports have stopped, under the same measured resource budget.
+
 `set_task_project_writer` records a reversible, per-project writer decision and
 its evidence. Moving to `von` requires successful project reconciliation plus
 site-retention, normal-use, restore and final-delta receipts. The smallest

@@ -234,13 +234,12 @@ def _compress_backup_dir_to_zip(backup_root: Path) -> Path:
 
 
 def _encrypt_file_fernet(input_path: Path, *, key: str) -> Path:
-    from cryptography.fernet import Fernet
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
+    from src.backend.utils.fernet_file import encrypt_file
 
-    f = Fernet(key.encode("utf-8"))
-    data = input_path.read_bytes()
-    encrypted = f.encrypt(data)
     out_path = input_path.with_suffix(input_path.suffix + ".enc")
-    out_path.write_bytes(encrypted)
+    encrypt_file(input_path, out_path, key=key)
     # Carry timestamp forward
     ts = input_path.stat().st_mtime
     os.utime(out_path, (ts, ts))
