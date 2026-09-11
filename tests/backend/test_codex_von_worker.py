@@ -62,6 +62,66 @@ def test_empty_poll_has_no_model_or_message(config, monkeypatch):
     worker.tick(config, SimpleNamespace(pending=list), 0)
 
 
+@pytest.mark.parametrize(
+    "request_deployment,changed,interrupted,expected",
+    [
+        (False, False, False, None),
+        (True, True, False, "not_authorised"),
+        (True, False, False, "deployed"),
+        (True, True, True, "deployed"),
+    ],
+)
+def test_deployment_request_and_live_task_authority(
+    config, tmp_path, monkeypatch, request_deployment, changed, interrupted, expected
+):
+    current = task(config, status="in_progress")
+    inputs = {"description": "Implement and deploy"}
+    api = SimpleNamespace(
+        task=lambda _: current, inputs=lambda _: inputs, native_writer=lambda _: True
+    )
+    result = {
+        "status": "completed",
+        "summary": "Merged",
+        "evidence": "Tests passed",
+        "question": "",
+        "deploy_commit": "a" * 40 if request_deployment else "",
+    }
+    state = {
+        "task_id": "#V#task",
+        "result": result,
+        "run_dir": str(tmp_path),
+        "input_hash": worker.fingerprint(inputs),
+    }
+    config["deployment_command"] = "/operator/deploy"
+    if changed:
+        inputs["description"] = "Do not deploy"
+    if interrupted:
+        worker.write_json(tmp_path / "deployment.json", {"status": "started"})
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        worker.write_json(
+            tmp_path / "deployment.json",
+            {
+                "requested_commit": "a" * 40,
+                "status": "deployed",
+                "verification": {"commit": "a" * 40},
+            },
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(worker.subprocess, "run", run)
+    worker.apply_deployment(config, api, state, tmp_path / "state.json", 0)
+    assert state.get("deployment_final") == expected
+    assert len(calls) == int(expected == "deployed")
+    if expected == "deployed":
+        assert ("--recover-only" in calls[0]) is interrupted
+        assert (result["status"] == "blocked") is interrupted
+        worker.apply_deployment(config, api, state, tmp_path / "state.json", 0)
+        assert len(calls) == 1
+
+
 @pytest.mark.parametrize("writer", ["jira", "von", None])
 def test_project_tracking_authority_is_read_live(config, monkeypatch, writer):
     from src.backend.services import task_project_service

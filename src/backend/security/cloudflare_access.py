@@ -62,7 +62,7 @@ class AccessVerifier:
                 self._fetched_at = time.monotonic()
             return dict(self._keys)
 
-    def verify(self, token: str) -> dict:
+    def verify(self, token: str, *, health_service_ids: frozenset[str] = frozenset()) -> dict:
         if not token or len(token) > 32768:
             raise ValueError("access_token_missing_or_invalid")
         header = jwt.decode_header(token)
@@ -71,8 +71,14 @@ class AccessVerifier:
         # google-auth verifies signature, iat and exp. Access uses a list-valued
         # audience, so validate that explicitly after signature verification.
         claims = jwt.decode(token, certs=self._certificates(header["kid"]))
+        health_service = (claims.get("sub") == "" and not claims.get("email")
+                          and claims.get("common_name") in health_service_ids)
         aud = claims.get("aud")
-        if not isinstance(aud, list) or self.audience not in aud:
+        audience_valid = isinstance(aud, list) and self.audience in aud
+        # Live Cloudflare service issuance also uses the JWT scalar audience form.
+        if health_service and isinstance(aud, str) and aud == self.audience:
+            audience_valid = True
+        if not audience_valid:
             raise ValueError("access_audience_invalid")
         if claims.get("iss") != self.issuer or claims.get("type") != "app":
             raise ValueError("access_issuer_or_type_invalid")
@@ -85,6 +91,10 @@ class AccessVerifier:
             type(claims["nbf"]) is not int or claims["nbf"] > time.time()
         ):
             raise ValueError("access_token_not_yet_valid")
+        # A configured machine may read health only; it never becomes a user.
+        # Callers supply this allow-list only for the exact GET /health endpoint.
+        if health_service:
+            return claims
         if not isinstance(claims.get("sub"), str) or not claims["sub"]:
             raise ValueError("access_subject_missing")
         # Service tokens lack a human email; they must never become a user.
@@ -102,6 +112,10 @@ def install_cloudflare_access(app) -> None:
     hostname = os.getenv("VON_CLOUDFLARE_ACCESS_HOSTNAME", "").strip().lower()
     team = os.getenv("VON_CLOUDFLARE_ACCESS_TEAM_DOMAIN", "").strip().lower()
     audience = os.getenv("VON_CLOUDFLARE_ACCESS_AUDIENCE", "").strip()
+    health_service_ids = frozenset(
+        value.strip() for value in os.getenv("VON_CLOUDFLARE_HEALTH_SERVICE_IDS", "").split(",")
+        if value.strip()
+    )
     if enabled and (
         not re.fullmatch(r"[a-z0-9-]+\.cloudflareaccess\.com", team)
         or not re.fullmatch(r"[a-z0-9]+(?:[.-][a-z0-9-]+)+", hostname)
@@ -125,7 +139,15 @@ def install_cloudflare_access(app) -> None:
 
         try:
             token = request.headers.get("Cf-Access-Jwt-Assertion", "")
-            claims = verifier.verify(token)
+            machine_health = request.endpoint == "health_check" and request.method == "GET"
+            if machine_health and health_service_ids:
+                claims = verifier.verify(token, health_service_ids=health_service_ids)
+                if not claims.get("email"):
+                    session.clear()
+                    g.cloudflare_access_health_service = claims["common_name"]
+                    return None
+            else:
+                claims = verifier.verify(token)
             fingerprint = hashlib.sha256(token.encode()).hexdigest()
             email = claims["email"]
             if not (

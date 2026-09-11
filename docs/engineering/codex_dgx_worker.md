@@ -17,7 +17,7 @@ transcript separately. The current Tasks form's assignee picker offers only
 Unassigned and Von; it does not yet offer this worker. The pilot acceptance
 used labelled fixtures through canonical services, not that picker.
 
-The worker checks hourly, starts at most one coding run per check, and sends a
+The worker checks at the operator-configured interval, starts at most one coding run per check, and sends a
 pickup message followed by a result or question through Von direct messages.
 An empty check makes no model request. Each task has its own Git worktree. Each
 execution is a fresh subscription-backed Codex session, using the retained
@@ -32,7 +32,8 @@ messages do not create new coding assignments in this pilot.
 Publishing uses an operator-configured GitHub account and follows each task's
 publication authority. Missing authentication leaves changes retained and the
 task blocked; it must not claim that local code is published. Deployment of
-the public web server is outside this worker's execution profile. The chosen
+the public web server requires an explicit instruction in the initial task and
+the operator-enabled deployment command described below. The chosen
 GitHub account and current authentication status belong in the Jira decision
 surface, not in the task's text.
 
@@ -66,6 +67,14 @@ blocked rather than completed. Reassignment/cancellation discovered after a run
 prevents the worker from changing the task state. Its result still goes to the
 original configured delegator. This is a single-host worker, not a distributed
 claim/lease protocol.
+
+When the initial task explicitly requests deployment, the coding run returns
+the full merged `deploy_commit` after its code, tests and publication finish.
+The controller rechecks the live task authority and instructions, then calls
+only its operator-configured `deployment_command`. The run cannot supply a
+host, checkout, shell command or credentials. An empty deployment request has
+no deployment effect. Interpretation of the initial task belongs to the model;
+there is no keyword matcher or second per-deployment confirmation.
 
 The Codex process defaults to `workspace-write` sandboxing and an explicit non-Sol
 model. Publication installations use the scoped profile below. Its environment
@@ -141,6 +150,47 @@ restrictions; preserve their work and migrate them explicitly if publication
 is required. Never grant writes to the live web checkout's shared `.git` as a
 shortcut. See [Codex permissions](https://learn.chatgpt.com/docs/permissions).
 
+## Explicit deployment
+
+Install `codex_von_deploy.py` and its `deploy_local_main.py` dependency in the
+operator-owned directory. A fixed launcher binds a separate JSON configuration
+and accepts only `--commit` and `--receipt` from the controller. Set its path as
+`deployment_command` in worker config. The deployment configuration contains:
+
+```json
+{
+  "primary_root": "/home/mjw/Von",
+  "runtime_root": "/home/mjw/Von-runtime-main",
+  "state_root": "/home/mjw/.codex-von-worker/worker-state",
+  "health_url": "http://127.0.0.1:5000/health",
+  "public_health_url": "https://von.curiouscat.cc/health",
+  "public_headers_file": "/home/mjw/.codex-von-worker/cloudflare-health.json",
+  "health_timeout_seconds": 960
+}
+```
+
+Prepare the dedicated detached runtime worktree with its environment before
+activation. The command uses the canonical launcher, requires the requested
+SHA to remain `origin/main`, and verifies the exact clean revision locally and
+through the public endpoint. Persistent receipts make retries reconcile an
+interrupted deployment. Failed startup restores the previous code revision
+and verifies the recovered service; a recovery failure remains an explicit
+blocked outcome. This is code recovery, not a database rollback. A changed
+`pdm.lock` requires preparation of a recoverable environment before automatic
+deployment. Migrations and infrastructure changes need their own task scope
+and recovery plan.
+
+For a Cloudflare Access-protected site, keep the two service-token headers in
+the private `public_headers_file`. The deployment command injects only the
+service Client ID into `VON_CLOUDFLARE_HEALTH_SERVICE_IDS` for the server.
+Cloudflare must issue the token for the configured application's Service Auth
+policy. Von validates its signature, issuer, audience, expiry and exact
+configured service identity for `GET /health` only; it never creates a Von user
+session. Human login and private routes retain their existing checks. Health
+requests do not follow redirects, so credentials cannot be forwarded to a
+login provider. Token expiry belongs in the operator's installation record.
+See [Cloudflare service tokens](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/).
+
 The DGX operator wrapper reads the existing web runtime's database credential
 in-process, checks that the configured database target still matches the
 public website, binds the worker config, and suppresses event-driven workflow
@@ -148,9 +198,9 @@ launches in that controller process. It does not alter the web process's
 configuration. Store credentials, configuration and operational state outside
 the repository with owner-only permissions. Never log the database URI.
 
-On a host with an active cron service, install an hourly entry invoking the
+On a host with an active cron service, install a five-minute entry invoking the
 wrapper and redirecting stdout/stderr to an owner-only log. An example schedule
-is `17 * * * *`; preserve any other existing crontab entries. Run the exact
+is `*/5 * * * *`; preserve any other existing crontab entries. Run the exact
 entry manually before installation. No Codex app session or SSH connection
 needs to remain open. The controller uses a nonblocking file lock and passes
 it to its child so concurrent invocations do not start overlapping work.

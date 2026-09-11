@@ -25,6 +25,10 @@ class DeploymentError(RuntimeError):
     """A deployment precondition or verification failed."""
 
 
+class HealthAccessError(DeploymentError):
+    """Health authentication needs repair; retrying cannot grant access."""
+
+
 @dataclass(frozen=True)
 class DeploymentResult:
     primary_root: Path
@@ -108,9 +112,7 @@ def _require_clean(root: Path, label: str) -> None:
         if line.startswith("?? "):
             relative_path = _porcelain_status_path(line)
             if relative_path:
-                candidate = Path(
-                    os.path.abspath(root / relative_path.rstrip("/"))
-                )
+                candidate = Path(os.path.abspath(root / relative_path.rstrip("/")))
                 if candidate in nested_worktree_roots:
                     continue
         blocking_entries.append(line)
@@ -133,6 +135,7 @@ def _prepare_primary(
     *,
     remote: str,
     branch: str,
+    expected_commit: str | None = None,
 ) -> str:
     actual_root = Path(_git(primary_root, "rev-parse", "--show-toplevel")).resolve()
     if actual_root != primary_root:
@@ -152,6 +155,10 @@ def _prepare_primary(
     local_commit = _git(primary_root, "rev-parse", "HEAD")
     remote_ref = f"{remote}/{branch}"
     target_commit = _git(primary_root, "rev-parse", remote_ref)
+    if expected_commit is not None and target_commit != expected_commit:
+        raise DeploymentError(
+            f"Requested commit {expected_commit} is no longer {remote_ref} ({target_commit})"
+        )
     if local_commit != target_commit:
         merge_base = _git(primary_root, "merge-base", local_commit, target_commit)
         if merge_base != local_commit:
@@ -172,7 +179,9 @@ def _prepare_primary(
 
 def _validate_runtime(primary_root: Path, runtime_root: Path) -> None:
     if runtime_root == primary_root:
-        raise DeploymentError("Runtime worktree must be distinct from the primary checkout")
+        raise DeploymentError(
+            "Runtime worktree must be distinct from the primary checkout"
+        )
     if not runtime_root.is_dir():
         raise DeploymentError(
             "Dedicated runtime worktree does not exist or is not a directory: "
@@ -206,7 +215,9 @@ def _prepare_runtime(
             f"Runtime checkout is at {runtime_commit}, expected {target_commit}"
         )
     if _git(runtime_root, "symbolic-ref", "-q", "HEAD", check=False):
-        raise DeploymentError("Runtime checkout must be detached, but it is on a branch")
+        raise DeploymentError(
+            "Runtime checkout must be detached, but it is on a branch"
+        )
 
 
 def _reconcile_startup_seed_materialisations(
@@ -239,16 +250,25 @@ def _reconcile_startup_seed_materialisations(
             "Startup seed reconciliation did not return a JSON receipt"
         ) from exc
     if not isinstance(payload, dict) or payload.get("success") is not True:
-        raise DeploymentError(
-            f"Startup seed reconciliation was not ready: {payload!r}"
-        )
+        raise DeploymentError(f"Startup seed reconciliation was not ready: {payload!r}")
     return payload
 
 
-def _read_health(url: str) -> dict[str, Any]:
+class _NoHealthRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _read_health(url: str, headers: dict[str, str] | None = None) -> dict[str, Any]:
     try:
-        with urllib.request.urlopen(url, timeout=5) as response:
+        opener = urllib.request.build_opener(_NoHealthRedirect())
+        request = urllib.request.Request(url, headers=headers or {})
+        with opener.open(request, timeout=5) as response:
             payload = json.load(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code in {301, 302, 303, 307, 308, 401, 403}:
+            raise HealthAccessError(f"Health access returned HTTP {exc.code}") from exc
+        raise DeploymentError(f"Health read returned HTTP {exc.code}") from exc
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         raise DeploymentError(f"Health read failed: {exc}") from exc
     if not isinstance(payload, dict):
@@ -374,7 +394,9 @@ def _health_error(payload: dict[str, Any], target_commit: str) -> str | None:
         return f"running git_dirty={version.get('git_dirty')!r}"
 
     authority = payload.get("runtime_authority")
-    durable = authority.get("durable_workflows") if isinstance(authority, dict) else None
+    durable = (
+        authority.get("durable_workflows") if isinstance(authority, dict) else None
+    )
     if not isinstance(durable, dict):
         return "durable workflow health missing"
     required = ("database_connected", "worker_running", "scheduler_running")
@@ -403,15 +425,18 @@ def _wait_for_verified_health(
     url: str,
     target_commit: str,
     timeout_seconds: int,
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
     last_error = "health endpoint not read"
     while time.monotonic() < deadline:
         try:
-            payload = _read_health(url)
+            payload = _read_health(url, headers) if headers else _read_health(url)
             last_error = _health_error(payload, target_commit) or ""
             if not last_error:
                 return payload
+        except HealthAccessError:
+            raise
         except DeploymentError as exc:
             last_error = str(exc)
         time.sleep(1)
@@ -471,10 +496,15 @@ def deploy(
     branch: str = "main",
     health_url: str = "http://127.0.0.1:5001/health",
     health_timeout_seconds: int = 960,
+    expected_commit: str | None = None,
 ) -> DeploymentResult:
     primary_root = primary_root.resolve()
     runtime_root = runtime_root.resolve()
-    target_commit = _prepare_primary(primary_root, remote=remote, branch=branch)
+    target_commit = _prepare_primary(
+        primary_root, remote=remote, branch=branch, expected_commit=expected_commit
+    )
+    parsed_health = urllib.parse.urlparse(health_url)
+    port = str(parsed_health.port or (443 if parsed_health.scheme == "https" else 80))
     current_launcher = primary_root / "run.sh"
     if not current_launcher.is_file():
         raise DeploymentError(f"Current launcher missing: {current_launcher}")
@@ -490,7 +520,7 @@ def deploy(
     stop_environment = os.environ.copy()
     stop_environment["VON_LAUNCHER_ROOT"] = str(runtime_root)
     _run(
-        ["bash", current_launcher, "stop", "-NoBrowser"],
+        ["bash", current_launcher, "stop", "-Port", port, "-NoBrowser"],
         cwd=runtime_root,
         capture_output=False,
         env=stop_environment,
@@ -505,6 +535,8 @@ def deploy(
             "bash",
             launcher,
             "start",
+            "-Port",
+            port,
             "-NoBrowser",
             "-HealthTimeoutSec",
             str(health_timeout_seconds),
@@ -544,6 +576,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime-worktree", type=Path, required=True)
     parser.add_argument("--remote", default="origin")
     parser.add_argument("--branch", default="main")
+    parser.add_argument("--expected-commit")
     parser.add_argument("--health-url", default="http://127.0.0.1:5001/health")
     parser.add_argument("--health-timeout-seconds", type=int, default=960)
     return parser
@@ -562,6 +595,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             branch=args.branch,
             health_url=args.health_url,
             health_timeout_seconds=args.health_timeout_seconds,
+            expected_commit=args.expected_commit,
         )
     except DeploymentError as exc:
         print(f"deploy-main: ERROR: {exc}", file=sys.stderr)
