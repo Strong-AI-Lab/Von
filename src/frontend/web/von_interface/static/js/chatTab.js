@@ -1,10 +1,11 @@
+import { createChatSteeringControls } from './components/chatSteeringControls.js';
 import { setButtonLabel } from './utils/buttonLabel.js';
 import { createConversationTray } from './components/conversationTray.js';
 import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_NARROW_QUERY, loadConversationLayoutPreferences, normaliseConversationLayout, saveConversationLayoutPreference } from './utils/conversationLayoutPreferences.js';
 import { createVoiceConversation } from './voiceConversation.js';
 import { getClientContext } from './clientContext.js';
 import { createDictationController } from './dictation.js';
-import { renderImageAttachments, renderImageComposer, uploadConversationImage, imagesBlocked, takeImages, restoreImages, descriptorsForIds } from "./utils/conversationImages.js";
+import { renderImageAttachments, renderImageComposer, uploadConversationImage, imagesBlocked, imageItems, takeImages, restoreImages, descriptorsForIds } from "./utils/conversationImages.js";
 // Chat Tab Module
 import { annotateTurn, fetchWithTimeout, getJsonDetailed, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import {
@@ -6664,6 +6665,9 @@ function updateExternalConversationUi() {
     updateSendButtonForCurrentChatState();
 }
 
+let chatSteeringControls = null;
+let chatSteeringSendButton = null;
+
 function updateSendButtonForCurrentChatState() {
     const sendButton = document.getElementById('sendButton');
     if (!sendButton) {
@@ -6703,6 +6707,34 @@ function updateSendButtonForCurrentChatState() {
         || conceptQaBusy
         || conceptQaTerminal
         || conceptQaAwaitingInitialQuestion;
+    if (chatSteeringSendButton !== sendButton) {
+        chatSteeringControls?.dispose();
+        chatSteeringSendButton = sendButton;
+        chatSteeringControls = createChatSteeringControls({
+            sendButton,
+            request: fetchChatPromptQueueJson,
+            getDraft: () => getPromptInputElement()?.value || '',
+            clearDraft: (submitted) => {
+                const input = getPromptInputElement();
+                if (input?.value === submitted) setPromptComposerValue('', { promptInput: input });
+            },
+            createId: createClientRequestId
+        });
+    }
+    const steeringRecord = queuedChatPrompts.find(entry =>
+        entry.sessionId === activeChatSessionId && entry.status === CHAT_PROMPT_QUEUE_STATUS_IN_PROGRESS
+        && entry.queueId && entry.attemptId);
+    const liveRequest = getLiveChatRequestForSession();
+    const steeringTarget = steeringRecord || (liveRequest?.promptQueueRecordId && liveRequest?.attemptId
+        ? { queueId: liveRequest.promptQueueRecordId, attemptId: liveRequest.attemptId } : null);
+    chatSteeringControls.update({
+        scopeKey: `${chatOrganisationGeneration}:${activeChatSessionId}`,
+        target: readOnly || conceptQaSession ? null : steeringTarget,
+        disabled: sendButton.disabled || pendingChatOrganisationSwitchId !== null
+            || pendingFileCopyConceptIdsBySession.has(getPendingFileCopySessionKey(activeChatSessionId))
+            || imageItems(activeChatSessionId).length > 0
+            || !!dictationController?.hasPendingInput()
+    });
     sendButton.setAttribute(
         'aria-busy',
         chatCreationInFlight || queueSubmissionInFlight || conceptQaBusy ? 'true' : 'false'
@@ -6744,7 +6776,9 @@ function updateSendButtonForCurrentChatState() {
     } else if (uploadInFlight) {
         sendButton.title = ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE;
     } else {
-        sendButton.title = sessionBusy ? 'Queue Prompt' : 'Send Prompt';
+        sendButton.title = sessionBusy
+            ? 'Queue a separate request after the current turn finishes. Use Steer to guide the active turn.'
+            : 'Send Prompt';
     }
 }
 
@@ -37215,6 +37249,7 @@ function getQueuedChatPromptHeadsBySession() {
 }
 
 async function handleSendPrompt(options = {}) {
+    if (!options?.fromQueue && !options?.observeServerDispatch && chatSteeringControls?.isSending()) return;
     if (pendingChatOrganisationSwitchId !== null) {
         return;
     }
@@ -41965,6 +42000,9 @@ export function __testOnly_handleChatPromptQueueStorageEvent(event) {
     handleChatPromptQueueStorageEvent(event);
 }
 export function __testOnly_resetChatRequestState() {
+    chatSteeringControls?.dispose();
+    chatSteeringControls = null;
+    chatSteeringSendButton = null;
     if (conversationRuntimeCostState.handoverRetryTimerId) {
         clearTimeout(conversationRuntimeCostState.handoverRetryTimerId);
     }

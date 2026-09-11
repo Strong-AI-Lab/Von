@@ -6807,6 +6807,7 @@ def execute_adaptive_turn(
     model_registry_snapshot: Any = None,
     learning_advice_projection: Mapping[str, Any] | None = None,
     model_request_observer: Callable[[Mapping[str, Any]], None] | None = None,
+    steering_reader: Callable[..., Sequence[Mapping[str, Any]]] | None = None,
     allow_represented_workflow_discovery: bool = True,
     allow_represented_tool_projection: bool = True,
     turn_budget_seconds: float | None = None,
@@ -9138,7 +9139,48 @@ def execute_adaptive_turn(
             },
         )
 
+    steering_received = False
+
+    def receive_steering(*, close_if_empty: bool = False) -> bool:
+        nonlocal continuation, pending_results, steering_received
+        if steering_reader is None:
+            return False
+        items = steering_reader(close_if_empty=close_if_empty)
+        if not items:
+            return False
+        if not steering_received:
+            current_context.append({"role": "user", "content": prompt})
+        for previous in extra_messages:
+            if previous not in current_context:
+                current_context.append(dict(previous))
+        steering_received = True
+        for item in items:
+            message = {
+                "role": "user",
+                "content": str(item["text"]),
+                "steering_submission_id": item["id"],
+            }
+            current_context.append(message)
+            extra_messages.append(message)
+            if final_context_base is not None:
+                final_context_base.append(dict(message))
+        # Rebuild from the complete local transcript, including prior tool
+        # receipts, so provider continuation state cannot hide the new input.
+        continuation = None
+        pending_results = []
+        _emit(
+            progress_tracker,
+            {
+                "status": "thinking",
+                "phase_label": "Steering received",
+                "result_summary": "New user guidance added to the active turn.",
+            },
+        )
+        return True
+
     while True:
+        _check_cancellation(progress_tracker)
+        receive_steering()
         model_call_sequence += 1
         model_call_id = f"{turn_id or 'adaptive-turn'}:llm:{model_call_sequence}"
         _check_cancellation(progress_tracker)
@@ -9226,7 +9268,7 @@ def execute_adaptive_turn(
             and _render_learning_advice_projection(prepared_learning_advice)
         )
         pending_elapsed_time_advisories.clear()
-        provider_prompt = "" if continuation is not None else prompt
+        provider_prompt = "" if continuation is not None or steering_received else prompt
         _observe_model_request(
             model_request_observer,
             model_call_id=model_call_id,
@@ -9769,6 +9811,8 @@ def execute_adaptive_turn(
             )
         if not calls:
             if response.text_response.strip():
+                if receive_steering(close_if_empty=True):
+                    continue
                 return finish(response.text_response.strip())
             if provider_tool_call_diagnostics:
                 available_tool_names = [tool.name for tool in request_tools]
