@@ -18268,3 +18268,100 @@ body.settings-body {
     margin-block: 0.3rem;
 }
 .chat-steering-feedback .btn-mini { flex-shrink: 0; }
+/* Phone and folded-device shell. Keep the existing desktop layout and DOM;
+   resizing must never recreate a conversation or its draft. */
+@media (max-width: 800px), (max-width: 1024px) and (pointer: coarse) {
+    .von-authentication-gate {
+        min-height: 100dvh;
+        padding: max(20px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
+            max(20px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+    }
+
+    .global-header {
+        padding-top: env(safe-area-inset-top);
+    }
+
+    .global-header-shell {
+        gap: 8px;
+        padding: 6px max(8px, env(safe-area-inset-right)) 6px max(8px, env(safe-area-inset-left));
+    }
+
+    .global-header .main-container { flex-basis: 25%; }
+    .global-header #vontologySearchInput { font-size: 16px; min-height: 44px; }
+    .tab-container { padding-left: max(8px, env(safe-area-inset-left)); }
+    .tab-button { min-height: 44px; box-sizing: border-box; }
+
+    .tab-content-area {
+        padding: 0 max(8px, env(safe-area-inset-right)) var(--von-fixed-footer-clearance, 64px)
+            max(8px, env(safe-area-inset-left));
+    }
+
+    #chatTab > .content-wrapper { width: 100%; }
+    .chat-session-tabs-row { flex-wrap: wrap; gap: 4px; }
+    .chat-session-tabs { flex-basis: 100%; }
+    .chat-session-tab { min-height: 44px; }
+    .chat-session-history-summary { max-width: 100%; }
+    .chat-session-history-controls { flex-wrap: wrap; }
+    .chat-session-history-controls button { min-height: 44px; }
+    .chat-conversation-masthead { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+    .chat-header-controls {
+        flex-wrap: nowrap;
+        justify-content: flex-start;
+        overflow-x: auto;
+        padding-bottom: 4px;
+    }
+    .chat-conversation-masthead .chat-export-btn { flex-shrink: 0; min-height: 44px; min-width: 44px; }
+    .scrollable-field { overflow-wrap: anywhere; }
+    .scrollable-field pre { max-width: 100%; overflow-x: auto; }
+    .scrollable-field img { max-width: 100%; height: auto; }
+
+    .chat-composer {
+        bottom: calc(var(--von-fixed-footer-clearance, 64px) + var(--von-keyboard-inset, 0px));
+        max-height: calc(var(--von-viewport-height, 100dvh) - 60px);
+        overflow-y: auto;
+    }
+    #promptInput { font-size: 16px; }
+    .chat-composer-more-actions > summary { min-height: 44px; display: flex; align-items: center; }
+
+    .footer-container {
+        /* Let the fixed organisation menu use the viewport, not a filter-created containing block. */
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+        bottom: var(--von-keyboard-inset, 0px);
+        padding: 4px max(8px, env(safe-area-inset-right)) max(4px, env(safe-area-inset-bottom))
+            max(8px, env(safe-area-inset-left));
+        gap: 8px;
+    }
+    .footer-info {
+        min-width: 0;
+        white-space: nowrap;
+        overflow-x: auto;
+    }
+    .footer-container > :not(#modelInfoFooter) { display: none; }
+    .footer-info button, .footer-org-menu-trigger { min-height: 44px; }
+    .footer-org-menu {
+        position: fixed;
+        left: max(8px, env(safe-area-inset-left));
+        right: max(8px, env(safe-area-inset-right));
+        bottom: calc(var(--von-fixed-footer-clearance, 64px) + var(--von-keyboard-inset, 0px));
+        width: auto;
+        max-width: none;
+        max-height: calc(var(--von-viewport-height, 100dvh) - var(--von-fixed-footer-clearance, 64px) - 16px);
+        overflow-y: auto;
+    }
+
+    .tab-content.dynamic-concept-tab { width: 100% !important; min-width: 0; }
+    .concept-header { flex-wrap: wrap; }
+    .dynamic-concept-tab button, .dynamic-concept-tab input, .dynamic-concept-tab select {
+        min-height: 44px;
+    }
+    .dynamic-concept-tab input, .dynamic-concept-tab select, .dynamic-concept-tab textarea {
+        font-size: 16px; max-width: 100%; box-sizing: border-box;
+    }
+    .dynamic-concept-tab .round-icon-button { min-width: 44px; }
+    .settings-container { padding: 12px; }
+    .settings-container select, .settings-container input[type="text"], .settings-container textarea {
+        max-width: 100%; min-width: 0; box-sizing: border-box; font-size: 16px;
+    }
+    .settings-container button, .settings-container select { min-height: 44px; }
+}
