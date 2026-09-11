@@ -1,3 +1,4 @@
+import { setButtonLabel } from './utils/buttonLabel.js';
 import { createConversationTray } from './components/conversationTray.js';
 import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_NARROW_QUERY, loadConversationLayoutPreferences, normaliseConversationLayout, saveConversationLayoutPreference } from './utils/conversationLayoutPreferences.js';
 import { createVoiceConversation } from './voiceConversation.js';
@@ -6700,22 +6701,22 @@ function updateSendButtonForCurrentChatState() {
         chatCreationInFlight || queueSubmissionInFlight || conceptQaBusy ? 'true' : 'false'
     );
     if (chatCreationInFlight) {
-        sendButton.textContent = 'Creating conversation…';
+        setButtonLabel(sendButton, 'Creating conversation…');
         sendButton.title = 'Waiting for the new conversation to be ready.';
         return;
     }
     if (readOnly) {
-        sendButton.textContent = 'Read-only import';
+        setButtonLabel(sendButton, 'Read-only import');
         sendButton.title = 'Continue this imported snapshot before sending a new message.';
         return;
     }
     if (conceptQaSession) {
         if (conceptQaTerminal) {
-            sendButton.textContent = `Q&A ${conceptQaSession.lifecycle}`;
+            setButtonLabel(sendButton, `Q&A ${conceptQaSession.lifecycle}`);
         } else if (conceptQaAwaitingInitialQuestion) {
-            sendButton.textContent = 'Retry question first';
+            setButtonLabel(sendButton, 'Retry question first');
         } else {
-            sendButton.textContent = conceptQaBusy ? 'Saving Q&A…' : 'Submit answer';
+            setButtonLabel(sendButton, conceptQaBusy ? 'Saving Q&A…' : 'Submit answer');
         }
         if (conceptQaAwaitingInitialQuestion) {
             sendButton.title = 'Return to the concept card and retry the initial question before answering.';
@@ -6726,9 +6727,9 @@ function updateSendButtonForCurrentChatState() {
             : (conceptQaBusy ? 'Saving this turn and its representation receipts.' : 'Submit this answer to concept Q&A.');
         return;
     }
-    sendButton.textContent = queueSubmissionInFlight
+    setButtonLabel(sendButton, queueSubmissionInFlight
         ? 'Queueing…'
-        : (sessionBusy ? 'Queue Prompt' : 'Send Prompt');
+        : (sessionBusy ? 'Queue Prompt' : 'Send Prompt'));
     if (queueSubmissionInFlight) {
         sendButton.title = 'Saving this prompt to the conversation queue.';
     } else if (imagePreparationBlocked && !uploadInFlight) {
@@ -6736,7 +6737,7 @@ function updateSendButtonForCurrentChatState() {
     } else if (uploadInFlight) {
         sendButton.title = ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE;
     } else {
-        sendButton.removeAttribute('title');
+        sendButton.title = sessionBusy ? 'Queue Prompt' : 'Send Prompt';
     }
 }
 
@@ -31036,7 +31037,8 @@ function ensureScrollToEndButton(scrollableField = null) {
         return null;
     }
 
-    const controlHost = targetField.closest('.content-wrapper') || targetField.parentElement;
+    const wrapper = targetField.closest('.content-wrapper') || targetField.parentElement;
+    const controlHost = wrapper?.querySelector('.chat-composer') || wrapper;
     if (!(controlHost instanceof HTMLElement)) {
         return null;
     }
@@ -34290,6 +34292,7 @@ export function initializeChatTab() {
             getContext: getDictationContext,
             fetchImpl: (url, options = {}) => fetch(url, { ...options, headers: buildChatFetchHeaders(options.headers) }),
             setValue: value => setPromptComposerValue(value, { promptInput }),
+            onAlternateClick: () => { void voiceConversation?.start(); },
             onStart: () => { voiceConversation?.end(); stopSpeaking(); clearActiveTtsUi(); }
         });
     }
@@ -34298,6 +34301,7 @@ export function initializeChatTab() {
     const voiceButton = document.getElementById('voiceConversationButton');
     if (voiceButton) voiceConversation = createVoiceConversation({
         button: voiceButton, status: document.getElementById('voiceConversationStatus'),
+        onActiveChange: active => dictationController?.setVoiceActive(active),
         getContext: getDictationContext,
         fetchImpl: (url, options = {}) => fetch(url, { ...options, headers: buildChatFetchHeaders(options.headers) }),
         onStart: async () => {

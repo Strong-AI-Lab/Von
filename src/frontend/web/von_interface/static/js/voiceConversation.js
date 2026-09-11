@@ -1,7 +1,7 @@
 import { createStreamingInput, createSpeechPlayback } from './streamingSpeech.js';
 import { createSpeechReporter } from './clientContext.js';
 
-export function createVoiceConversation({ button, status, getContext, onSubmit, onStart = () => {},
+export function createVoiceConversation({ button, status, getContext, onSubmit, onStart = () => {}, onActiveChange = () => {},
     fetchImpl = (...args) => fetch(...args), root = globalThis }) {
     let session = null, disposed = false, starting = false, generation = 0;
     const playback = createSpeechPlayback({ fetchImpl, root,
@@ -16,12 +16,14 @@ export function createVoiceConversation({ button, status, getContext, onSubmit, 
         old?.reporter.event('ended', { reason: 'ended' });
         old?.input.cancel(); playback.stop('ended');
         session = null;
+        onActiveChange(false);
         button.textContent = 'Start voice'; button.setAttribute('aria-pressed', 'false');
         status.textContent = message;
     }
     async function start() {
         if (session || starting) return end();
         starting = true; const token = ++generation;
+        onActiveChange(true);
         button.textContent = 'End voice'; button.setAttribute('aria-pressed', 'true');
         // Resume audio in the initiating gesture, before permission/network awaits.
         try { await playback.unlock(); } catch (_) { if (generation === token) end('This browser could not open audio playback.'); return; }

@@ -1,3 +1,4 @@
+import { setButtonLabel } from './utils/buttonLabel.js';
 import { createStreamingInput } from './streamingSpeech.js';
 import { createSpeechReporter } from './clientContext.js';
 import { isSpeechRecognitionSupported, startSpeechRecognition, stopSpeaking } from './speech.js';
@@ -34,7 +35,7 @@ function microphoneError(error) {
 // One controller per composer. A capture belongs to the conversation and actor
 // that started it. Cancelling fences permission, recognition and fetch callbacks.
 export function createDictationController({ input, button, status, cancelButton, retryButton,
-    engineSelect, getContext, setValue, onStart = stopSpeaking, fetchImpl = (...args) => fetch(...args),
+    engineSelect, getContext, setValue, onStart = stopSpeaking, onAlternateClick = null, fetchImpl = (...args) => fetch(...args),
     root = globalThis }) {
     let current = null;
     let capability = null;
@@ -42,14 +43,38 @@ export function createDictationController({ input, button, status, cancelButton,
     let disposed = false;
     const attemptIds = [];
     let engineChosen = false;
+    let voiceActive = false;
+    let pressTimer = null, touchOrigin = null, suppressClick = false;
+    const clearPress = () => { clearTimeout(pressTimer); pressTimer = null; touchOrigin = null; };
+    const pointerDown = event => {
+        clearPress(); suppressClick = false;
+        if (event.pointerType !== 'touch' || !onAlternateClick || button.disabled) return;
+        touchOrigin = { x: event.clientX, y: event.clientY };
+        pressTimer = setTimeout(() => {
+            pressTimer = null;
+            suppressClick = true;
+            onAlternateClick();
+        }, 600);
+    };
+    const pointerMove = event => {
+        if (touchOrigin && Math.hypot(event.clientX - touchOrigin.x, event.clientY - touchOrigin.y) > 10) clearPress();
+    };
+    const contextMenu = event => { if (touchOrigin || suppressClick) event.preventDefault(); };
 
     function render(next, message = '') {
         state = next;
         current?.reporter?.event('state', { state: next });
         const busy = ['requesting', 'recording', 'transcribing'].includes(next);
-        button.textContent = next === 'recording' ? 'Finish dictation' : next === 'transcribing' ? 'Transcribing…' : next === 'requesting' ? 'Opening microphone…' : 'Dictate';
+        setButtonLabel(button, next === 'recording' ? 'Finish dictation' : next === 'transcribing' ? 'Transcribing…' : next === 'requesting' ? 'Opening microphone…' : voiceActive ? 'Switch to dictation' : 'Dictate');
+        button.title = next === 'recording'
+            ? 'Click to finish dictation and add it to your draft. Shift-click or long-press to start a voice conversation.'
+            : voiceActive
+                ? 'Voice conversation is active. Click to switch to dictation. Shift-click or long-press to end voice.'
+                : 'Click to dictate into your draft. Shift-click or long-press to start a voice conversation: speech is sent automatically and Von replies aloud.';
+        button.classList.toggle('dictation-recording', next === 'recording');
+        button.classList.toggle('active-voice', voiceActive);
         button.disabled = next === 'transcribing' || next === 'requesting';
-        button.setAttribute('aria-pressed', String(next === 'recording'));
+        button.setAttribute('aria-pressed', String(next === 'recording' || voiceActive));
         button.classList.toggle('active-dictation', busy);
         status.textContent = message;
         cancelButton.hidden = !current;
@@ -67,6 +92,7 @@ export function createDictationController({ input, button, status, cancelButton,
     }
 
     function cancel() {
+        clearPress();
         const capture = current;
         current = null;
         if (capture) {
@@ -249,7 +275,11 @@ export function createDictationController({ input, button, status, cancelButton,
         }
     }
 
-    const click = () => { if (state === 'recording') void finish(); else void start(); };
+    const click = event => {
+        if (suppressClick) { suppressClick = false; event.preventDefault(); return; }
+        if (event.shiftKey && onAlternateClick) { onAlternateClick(); return; }
+        if (state === 'recording') void finish(); else void start();
+    };
     const retry = () => { if (current?.blob) {
         current.completion = new Promise(resolve => { current.resolve = resolve; });
         void transcribe(current);
@@ -258,6 +288,12 @@ export function createDictationController({ input, button, status, cancelButton,
     const chooseEngine = () => { engineChosen = true; };
     engineSelect.addEventListener('change', chooseEngine);
     button.addEventListener('click', click);
+    button.addEventListener('pointerdown', pointerDown);
+    button.addEventListener('pointermove', pointerMove);
+    button.addEventListener('pointerup', clearPress);
+    button.addEventListener('pointercancel', clearPress);
+    button.addEventListener('pointerleave', clearPress);
+    button.addEventListener('contextmenu', contextMenu);
     cancelButton.addEventListener('click', cancel);
     retryButton.addEventListener('click', retry);
     root.addEventListener?.('pagehide', cancel);
@@ -266,10 +302,17 @@ export function createDictationController({ input, button, status, cancelButton,
     root.document?.addEventListener('visibilitychange', visibility);
     render('idle');
     void refreshCapabilities();
-    return { cancel, finish, start, refreshCapabilities, getAttemptIds: () => [...attemptIds], clearAttemptIds: () => { attemptIds.length = 0; },
+    return { cancel, finish, start, refreshCapabilities,
+        setVoiceActive: active => { voiceActive = active; render(state, status.textContent); }, getAttemptIds: () => [...attemptIds], clearAttemptIds: () => { attemptIds.length = 0; },
         getState: () => state, hasPendingInput: () => !!current,
-        dispose: () => { cancel(); disposed = true;
+        dispose: () => { clearPress(); cancel(); disposed = true;
             engineSelect.removeEventListener('change', chooseEngine);
+            button.removeEventListener('pointerdown', pointerDown);
+            button.removeEventListener('pointermove', pointerMove);
+            button.removeEventListener('pointerup', clearPress);
+            button.removeEventListener('pointercancel', clearPress);
+            button.removeEventListener('pointerleave', clearPress);
+            button.removeEventListener('contextmenu', contextMenu);
             button.removeEventListener('click', click); cancelButton.removeEventListener('click', cancel);
             retryButton.removeEventListener('click', retry); root.removeEventListener?.('pagehide', cancel);
             root.removeEventListener?.('focus', refreshCapabilities);

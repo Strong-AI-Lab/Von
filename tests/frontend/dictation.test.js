@@ -4,10 +4,10 @@ const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve()
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { resolve, promise }; };
 
 describe('recorded dictation lifecycle', () => {
-    let controller, recorder, stopTrack, getUserMedia, fetchImpl, input, context, root, pending, buttons;
+    let controller, recorder, stopTrack, getUserMedia, fetchImpl, input, context, root, pending, buttons, onAlternateClick;
     beforeEach(async () => {
         recorder = undefined;
-        document.body.innerHTML = '<textarea></textarea><button id="dictate"></button><p></p><button id="cancel"></button><button id="retry"></button><select><option value="recorded">Recorded</option><option value="browser">Browser</option></select>';
+        document.body.innerHTML = '<textarea></textarea><button id="dictate"><svg class="microphone-icon"></svg><span class="button-label sr-only"></span></button><p></p><button id="cancel"></button><button id="retry"></button><select><option value="recorded">Recorded</option><option value="browser">Browser</option></select>';
         input = document.querySelector('textarea');
         input.value = 'Existing draft'; input.selectionStart = input.selectionEnd = input.value.length;
         context = { key: 'actor:conversation', text: 'Vontology and Wikidata', vocabulary: ['Vontology', 'Wikidata'], language: 'en-NZ' };
@@ -28,11 +28,57 @@ describe('recorded dictation lifecycle', () => {
         fetchImpl = jest.fn(async url => url.endsWith('capabilities')
             ? { ok: true, json: async () => ({ transcription: { available: true, max_audio_bytes: 24 * 1024 * 1024 } }) }
             : pending.promise);
+        onAlternateClick = jest.fn();
         buttons = [...document.querySelectorAll('button')];
-        controller = createDictationController({ input, button: buttons[0], status: document.querySelector('p'), cancelButton: buttons[1], retryButton: buttons[2], engineSelect: document.querySelector('select'), getContext: () => context, setValue: value => { input.value = value; }, onStart: jest.fn(), fetchImpl, root });
+        controller = createDictationController({ input, button: buttons[0], status: document.querySelector('p'), cancelButton: buttons[1], retryButton: buttons[2], engineSelect: document.querySelector('select'), getContext: () => context, setValue: value => { input.value = value; }, onStart: jest.fn(), onAlternateClick, fetchImpl, root });
         await flush();
     });
     afterEach(() => controller.dispose());
+    test('keeps the microphone icon and exposes recording state accessibly', async () => {
+        const icon = buttons[0].querySelector('svg');
+        await controller.start();
+        expect(buttons[0].querySelector('svg')).toBe(icon);
+        expect(buttons[0].textContent).toBe('Finish dictation');
+        expect(buttons[0].getAttribute('aria-pressed')).toBe('true');
+        expect(buttons[0].classList.contains('dictation-recording')).toBe(true);
+        controller.cancel();
+        expect(buttons[0].textContent).toBe('Dictate');
+        controller.setVoiceActive(true);
+        expect(buttons[0].classList.contains('active-voice')).toBe(true);
+        expect(buttons[0].title).toContain('end voice');
+    });
+    test('Shift-click selects voice without starting dictation', () => {
+        buttons[0].dispatchEvent(new MouseEvent('click', { shiftKey: true }));
+        expect(onAlternateClick).toHaveBeenCalledTimes(1);
+        expect(getUserMedia).not.toHaveBeenCalled();
+    });
+    test('touch long-press selects voice once and suppresses the following tap', () => {
+        jest.useFakeTimers();
+        const pointer = (type, x = 0) => {
+            const event = new Event(type);
+            Object.assign(event, { pointerType: 'touch', clientX: x, clientY: 0 });
+            buttons[0].dispatchEvent(event);
+        };
+        pointer('pointerdown');
+        jest.advanceTimersByTime(600);
+        pointer('pointerup'); buttons[0].click();
+        expect(onAlternateClick).toHaveBeenCalledTimes(1);
+        expect(getUserMedia).not.toHaveBeenCalled();
+        pointer('pointerdown'); pointer('pointerup'); buttons[0].click();
+        expect(getUserMedia).toHaveBeenCalledTimes(1);
+        jest.useRealTimers();
+    });
+    test.each(['pointercancel', 'pointerleave', 'pointermove'])('touch %s cancels the voice hold', type => {
+        jest.useFakeTimers();
+        for (const name of ['pointerdown', type]) {
+            const event = new Event(name);
+            Object.assign(event, { pointerType: 'touch', clientX: name === 'pointermove' ? 20 : 0, clientY: 0 });
+            buttons[0].dispatchEvent(event);
+        }
+        jest.advanceTimersByTime(1000);
+        expect(onAlternateClick).not.toHaveBeenCalled();
+        jest.useRealTimers();
+    });
     test('negotiates Safari MP4 and preserves edits made during transcription', async () => {
         await controller.start();
         const finish = controller.finish();
