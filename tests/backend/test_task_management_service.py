@@ -2100,6 +2100,50 @@ class TestTaskParityDatesAndEpic:
 
 
 class TestTaskExternalReferences:
+    @patch("src.backend.services.task_management_service._build_task_response")
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    def test_identity_lookup_preserves_alias_and_legacy_scope_without_hydration(
+        self, mock_repo: MagicMock, build_response: MagicMock
+    ) -> None:
+        mock_repo.find_one.side_effect = [
+            None,
+            {
+                "concept_id": "#V#legacy_task",
+                "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+            },
+        ]
+        result = find_task_by_external_reference(
+            source_system="jira",
+            external_id="OLD-1",
+            organisation_concept_id="#V#org",
+            include_details=False,
+        )
+        assert result == {"task_concept_id": "#V#legacy_task"}
+        build_response.assert_not_called()
+        calls = mock_repo.find_one.call_args_list
+        assert [call.args[0]["metadata.organisation_concept_id"] for call in calls] == [
+            "#V#org", None
+        ]
+        for call in calls:
+            assert {"metadata.external_references.jira.previous_issue_keys": "OLD-1"} in (
+                call.args[0]["$or"]
+            )
+            assert call.kwargs["projection"] == {
+                "concept_id": 1, "relationships.is_an_instance_of": 1
+            }
+
+    @pytest.mark.parametrize("doc", [None, {"concept_id": "#V#not_a_task"}])
+    @patch("src.backend.services.task_management_service._build_task_response")
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    def test_identity_lookup_does_not_return_missing_or_non_task_records(
+        self, mock_repo: MagicMock, build_response: MagicMock, doc
+    ) -> None:
+        mock_repo.find_one.return_value = doc
+        assert find_task_by_external_reference(
+            source_system="jira", external_id="PROJ-1", include_details=False
+        ) is None
+        build_response.assert_not_called()
+
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     @patch("src.backend.services.task_management_service.get_texts_for_concept")
     def test_find_task_by_external_reference_returns_task(

@@ -5435,7 +5435,9 @@ def find_task_by_external_reference(
     source_system: str,
     external_id: str,
     organisation_concept_id: str | None = None,
+    include_details: bool = True,
 ) -> Dict[str, Any] | None:
+    """Resolve the same visible task with optional response construction."""
     source_key = _normalise_external_reference_source_system(source_system)
     external_value = _normalise_external_reference_id(external_id)
 
@@ -5451,6 +5453,11 @@ def find_task_by_external_reference(
         ],
     }
     doc: Dict[str, Any] | None = None
+    lookup_options = (
+        {}
+        if include_details
+        else {"projection": {"concept_id": 1, "relationships.is_an_instance_of": 1}}
+    )
     if organisation_concept_id:
         org_id = _normalise_optional_concept_id(organisation_concept_id)
         if not org_id:
@@ -5459,18 +5466,20 @@ def find_task_by_external_reference(
             )
         scoped_query = dict(query_base)
         scoped_query[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = org_id
-        doc = ConceptsRepository.find_one(scoped_query)
+        doc = ConceptsRepository.find_one(scoped_query, **lookup_options)
         if not isinstance(doc, dict) or not _is_task_doc(doc):
             # Legacy imports were often unscoped; allow a constrained fallback
             # to null/absent organisation scope for idempotent repair runs.
             legacy_query = dict(query_base)
             legacy_query[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = None
-            doc = ConceptsRepository.find_one(legacy_query)
+            doc = ConceptsRepository.find_one(legacy_query, **lookup_options)
     else:
-        doc = ConceptsRepository.find_one(query_base)
+        doc = ConceptsRepository.find_one(query_base, **lookup_options)
 
     if not isinstance(doc, dict) or not _is_task_doc(doc):
         return None
+    if not include_details:
+        return {"task_concept_id": doc.get("concept_id")}
     return _build_task_response(doc)
 
 
