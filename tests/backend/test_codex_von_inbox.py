@@ -171,6 +171,39 @@ def test_reassigned_task_gets_honest_reply_without_blocking_inbox(fixture):
     assert not inbox.tick(config, api, 0)
 
 
+def test_two_queued_followups_preserve_both_coding_requests(fixture):
+    config, api, message, task, comments, sent, transitions, _ = fixture
+
+    def report():
+        state = {
+            "phase": "reporting",
+            "context": inbox.context_for(config, api, message),
+            "result": {
+                "answer": "I will make this change.",
+                "task_id": "#V#task",
+                "action": "resume_task",
+                "deployment_requested": False,
+            },
+        }
+        inbox.finish(
+            config, api, state, inbox.state_path(config, message["message_id"])
+        )
+
+    message["content"] = "Move the send controls beside the input."
+    report()
+    message["message_id"] = "#V#second_question"
+    message["content"] = "Also use compact identity labels."
+    api.messages.get_message_for_user = lambda mid, _: (
+        message if mid == message["message_id"] else list(sent.values())[-1]
+    )
+    report()
+    followup = inbox.task_followup(config, "#V#task")
+    assert "Move the send controls" in followup["content"]
+    assert "compact identity labels" in followup["content"]
+    assert followup["message_ids"] == ["#V#question", "#V#second_question"]
+    assert task["status"] == "pending" and len(comments) == 2
+
+
 def test_empty_old_or_foreign_mail_does_not_invoke_model(fixture, monkeypatch):
     config, api, message, _, comments, sent, _, rows = fixture
     rows[:] = [

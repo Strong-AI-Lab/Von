@@ -132,6 +132,8 @@ authority, records the Q/A note, and delivers an idempotent reply. The process
 does not execute coding or deployment work. Resumed coding starts on a later
 poll and uses the current follow-up as its instructions. An old deployment
 instruction does not authorise deployment of newly requested work.
+Several follow-ups queued before a coding run retain all their instructions
+and source-message identities, rather than replacing one another.
 
 For publication, authenticate GitHub CLI in a dedicated `GH_CONFIG_DIR` outside
 the repository, and set that directory in both the controller and Codex launcher.

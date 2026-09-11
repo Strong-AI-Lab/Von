@@ -252,6 +252,21 @@ def finish(config, api, state, path):
                     and task["status"] == "in_progress"
                 ):
                     raise RuntimeError("A different follow-up is already running")
+                if (
+                    prior
+                    and task["status"] == "pending"
+                    and prior["message_id"] != message["message_id"]
+                ):
+                    # Several messages can arrive before the next coding run.
+                    # Keep every queued instruction with its source identity.
+                    followup["content"] = (
+                        f"Earlier queued instructions ({prior['message_id']}):\n{prior['content']}"
+                        f"\n\nAdditional instructions ({message['message_id']}):\n{message['content']}"
+                    )
+                    followup["message_ids"] = [
+                        *prior.get("message_ids", [prior["message_id"]]),
+                        message["message_id"],
+                    ]
                 write_json(followup_path(config, task_id), followup)
                 if task["status"] != "pending":
                     api.tasks.update_task_status(
