@@ -644,7 +644,7 @@ function setupDynamicLayout() {
     );
     const tabHeight = measuredTabHeight;
     const contentTop = headerHeight + tabHeight + 8; // 8px margin
-    const footerSpace = 64; // Fixed footer overlap space
+    const footerSpace = Math.max(64, Math.ceil(document.querySelector('.footer-container')?.getBoundingClientRect().height || 0));
 
     document.documentElement.style.setProperty('--von-fixed-shell-height', `${contentTop}px`);
     document.documentElement.style.setProperty('--von-fixed-footer-clearance', `${footerSpace}px`);
@@ -706,6 +706,13 @@ function setupDynamicLayout() {
     } catch (e) {
       console.warn('Dynamic layout: Tab container ResizeObserver setup failed', e);
     }
+  }
+
+  const footerEl = document.querySelector('.footer-container');
+  if (footerEl && !footerEl._dynamicLayoutObserved && typeof ResizeObserver === 'function') {
+    const footerObserver = new ResizeObserver(() => requestAnimationFrame(updateLayout));
+    footerObserver.observe(footerEl);
+    footerEl._dynamicLayoutObserved = true;
   }
 
   if (!document._dynamicTabStripLayoutListenerBound) {

@@ -27799,7 +27799,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             tab.appendChild(preview);
         }
         tab.addEventListener('click', () => {
-            if (sid === activeChatSessionId) {
+            if (sid === activeChatSessionId && !activeMessageConversationId()) {
                 return;
             }
             void switchToChatSession(sid);
