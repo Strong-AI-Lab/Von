@@ -97,6 +97,7 @@ export function createVoiceConversation({ button, status, getContext, onSubmit, 
     root.addEventListener?.('pagehide', leave);
     root.document?.addEventListener('keydown', shortcut);
     return { start, end, reply, isActive: () => !!session,
+        clearStatus() { if (!session && !starting) status.textContent = ''; },
         dispose() { end(); disposed = true; playback.dispose(); button.removeEventListener('click', click);
             root.document?.removeEventListener('visibilitychange', hide); root.removeEventListener?.('pagehide', leave);
             root.document?.removeEventListener('keydown', shortcut); }

@@ -37304,6 +37304,13 @@ async function handleSendPrompt(options = {}) {
         return;
     }
 
+    // Retire notices from the previous speech turn before submitting another
+    // user prompt. Active capture/playback keeps its own live feedback.
+    if (!assistantOpening) {
+        voiceConversation?.clearStatus();
+        dictationController?.clearStatus();
+    }
+
     const conceptQaSession = getConceptQaSessionForChat(targetSessionId);
     if (conceptQaSession && directComposerSubmission && !assistantOpening) {
         await submitActiveConceptQaPrompt({
