@@ -4,6 +4,26 @@ const handlerPath = '../../src/frontend/web/von_interface/static/js/utils/select
 const decoratorPath = '../../src/frontend/web/von_interface/static/js/utils/textDecorator.js';
 
 describe('handleSelectConceptByIdDetail', () => {
+    test('a readable task title keeps the exact task identity when opening its panel', async () => {
+        const { handleSelectConceptByIdDetail, hydrateConceptCartouchesInRoot } = require(handlerPath);
+        const { createVontologyCartouche } = require(decoratorPath);
+        const taskId = '#V#task_agent_opaque_identifier';
+        const title = 'Implement slideable desktop conversation tray';
+        const cartouche = createVontologyCartouche(taskId);
+        document.body.appendChild(cartouche);
+        const deps = {
+            createOrActivateConceptTab: jest.fn(), closeDynamicConceptTab: jest.fn(), openTaskPanel: jest.fn(),
+            fetchFn: jest.fn(async () => ({ ok: true, json: async () => ({
+                concept_id: taskId, kind: 'individual', display_name: title,
+                raw_doc: { names: [{ name: title, language: 'en-NZ', type: 'NL' }], relationships: { is_an_instance_of: ['#V#task_specification'] } }
+            }) }))
+        };
+        await hydrateConceptCartouchesInRoot(document.body, { fetchFn: deps.fetchFn });
+        expect(cartouche.querySelector('.vontology-cartouche-name').textContent).toBe(title);
+        expect(cartouche.dataset.fullConceptId).toBe(taskId);
+        await handleSelectConceptByIdDetail({ conceptId: taskId, createConceptTab: true }, deps);
+        expect(deps.openTaskPanel).toHaveBeenCalledWith(taskId);
+    });
     test('a represented task opens the shared task panel; explicit concept presentation remains available', async () => {
         const { handleSelectConceptByIdDetail } = require(handlerPath);
         const deps = {
