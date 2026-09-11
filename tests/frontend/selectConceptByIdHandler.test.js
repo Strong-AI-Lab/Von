@@ -4,6 +4,19 @@ const handlerPath = '../../src/frontend/web/von_interface/static/js/utils/select
 const decoratorPath = '../../src/frontend/web/von_interface/static/js/utils/textDecorator.js';
 
 describe('handleSelectConceptByIdDetail', () => {
+    test('a represented task opens the shared task panel; explicit concept presentation remains available', async () => {
+        const { handleSelectConceptByIdDetail } = require(handlerPath);
+        const deps = {
+            createOrActivateConceptTab: jest.fn(), closeDynamicConceptTab: jest.fn(), openTaskPanel: jest.fn(),
+            fetchFn: jest.fn(async () => ({ ok: true, json: async () => ({ kind: 'individual', raw_doc: { relationships: { is_an_instance_of: ['#V#task_specification'] } } }) }))
+        };
+        await handleSelectConceptByIdDetail({ conceptId: '#V#example_task', createConceptTab: true }, deps);
+        expect(deps.openTaskPanel).toHaveBeenCalledWith('#V#example_task');
+        expect(deps.closeDynamicConceptTab).toHaveBeenCalledWith('#V#example_task');
+        deps.openTaskPanel.mockClear();
+        await handleSelectConceptByIdDetail({ conceptId: '#V#example_task', createConceptTab: true, presentation: 'concept' }, deps);
+        expect(deps.openTaskPanel).not.toHaveBeenCalled();
+    });
     beforeEach(() => {
         document.body.innerHTML = '<div></div>';
     });

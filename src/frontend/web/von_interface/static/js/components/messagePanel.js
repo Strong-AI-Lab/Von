@@ -10,6 +10,8 @@ import { getSessionScopedOrgId } from '../utils/sessionScopedStorage.js';
 import { hydrateConceptCartouchesInRoot } from '../utils/selectConceptByIdHandler.js';
 import { cartouchifyElementText } from '../utils/textDecorator.js';
 import { showToast } from '../utils/toast.js';
+import { buildMessageStreamReference } from '../utils/messageStreamReference.js';
+import { copyTextWithClipboardFallback } from '../utils/copyJsonButtonState.js';
 import {
     clearRecommendationReviewResults,
     renderRecommendationReviewPayload,
@@ -136,7 +138,8 @@ function renderMessagesTabContent() {
             </div>
             <div class="messages-main">
                 <div id="messageViewHeader" class="message-view-header hidden">
-                    <span id="conversationTitle" class="conversation-title">Select a conversation</span>
+                    <span id="conversationTitle" class="conversation-title" tabindex="0">Select a conversation</span>
+                    <button id="messageTaskPanelBtn" class="chat-export-btn" type="button" title="Open tasks panel" aria-label="Tasks">📋</button>
                     <button id="refreshMessagesBtn" class="message-refresh-btn" type="button" title="Refresh" aria-label="Refresh messages">
                         ${renderMessagePanelIcon('refresh')}
                     </button>
@@ -305,6 +308,7 @@ async function loadMessageThreads() {
     try {
         const response = await getJson('/api/messages/threads?limit=20');
         _threads = response.threads || [];
+        _currentUserId = response.current_user_id || null;
         renderThreadList();
         autoOpenUserId = resolveStoredReplyAttemptAutoOpenUserId()
             || resolveAutoOpenThreadUserId();
@@ -392,7 +396,7 @@ function renderThreadList() {
         const userId = getThreadUserId(thread);
 
         html += `
-            <div class="message-thread-item" data-user-id="${escapeHtml(userId)}"
+            <div class="message-thread-item" tabindex="0" data-user-id="${escapeHtml(userId)}"
                  title="Conversation with ${escapeHtml(displayName)}">
                 <div class="thread-avatar">${getInitials(displayName)}</div>
                 <div class="thread-info">
@@ -411,7 +415,9 @@ function renderThreadList() {
 
     // Attach click handlers
     threadListEl.querySelectorAll('.message-thread-item').forEach(item => {
-        item.addEventListener('click', () => {
+        bindMessageStreamMenu(item, () => item.dataset.userId);
+        item.addEventListener('click', (event) => {
+            if (event.ctrlKey) return;
             const userId = item.dataset.userId;
             if (userId) {
                 selectConversation(userId);
@@ -458,9 +464,52 @@ async function selectConversation(userId) {
     if (header) header.classList.remove('hidden');
     if (compose) compose.classList.remove('hidden');
     if (title) title.textContent = `Conversation with ${formatUserName(userId)}`;
+    if (title && !title.dataset.menuBound) {
+        bindMessageStreamMenu(title, () => _currentConversationUserId);
+        title.dataset.menuBound = 'true';
+    }
+    const taskButton = _messagesContainer?.querySelector('#messageTaskPanelBtn');
+    if (taskButton) taskButton.onclick = () => void openMessageTasks();
 
     // Load the conversation
     await loadConversation(userId);
+}
+
+async function openMessageTasks() {
+    const { showTaskPanel } = await import('./taskPanel.js');
+    const taskIds = [...(_messagesContainer?.querySelectorAll('[data-task-concept="true"]') || [])]
+        .map(element => element.dataset.fullConceptId);
+    await showTaskPanel({ taskIds, sessionId: null });
+}
+
+function bindMessageStreamMenu(element, getOtherUserId) {
+    const open = async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const otherUserId = getOtherUserId();
+        const userId = _currentUserId;
+        if (!otherUserId || !userId) return;
+        const thread = _threads.find(row => getThreadUserId(row) === otherUserId);
+        const messages = otherUserId === _currentConversationUserId ? _currentMessages : [thread?.last_message].filter(Boolean);
+        const payload = buildMessageStreamReference({ currentUserId: userId, otherUserId, messages, displayName: `Conversation with ${formatUserName(otherUserId)}` });
+        const { openChatSessionMenu } = await import('../chatTab.js');
+        if (!element.isConnected || _currentUserId !== userId) return;
+        const rect = element.getBoundingClientRect();
+        openChatSessionMenu(event.clientX || rect.left, event.clientY || rect.bottom, [{
+            label: 'Copy conversation reference',
+            onClick: async () => {
+                if (_currentUserId !== userId) return;
+                const copied = await copyTextWithClipboardFallback(JSON.stringify(payload, null, 2));
+                showToast(copied ? 'Copied message conversation reference.' : 'Failed to copy conversation reference.', copied ? 'success' : 'error');
+            }
+        }], { returnFocus: element, focusFirst: true });
+    };
+    element.addEventListener('contextmenu', open);
+    element.addEventListener('click', event => { if (event.ctrlKey) void open(event); });
+    element.addEventListener('keydown', event => {
+        if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) void open(event);
+        else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); void selectConversation(getOtherUserId()); }
+    });
 }
 
 /**

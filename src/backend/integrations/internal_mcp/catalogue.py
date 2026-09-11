@@ -6875,6 +6875,7 @@ def _message_list_direct(**kwargs):
         thread_id=kwargs.get("thread_id"),
         limit=limit,
         skip=offset,
+        other_user_id=kwargs.get("other_user_concept_id"),
     )
     projected = [project_direct_message(message) for message in messages]
     return {
@@ -13094,6 +13095,7 @@ def _message_list_direct_input_schema() -> Schema:
             "include_sent": (bool, type(None)),
             "include_received": (bool, type(None)),
             "thread_id": (str, type(None)),
+            "other_user_concept_id": (str, type(None)),
             "limit": (int, type(None)),
             "offset": (int, type(None)),
             "acting_user_concept_id": (str, type(None)),
@@ -13102,7 +13104,8 @@ def _message_list_direct_input_schema() -> Schema:
         },
         allow_unknown=False,
         description=(
-            "List the authenticated actor's sent and received internal direct messages."
+            "List the authenticated actor's sent and received internal direct messages, "
+            "optionally narrowed to a conversation with other_user_concept_id."
         ),
     )
 

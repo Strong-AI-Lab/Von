@@ -28181,7 +28181,7 @@ function populateChatSessionMenu(items) {
     return menu;
 }
 
-function openChatSessionMenu(x, y, items, options = {}) {
+export function openChatSessionMenu(x, y, items, options = {}) {
     if (!Array.isArray(items) || items.length === 0) {
         return;
     }

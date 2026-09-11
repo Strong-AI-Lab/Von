@@ -437,7 +437,8 @@ async function fetchConceptMetadata(conceptId, fetchFn) {
             bestName: bestName ? String(bestName) : null,
             shortestName: shortestName ? String(shortestName) : null,
             kind: json?.kind || json?.computed_kind || null,
-            names: names || null
+            names: names || null,
+            isTask: (json?.raw_doc?.relationships?.is_an_instance_of || []).includes('#V#task_specification')
         };
     } catch (_) {
         return null;
@@ -470,6 +471,7 @@ function updateCartouchesForConcept(conceptId, metadata) {
                 kindEl.textContent = formatKindLabel(kind);
             }
             el.dataset.kind = kind;
+            el.dataset.taskConcept = metadata.isTask ? 'true' : 'false';
             applyCartoucheAppearance(el, prefs);
         } catch (_) {
             // Ignore per-cartouche update failures.
@@ -1113,6 +1115,7 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
     // Normal click: open in background.
     // Shift-click: open and switch to it.
     const shouldActivate = !!modifierKeys.shiftKey;
+    const hadConceptTab = [...document.querySelectorAll('.tab-button')].some(tab => tab.dataset.conceptId === id);
     const openConceptTab = (displayName, tabKind = null, { forceKindUpdate = false } = {}) => {
         const openOptions = {};
         if (tabKind) {
@@ -1151,6 +1154,12 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
     if (exists) {
         const metadata = await fetchConceptMetadata(id, fetchFn);
         updateCartouchesForConcept(id, metadata);
+        if (metadata?.isTask && detail?.presentation !== 'concept') {
+            if (!hadConceptTab) deps?.closeDynamicConceptTab?.(id);
+            const openTask = deps?.openTaskPanel || (await import('../components/taskPanel.js')).openTaskInPanel;
+            await openTask(id);
+            return;
+        }
         const resolvedKind = metadata?.kind || kind || null;
         openConceptTab(metadata?.displayName || id, resolvedKind, {
             forceKindUpdate: !!resolvedKind

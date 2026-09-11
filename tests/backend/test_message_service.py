@@ -690,6 +690,40 @@ class TestGetMessage:
 class TestGetMessagesForUser:
     """Tests for get_messages_for_user function."""
 
+    def test_counterpart_filter_preserves_actor_mailbox(self, monkeypatch):
+        import mongomock
+        from src.backend.services import message_service as service
+
+        collection = mongomock.MongoClient().von_test.concepts
+        for ident, sender, recipient in [
+            ("out", "alice", "bob"),
+            ("in", "bob", "alice"),
+            ("private", "bob", "charlie"),
+            ("other", "alice", "charlie"),
+        ]:
+            collection.insert_one(
+                {
+                    "concept_id": ident,
+                    "relationships": {
+                        "is_an_instance_of": [service.MESSAGE_TYPE_CONCEPT_ID],
+                        service.PREDICATE_SENDER: [f"#V#{sender}"],
+                        service.PREDICATE_RECIPIENT: [f"#V#{recipient}"],
+                    },
+                }
+            )
+        monkeypatch.setattr(service, "get_concepts_collection", lambda: collection)
+        monkeypatch.setattr(service, "apply_concept_query_filter", lambda query: query)
+        assert {
+            row["concept_id"]
+            for row in service.get_messages_for_user("#V#alice", other_user_id="#V#bob")
+        } == {"in", "out"}
+        assert {
+            row["concept_id"]
+            for row in service.get_messages_for_user(
+                "#V#alice", include_sent=False, other_user_id="#V#bob"
+            )
+        } == {"in"}
+
     @patch("src.backend.services.message_service.get_concepts_collection")
     @patch("src.backend.services.message_service.apply_concept_query_filter")
     def test_get_messages_sent_and_received(
