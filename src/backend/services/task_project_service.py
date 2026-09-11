@@ -23,6 +23,20 @@ from .concept_service import (
 
 PROJECT_RECORD = "task_project"
 COLLECTION_RECORD = "task_collection"
+_PROJECT_LIST_FIELDS = (
+    "name",
+    "key",
+    "description",
+    "source_system",
+    "source_site",
+    "source_id",
+    "source_url",
+    "organisation_concept_id",
+    "domain_project_concept_id",
+    "collection_concept_ids",
+    "writer",
+    "cutover_state",
+)
 
 
 def _find_concept(concept_id):
@@ -60,10 +74,22 @@ def list_project_collections(project):
 
 
 def list_task_projects(*, limit=100, offset=0):
+    """List navigation metadata; archive details remain in get_task_project.
+
+    Retained source histories can grow independently of project navigation.
+    Do not load those histories and document manifests into every catalogue
+    response, where they can exceed the MCP transport's response size limit.
+    """
     query = {f"attributes.{PROJECT_RECORD}": {"$exists": True}}
     docs = ConceptsRepository.find(
         query,
-        projection={"concept_id": 1, "attributes.task_project": 1},
+        projection={
+            "concept_id": 1,
+            **{
+                f"attributes.{PROJECT_RECORD}.{field}": 1
+                for field in _PROJECT_LIST_FIELDS
+            },
+        },
         limit=max(1, min(int(limit), 200)),
         skip=max(0, int(offset)),
     )

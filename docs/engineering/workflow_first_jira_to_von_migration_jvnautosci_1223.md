@@ -98,6 +98,8 @@ to their retained original without needing Jira. Native MCP tools expose the
 same canonical services, including `task_list_projects`, `task_get_project`,
 `task_get_collection`, `task_get`, `task_search` and `task_get_source_archive`.
 `task_get` accepts legacy Jira keys as well as Von task concept IDs.
+Project listings return navigation metadata and descriptions; retrieve source
+archives, retained-document references and their histories with `task_get_project`.
 
 A local stdio connection can bind the trusted operator once in its server
 environment:
