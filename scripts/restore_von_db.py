@@ -87,11 +87,11 @@ def _load_receipt_if_present(path: Path) -> dict[str, Any] | None:
 def _decrypt_encrypted_zip(
     encrypted_path: Path, *, fernet_key: str, output_zip_path: Path
 ) -> Path:
-    from cryptography.fernet import Fernet
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
+    from src.backend.utils.fernet_file import decrypt_file
 
-    f = Fernet(fernet_key.encode("utf-8"))
-    encrypted_bytes = encrypted_path.read_bytes()
-    output_zip_path.write_bytes(f.decrypt(encrypted_bytes))
+    decrypt_file(encrypted_path, output_zip_path, key=fernet_key)
     return output_zip_path
 
 
