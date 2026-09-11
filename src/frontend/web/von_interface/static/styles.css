@@ -11675,6 +11675,10 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     font-weight: 600;
 }
 
+.composer-more-icon {
+    display: none;
+}
+
 .chat-composer-more-actions[open]>.button-row {
     justify-content: flex-end;
     margin-top: 8px;
@@ -11742,6 +11746,101 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 #promptInput,
 .prompt-input {
     margin-bottom: 8px;
+}
+
+/* Desktop: keep the draft and its controls on one row. Mobile retains the
+   existing stacked composer and inline disclosure. */
+@media (min-width: 801px) and (hover: hover) and (pointer: fine) {
+    .chat-composer {
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
+    }
+
+    .chat-composer>.prompt-input-wrapper,
+    .chat-composer #promptInput {
+        grid-column: 1;
+        grid-row: 1;
+        min-width: 0;
+        margin-bottom: 0;
+    }
+
+    .chat-composer-actions {
+        grid-column: 2;
+        grid-row: 1;
+        flex-wrap: nowrap;
+        align-items: flex-start;
+    }
+
+    .chat-composer-primary-actions {
+        width: 96px;
+    }
+
+    .chat-composer-primary-actions>button:not(.composer-icon-button) {
+        max-width: 100%;
+        white-space: normal;
+    }
+
+    .chat-composer-more-actions>summary {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        list-style: none;
+        background: #f1f5f9;
+    }
+
+    .chat-composer-more-actions>summary::-webkit-details-marker {
+        display: none;
+    }
+
+    .chat-composer-more-actions>summary:focus-visible {
+        outline: 3px solid #2563eb;
+        outline-offset: 3px;
+    }
+
+    .composer-more-label {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+
+    .composer-more-icon {
+        display: inline;
+        font-size: 24px;
+    }
+
+    .chat-composer-more-actions[open]>.button-row {
+        position: absolute;
+        bottom: calc(100% + 8px);
+        right: 0;
+        width: min(420px, calc(100vw - 48px));
+        max-height: min(55vh, 420px);
+        overflow-y: auto;
+        box-sizing: border-box;
+        margin: 0;
+        padding: 12px;
+        border: 1px solid #cbd5e1;
+        border-radius: 12px;
+        background: #fff;
+        box-shadow: 0 4px 18px rgba(15, 23, 42, 0.15);
+    }
+
+    .chat-composer>.chat-attachment-status,
+    .chat-composer>.speech-settings-note {
+        grid-column: 1 / -1;
+    }
+
+    .chat-composer>.speech-settings-note:empty {
+        display: none;
+    }
 }
 
 .chat-task-queue-panel {
