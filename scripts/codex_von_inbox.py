@@ -9,9 +9,19 @@ from datetime import datetime
 from pathlib import Path
 
 try:
-    from .codex_von_worker import authorised_task, fingerprint, write_json
+    from .codex_von_worker import (
+        authorised_task,
+        fingerprint,
+        resolve_execution_settings,
+        write_json,
+    )
 except ImportError:
-    from codex_von_worker import authorised_task, fingerprint, write_json
+    from codex_von_worker import (
+        authorised_task,
+        fingerprint,
+        resolve_execution_settings,
+        write_json,
+    )
 
 SCHEMA = {
     "type": "object",
@@ -154,12 +164,15 @@ def launch(config, state, lock_fd):
     write_json(run / "context.json", state["context"])
     prompt = Path(__file__).with_name("codex_von_inbox_prompt.md").read_text()
     prompt += "\nContext for this reply:\n" + json.dumps(state["context"], default=str)
+    settings = resolve_execution_settings(config, {})
     args = [
         config["codex_command"],
         "exec",
         "--strict-config",
         "--model",
-        config["model"],
+        settings["model"],
+        "-c",
+        "model_reasoning_effort=" + json.dumps(settings["reasoning_effort"]),
         "--sandbox",
         "read-only",
         "--cd",

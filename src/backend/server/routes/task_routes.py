@@ -370,6 +370,8 @@ def create_task_route() -> ResponseReturnValue:
             evidence=data.get("evidence"),
             notes=data.get("notes"),
             reference_code=data.get("reference_code"),
+            requested_model=data.get("requested_model"),
+            requested_reasoning_effort=data.get("requested_reasoning_effort"),
             project_concept_id=data.get("project_concept_id"),
             collection_concept_ids=data.get("collection_concept_ids"),
         )

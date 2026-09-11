@@ -4722,6 +4722,8 @@ async def _handle_create_task(arguments: dict[str, Any]) -> list[TextContent]:
             evidence=arguments.get("evidence"),
             notes=arguments.get("notes"),
             reference_code=arguments.get("reference_code"),
+            requested_model=arguments.get("requested_model"),
+            requested_reasoning_effort=arguments.get("requested_reasoning_effort"),
             project_concept_id=arguments.get("project_concept_id"),
             collection_concept_ids=arguments.get("collection_concept_ids"),
         )

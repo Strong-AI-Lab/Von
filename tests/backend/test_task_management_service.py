@@ -325,6 +325,8 @@ class TestCreateTask:
             evidence="Printed document",
             notes="Needs a coloured copy",
             reference_code="TASK-001",
+            requested_model="gpt-6-astra",
+            requested_reasoning_effort="high",
         )
 
         assert result["title"] == "Full Task"
@@ -340,6 +342,11 @@ class TestCreateTask:
         assert result["evidence"] == "Printed document"
         assert result["notes"] == "Needs a coloured copy"
         assert result["reference_code"] == "TASK-001"
+        assert result["requested_model"] == "gpt-6-astra"
+        assert result["requested_reasoning_effort"] == "high"
+        metadata = mock_repo.insert_one.call_args.args[0]["metadata"]
+        assert metadata["requested_model"] == "gpt-6-astra"
+        assert metadata["requested_reasoning_effort"] == "high"
         stored_predicates = {
             call.kwargs.get("predicate") for call in mock_upsert.call_args_list
         }
@@ -2332,3 +2339,62 @@ class TestImportedTaskActivity:
             == "2026-04-01T09:00:00+00:00"
             for entry in pushed_entries
         )
+
+
+def test_execution_preferences_round_trip_update_clear_and_preserve_other_metadata(
+    monkeypatch,
+):
+    from src.backend.services import task_management_service as tasks
+
+    doc = {
+        "concept_id": "#V#task_model_settings",
+        "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]},
+        "metadata": {
+            "requested_model": "gpt-6-astra",
+            "requested_reasoning_effort": "high",
+            "labels": ["keep"],
+        },
+    }
+    monkeypatch.setattr(tasks, "_get_task_doc", lambda _: (doc["concept_id"], doc))
+    monkeypatch.setattr(tasks, "get_texts_for_concept", lambda *a, **kw: [])
+    monkeypatch.setattr(tasks, "_append_task_history_event", lambda **kw: None)
+    writes = []
+
+    def update(query, operation):
+        assert query == {"concept_id": doc["concept_id"]}
+        writes.append(operation)
+        for key, value in operation.get("$set", {}).items():
+            if key.startswith("metadata."):
+                doc["metadata"][key.removeprefix("metadata.")] = value
+            else:
+                doc[key] = value
+
+    monkeypatch.setattr(tasks.ConceptsRepository, "update_one", update)
+    assert tasks.get_task(doc["concept_id"])["requested_reasoning_effort"] == "high"
+    result = tasks.update_task_fields(
+        doc["concept_id"], fields={"requested_reasoning_effort": " medium "}
+    )
+    assert result["changed_fields"] == ["requested_reasoning_effort"]
+    assert result["task"]["requested_model"] == "gpt-6-astra"
+    assert result["task"]["requested_reasoning_effort"] == "medium"
+    assert not result["warnings"]
+    cleared = tasks.update_task_fields(
+        doc["concept_id"],
+        fields={"requested_model": None, "requested_reasoning_effort": ""},
+    )
+    assert cleared["task"]["requested_model"] is None
+    assert cleared["task"]["requested_reasoning_effort"] is None
+    assert doc["metadata"]["labels"] == ["keep"]
+    count = len(writes)
+    assert not tasks.update_task_fields(
+        doc["concept_id"], fields={"requested_model": None}
+    )["changed_fields"]
+    assert len(writes) == count
+    with pytest.raises(
+        InvalidTaskDataError, match="requested_reasoning_effort must be a string"
+    ):
+        tasks.update_task_fields(
+            doc["concept_id"],
+            fields={"status": "completed", "requested_reasoning_effort": 3},
+        )
+    assert len(writes) == count

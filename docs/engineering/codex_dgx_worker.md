@@ -17,6 +17,22 @@ transcript separately. The current Tasks form's assignee picker offers only
 Unassigned and Von; it does not yet offer this worker. The pilot acceptance
 used labelled fixtures through canonical services, not that picker.
 
+Native coding tasks can specify `requested_model` (an exact Codex model ID,
+for example `gpt-6-astra`) and `requested_reasoning_effort` (for example `high`).
+Ask Von to include those fields when creating the task or set them through
+`task_update_fields`. Each omitted or cleared field independently inherits the
+worker configuration. The worker's built-in defaults are Astra/medium; an
+operator can configure a different permitted default. These are execution
+preferences on the canonical task, not settings inferred from historical
+conversation text. Changes apply at the next launch, not midway through a run.
+
+The launch passes both resolved values explicitly to Codex and retains their
+values and sources in `execution_settings` in the run context/checkpoint and
+result message. Unsupported selections fail visibly through Codex; the worker
+does not substitute another model or reasoning level. The standing Sol block
+also applies to task overrides. Reply-only inbox runs use operator defaults
+because task selection happens within that reply.
+
 The worker checks at the operator-configured interval, starts at most one coding run per check, and sends a
 pickup message followed by a result or question through Von direct messages.
 An empty check makes no model request. Each task has its own Git worktree. Each
@@ -148,7 +164,8 @@ A JSON config has these fields (paths are operator-selected):
   "state_root": "/home/mjw/.codex-von-worker/worker-state",
   "source_repo": "/home/mjw/von-codex-runtime",
   "codex_command": "/home/mjw/.local/bin/von-codex",
-  "model": "gpt-5.6-terra",
+  "model": "gpt-6-astra",
+  "model_reasoning_effort": "medium",
   "permission_profile": "von-coding",
   "github_command": "/home/mjw/.local/bin/gh",
   "git_author_name": "Your configured commit author",

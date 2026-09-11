@@ -1505,6 +1505,14 @@
                         },
                         "description": "Collections associated with the selected project."
                     },
+                    "requested_model": {
+                        "type": ["string", "null"],
+                        "description": "Exact coding model requested by the user, e.g. gpt-6-astra. Omit or clear to inherit the worker default."
+                    },
+                    "requested_reasoning_effort": {
+                        "type": ["string", "null"],
+                        "description": "Coding reasoning level requested by the user, e.g. medium or high. Omit or clear to inherit the worker default."
+                    },
                     "title": {
                         "type": "string",
                         "description": "Brief task title (required)"

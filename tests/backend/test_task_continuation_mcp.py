@@ -84,6 +84,8 @@ def test_ordinary_continuation_links_product_and_delegates_without_duplicate_wri
         assignee_concept_id="#V#von_system",
         report_to_concept_id="#V#alice",
         next_checkpoint="Continue from the saved backlog checkpoint",
+        requested_model="gpt-6-astra",
+        requested_reasoning_effort="high",
     )
     assert payload["actor_bound_continuation"] is True
     assert payload["actor_concept_id"] == "#V#alice"
@@ -91,6 +93,8 @@ def test_ordinary_continuation_links_product_and_delegates_without_duplicate_wri
         first = handlers._task_update_fields(**payload)
         repeat = handlers._task_update_fields(**payload)
     assert first["effect_status"] == "succeeded"
+    assert task["requested_model"] == "gpt-6-astra"
+    assert task["requested_reasoning_effort"] == "high"
     assert (
         first["canonical_read_back"]["task"]["current_work_product"]["status"]
         == "ready"

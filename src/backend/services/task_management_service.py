@@ -1299,6 +1299,8 @@ def create_task(
     evidence: str | None = None,
     notes: str | None = None,
     reference_code: str | None = None,
+    requested_model: str | None = None,
+    requested_reasoning_effort: str | None = None,
     agent_creation_fingerprint: str | None = None,
     agent_creation_request_id: str | None = None,
     project_concept_id: str | None = None,
@@ -1395,6 +1397,12 @@ def create_task(
     reference_code = _normalise_optional_text(
         reference_code,
         field_name="reference_code",
+    )
+    requested_model = _normalise_optional_text(
+        requested_model, field_name="requested_model"
+    )
+    requested_reasoning_effort = _normalise_optional_text(
+        requested_reasoning_effort, field_name="requested_reasoning_effort"
     )
     agent_creation_fingerprint = _normalise_optional_text(
         agent_creation_fingerprint,
@@ -1537,6 +1545,8 @@ def create_task(
             TASK_METADATA_KEY_BULK_TASK_COLLECTIONS: [],
             TASK_METADATA_KEY_CREATION_FINGERPRINT: agent_creation_fingerprint,
             TASK_METADATA_KEY_CREATION_REQUEST_ID: agent_creation_request_id,
+            "requested_model": requested_model,
+            "requested_reasoning_effort": requested_reasoning_effort,
             "project_concept_id": project_concept_id,
             "collection_concept_ids": collection_concept_ids or [],
         },
@@ -1657,6 +1667,8 @@ def create_task(
         "evidence": evidence,
         "notes": notes,
         "reference_code": reference_code,
+        "requested_model": requested_model,
+        "requested_reasoning_effort": requested_reasoning_effort,
         "created_at": now.isoformat(),
         "required_text_persistence_failures": required_text_persistence_failures,
     }
@@ -2163,6 +2175,8 @@ def _build_task_response(
         "evidence": evidence,
         "notes": notes,
         "reference_code": reference_code,
+        "requested_model": metadata.get("requested_model"),
+        "requested_reasoning_effort": metadata.get("requested_reasoning_effort"),
         "parent_task_concept_id": parent_task_id,
         "epic_task_concept_id": epic_task_id,
         "subtask_concept_ids": subtask_ids,
@@ -4744,6 +4758,12 @@ def update_task_fields(
         raise InvalidTaskDataError("fields must be a non-empty dict")
 
     existing_task = _build_task_response(task_doc)
+    # Validate these settings before changing any of the requested task fields.
+    execution_settings = {
+        key: _normalise_optional_text(fields[key], field_name=key)
+        for key in ("requested_model", "requested_reasoning_effort")
+        if key in fields
+    }
     membership = None
     if "project_concept_id" in fields or "collection_concept_ids" in fields:
         from .task_project_service import validate_task_membership
@@ -4859,6 +4879,14 @@ def update_task_fields(
 
     if next_start is not None and next_due is not None and next_start > next_due:
         raise InvalidTaskDataError("start_date must be before or equal to due_date")
+
+    for key, value in execution_settings.items():
+        if existing_task.get(key) != value:
+            ConceptsRepository.update_one(
+                {"concept_id": task_concept_id},
+                {"$set": {f"metadata.{key}": value}},
+            )
+            changed_fields.append(key)
 
     if product_field_present:
         _replace_single_relationship_target(
@@ -5360,6 +5388,8 @@ def update_task_fields(
             "evidence",
             "notes",
             "reference_code",
+            "requested_model",
+            "requested_reasoning_effort",
             "start_date",
             "due_date",
             "labels",
