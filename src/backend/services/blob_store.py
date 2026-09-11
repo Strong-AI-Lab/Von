@@ -4,6 +4,7 @@ import os
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
+from email.header import Header
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 from urllib.parse import urlsplit
@@ -123,7 +124,13 @@ def _normalise_s3_metadata(metadata: Mapping[str, str] | None) -> dict[str, str]
             raise ValueError(
                 f"S3 metadata keys collide after normalisation: {wire_key!r}"
             )
-        wire_metadata[wire_key] = str(value)
+        wire_value = str(value)
+        if not wire_value.isascii():
+            # Botocore requires ASCII metadata headers. S3 specifies RFC 2047
+            # for Unicode values; preserve the original in the returned BlobRef
+            # and canonical file metadata, encoding only the transport value.
+            wire_value = Header(wire_value, "utf-8").encode(linesep=" ")
+        wire_metadata[wire_key] = wire_value
     return wire_metadata
 
 
