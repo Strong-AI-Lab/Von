@@ -49,7 +49,12 @@ context.
 
 Ordinary chat can use `task_update_fields` to attach the current product, revise
 the checkpoint and evidence, and assign an actor-created task to `#V#von_system`
-with the actor as its report recipient. This reuses the existing task editor
+with the actor as its report recipient. A creator may also assign to a concept
+explicitly typed as `#V#coding_agent` when both the actor and that agent have
+live membership of the authenticated organisation. This supports the
+[DGX coding worker](codex_dgx_worker.md); assignment does not itself grant
+conversation access or enlarge the worker's configured effect authority.
+This reuses the existing task editor
 and product reference. It does not start execution. The bounded ordinary-chat
 projection cannot change the creator or organisation, add an audience, or
 assign work to another person. The general parity editor remains a separate
