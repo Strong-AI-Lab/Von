@@ -1134,6 +1134,29 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
     assert payload.get("success") is True
     assert payload.get("effect_status") == "succeeded"
     assert payload.get("changed") is True
+    receipt = payload["canonical_readback"]
+    assert receipt["verified"] is True
+    assert receipt["task_status"] == "pending"
+    assert receipt["verified_outcome"] == "task_record_exists"
+    assert receipt["task_execution_verified"] is False
+    from src.backend.services.adaptive_turn_service import (
+        _canonical_effect_readback_receipt,
+        _canonically_verified_material_effect_ids,
+    )
+
+    projected = _canonical_effect_readback_receipt(payload)
+    material, verified = _canonically_verified_material_effect_ids(
+        [{"effect_id": "task-create", "status": "ok", "tool": "task_create"}],
+        {
+            "task-create": {
+                "effect_status": "succeeded",
+                "changed": True,
+                "turn_finality_required": True,
+                "canonical_readback": projected,
+            }
+        },
+    )
+    assert material == verified == {"task-create"}
     assert payload["canonical_read_back"] == {
         "task_concept_id": "#V#task_123",
         "title": "Task with dates",
@@ -1151,8 +1174,10 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
     _assert_schema_conformance(gateway, "task_create", payload)
 
 
+@pytest.mark.parametrize("wrong_readback_id", [False, True])
 def test_task_create_gateway_marks_required_persistence_failure_indeterminate(
     monkeypatch,
+    wrong_readback_id,
 ):
     gateway = _build_gateway()
     from src.backend.security.access_control import override_current_actor
@@ -1165,18 +1190,20 @@ def test_task_create_gateway_marks_required_persistence_failure_indeterminate(
             "description": "Persist the required fields.",
             "status": "pending",
             "priority": "medium",
-            "required_text_persistence_failures": [
-                {
-                    "predicate": "#V#hasPriority",
-                    "exception_type": "TimeoutError",
-                }
-            ],
+            "required_text_persistence_failures": (
+                [] if wrong_readback_id else [
+                    {
+                        "predicate": "#V#hasPriority",
+                        "exception_type": "TimeoutError",
+                    }
+                ]
+            ),
         },
     )
     monkeypatch.setattr(
         "src.backend.services.task_management_service.get_task",
         lambda task_concept_id: {
-            "task_concept_id": task_concept_id,
+            "task_concept_id": "#V#wrong_task" if wrong_readback_id else task_concept_id,
             "title": "Create a task",
             "description": "Persist the required fields.",
             "status": "pending",
@@ -1206,12 +1233,18 @@ def test_task_create_gateway_marks_required_persistence_failure_indeterminate(
 
     assert payload["success"] is False
     assert payload["error_code"] == "task_canonical_read_back_incomplete"
+    assert "canonical_readback" not in payload
     assert payload["effect_status"] == "indeterminate"
     assert payload["task_concept_id"] == "#V#task_partial"
-    assert payload["required_field_mismatches"] == {}
-    assert payload["required_text_persistence_failures"] == [
-        {"predicate": "#V#hasPriority", "exception_type": "TimeoutError"}
-    ]
+    if wrong_readback_id:
+        assert payload["required_field_mismatches"] == {
+            "task_concept_id": {"expected": "#V#task_partial", "actual": "#V#wrong_task"}
+        }
+    else:
+        assert payload["required_field_mismatches"] == {}
+        assert payload["required_text_persistence_failures"] == [
+            {"predicate": "#V#hasPriority", "exception_type": "TimeoutError"}
+        ]
 
 
 def test_task_search_gateway_supports_start_and_epic_filters(monkeypatch):

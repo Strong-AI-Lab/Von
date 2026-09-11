@@ -35367,6 +35367,15 @@ def _task_create(**kwargs):
         return response
 
     def _idempotent_replay_response(task: dict[str, Any]) -> dict[str, Any]:
+        # Existing tasks may since have progressed beyond pending. Verify their
+        # durable creation fields without resetting or reassigning them.
+        required = ("task_concept_id", "title", "description", "status", "priority")
+        if any(not task.get(field) for field in required):
+            incomplete = _incomplete_canonical_read_back_response(
+                task_concept_id=str(task.get("task_concept_id") or ""), task=task
+            )
+            incomplete["changed"] = False
+            return incomplete
         return {
             **task,
             "success": True,
@@ -35374,6 +35383,22 @@ def _task_create(**kwargs):
             "changed": False,
             "idempotent_replay": True,
             "canonical_read_back": task,
+            "canonical_readback": _creation_receipt(task),
+        }
+
+    def _creation_receipt(task: dict[str, Any]) -> dict[str, Any]:
+        # Receipt status describes the verified create/read, not the task's
+        # lifecycle or execution of the work it requests. Keep the full legacy
+        # canonical_read_back row unchanged for existing consumers.
+        return {
+            "status": "verified",
+            "verified": True,
+            "task_concept_id": task.get("task_concept_id"),
+            "task_status": task.get("status"),
+            "verified_outcome": "task_record_exists",
+            "assignee_concept_id": task.get("assignee_concept_id"),
+            "organisation_concept_id": task.get("organisation_concept_id"),
+            "task_execution_verified": False,
         }
 
     def _reconcile_after_create_failure() -> dict[str, Any] | None:
@@ -35445,6 +35470,7 @@ def _task_create(**kwargs):
                 return reconciled_task
             raise
         task_concept_id = str(result.get("task_concept_id") or "")
+        required_read_back_fields["task_concept_id"] = task_concept_id
         try:
             canonical_read_back = get_task(task_concept_id)
         except Exception as exc:
@@ -35480,6 +35506,7 @@ def _task_create(**kwargs):
                 "changed": True,
                 "idempotent_replay": False,
                 "canonical_read_back": canonical_read_back,
+                "canonical_readback": _creation_receipt(canonical_read_back),
             }
         )
         return result
@@ -44857,7 +44884,12 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 "conversation. Identical retries in the same turn reuse the canonical "
                 "task. A durable workflow may instead provide a stable idempotency_key "
                 "to ensure one task within the authenticated actor and organisation. "
-                "Use this to track work items, action items, or to-dos. "
+                "Use this to track work items, action items, or to-dos; creating such "
+                "records can itself be the requested outcome. This operation does not "
+                "execute the recorded work, send mail, or create a calendar event. "
+                "The assignee is the authenticated actor, not a person named in the "
+                "title/description or an 'assignee' argument. Read the returned "
+                "assignee_concept_id when reporting responsibility. "
                 "Priority: low, medium, high, critical. Tasks start in 'pending' status and can include "
                 "planning metadata (components, fix versions, sprint values, backlog rank), canonical "
                 "task categories, source semantics, and richer task-detail fields."

@@ -4384,6 +4384,10 @@ def _canonical_effect_readback_receipt(raw_payload: Any) -> dict[str, Any] | Non
             "inverse_relationship_present",
             "inverse_relationship_required",
             "publication_context",
+            "task_concept_id",
+            "task_status",
+            "verified_outcome",
+            "task_execution_verified",
         )
         if key in readback
     }

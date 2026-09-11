@@ -13718,7 +13718,28 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
 
         _check_background_cancellation("direct adaptive turn entry")
         adaptive_turn_started = time.perf_counter()
-        adaptive_input_context = list(enhanced_context)
+        from ...services.conversation_model_context_service import (
+            conversation_participants,
+            project_conversation_model_context,
+        )
+
+        participant_context = (
+            conversation_participants(
+                session_id=session_id,
+                owner_id=history_user_id,
+                actor_id=user_concept_id,
+            )
+            if session_id and history_user_id and user_concept_id
+            else {"status": "unavailable", "participants": []}
+        )
+        adaptive_input_context = project_conversation_model_context(
+            enhanced_context,
+            actor_id=user_concept_id,
+            organisation_id=org_concept_id,
+            namespace=user_namespace,
+            owner_id=history_user_id,
+            roster=participant_context,
+        )
         if request_image_attachments:
             adaptive_input_context.append(
                 {
