@@ -54,7 +54,7 @@ from ...services.concept_service import (
     resolve_concept_display_names,
     update_concept_description,
 )
-from ...services.text_value_service import get_texts_for_concept
+from ...services.text_value_service import get_texts_for_concept, get_texts_for_concepts
 from ...services.concept_relation_service import build_concept_relations_payload
 from ...services.relationship_extent_index_service import (
     incoming_dynamic_extent_rows_page_for_target,
@@ -1265,9 +1265,13 @@ def get_node_content_route():
             raw_doc = trimmed.get("raw_doc")
             if concept_id and raw_doc is not None and isinstance(raw_doc, dict):
                 try:
-                    names_from_relations = get_texts_for_concept(
-                        subject_concept_id=concept_id, predicate="hasName", limit=100
-                    )
+                    # Tasks store their title under the canonical #V#hasName.
+                    # Read both supported name spellings in one bounded query.
+                    names_from_relations = get_texts_for_concepts(
+                        [concept_id],
+                        predicates=["#V#hasName", "hasName"],
+                        limit_per_concept=100,
+                    ).get(concept_id, [])
                     enriched_names = [
                         {
                             "name": item.get("text", ""),
@@ -1277,7 +1281,8 @@ def get_node_content_route():
                         }
                         for item in names_from_relations
                     ]
-                    raw_doc["names"] = enriched_names
+                    if enriched_names:
+                        raw_doc["names"] = enriched_names
                     # Also update display_name if we found NL names (prefer en-NZ)
                     if enriched_names:
                         # Priority: NL names in en-NZ, then any NL, then ABBR, then first available

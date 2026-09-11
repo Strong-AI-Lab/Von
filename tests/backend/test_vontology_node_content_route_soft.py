@@ -12,6 +12,64 @@ import types
 import pytest
 
 
+@pytest.mark.parametrize("name_predicate", ["#V#hasName", "hasName", None])
+def test_raw_task_metadata_uses_name_aliases_and_preserves_link_identity(
+    app_client, monkeypatch, name_predicate
+):
+    from src.backend.server.routes import vontology_routes as routes
+    from src.backend.services import vontology_concept_stats_service as stats
+
+    _, client = app_client
+    task_id = "#V#task_agent_opaque_identifier"
+    title = "Implement slideable desktop conversation tray"
+    stored_names = [{"name": title, "language": "en-NZ", "type": "NL"}]
+    monkeypatch.setattr(
+        routes,
+        "get_vontology_node_content",
+        lambda *a, **k: {
+            "concept_id": task_id,
+            "display_name": "Task Agent Opaque Identifier",
+            "kind": "individual",
+            "raw_doc": {
+                "concept_id": task_id,
+                "names": stored_names if name_predicate is None else [],
+                "relationships": {"is_an_instance_of": ["#V#task_specification"]},
+            },
+        },
+    )
+    monkeypatch.setattr(stats, "get_vontology_concept_stats", lambda *a, **k: {})
+    calls = []
+
+    def read_names(ids, **kwargs):
+        calls.append((ids, kwargs))
+        assert set(kwargs["predicates"]) == {"hasName", "#V#hasName"}
+        return {
+            task_id: [
+                {
+                    "text": title,
+                    "lang": "en-NZ",
+                    "predicate": name_predicate,
+                    "context": {},
+                }
+            ]
+            if name_predicate
+            else []
+        }
+
+    monkeypatch.setattr(routes, "get_texts_for_concepts", read_names)
+    response = client.get(
+        "/vontology/api/vontology/node_content",
+        query_string={"identifier": task_id, "raw_only": "1"},
+    )
+    payload = response.get_json()
+    assert response.status_code == 200
+    assert payload["concept_id"] == payload["raw_doc"]["concept_id"] == task_id
+    assert payload["raw_doc"]["names"][0]["name"] == title
+    if name_predicate:
+        assert payload["display_name"] == title
+    assert len(calls) == 1
+
+
 @pytest.fixture
 def app_client(monkeypatch):
     # Stub Google auth deps pulled in by utils_flask -> auth_routes imports.
