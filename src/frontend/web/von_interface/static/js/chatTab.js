@@ -37590,6 +37590,10 @@ async function handleSendPrompt(options = {}) {
     // Add user message to chat with turnId
     if (isRequestVisible() && userTurnShouldRender) {
         appendMessage('User', promptText, userTurnId, false, false, userTurnTimestamp);
+        // Sending explicitly returns to the latest turn, even from older history.
+        // Do this after the thinking card and user message have changed the layout;
+        // incoming responses still respect any subsequent manual scroll away.
+        scrollConversationToEnd(document.getElementById('scrollableField'), { smooth: false });
         // Fire-and-forget annotate user turn (do not await) - only if toggle is enabled
         const annotationToggle = document.getElementById('annotationToggle');
         if (annotationToggle && annotationToggle.checked) {
