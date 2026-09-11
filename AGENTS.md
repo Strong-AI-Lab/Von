@@ -511,6 +511,13 @@ Before claiming completion:
 - leave the worktree, branch, Jira, and any live represented state consistent
   with the reported outcome.
 
+Completed repository work must also send the requester a concise completion
+summary in Von, under an identity for the coding agent that performed the work.
+Include associated Von task links when available, what was delivered, relevant
+validation and deployment evidence, and any material limitation. This is
+standing authorisation for those completion messages. Verify delivery through
+canonical message read-back before reporting that the summary was sent.
+
 Update current guidance when a durable invariant or routing rule changes. Put
 incident-specific commands, identities, paths, and outputs in dated incident
 records or version control history, not in this constitution. Prefer replacing

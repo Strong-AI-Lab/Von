@@ -14,6 +14,14 @@ This is a fresh execution. Existing code and the prior result carry continuity.
 Inspect them before repeating work. Finish the authorised task and perform
 proportionate validation. Preserve unrelated files and existing changes.
 
+If assignment.followup is present, its exact message is the current request
+that resumed this task. The original title, description and prior results are
+context for that follow-up. Implement the additional requested work without
+repeating already completed work. For deployment, use only this follow-up's
+explicit deployment instruction and deployment_requested value; an old deploy
+request does not carry forward. Otherwise preserve the initial-task deployment
+rule below.
+
 The controller sends your result or question to Michael in Von, records the
 worktree and evidence on the task, and waits for a task-thread reply, task
 comment, or requeue when you need input. Do not send messages yourself or
