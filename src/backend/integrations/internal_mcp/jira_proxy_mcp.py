@@ -7,11 +7,13 @@ logic.
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import sys
+import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, cast
@@ -203,18 +205,17 @@ class JiraMCPProxy:
             log_tag=_LOG_TAG,
         )
         self._client = MCPStdIOClient(client_config)
-        # Export downloads use the existing three 60-second HTTP attempts.
+        # Binary downloads use the existing three 60-second HTTP attempts.
         # Allow twice that declared inner bound for transfer and JSON encoding;
         # ordinary issue reads retain their current operation budget.
-        self._export_client = MCPStdIOClient(
-            MCPServerConfig(
-                command=config.command,
-                args=config.args,
-                env=config.env,
-                timeout_sec=360.0,
-                log_tag=_LOG_TAG,
-            )
+        self._binary_config = MCPServerConfig(
+            command=config.command,
+            args=config.args,
+            env=config.env,
+            timeout_sec=360.0,
+            log_tag=_LOG_TAG,
         )
+        self._binary_client = MCPStdIOClient(self._binary_config)
 
     def source_capture_session(self):
         """Keep one helper for a source capture; authority is checked per read."""
@@ -226,6 +227,7 @@ class JiraMCPProxy:
         arguments: Dict[str, Any],
         *,
         resource_id: str | None = None,
+        client_override: MCPStdIOClient | None = None,
     ) -> Any:
         authority = None
         if tool_name == "jira_search" or tool_name.startswith("jira_get_"):
@@ -236,11 +238,14 @@ class JiraMCPProxy:
             )
         try:
             client = (
-                self._export_client
-                if tool_name == "jira_get_migration_export"
+                self._binary_client
+                if tool_name in {
+                    "jira_get_migration_export",
+                    "jira_get_attachment_content",
+                }
                 else self._client
             )
-            result = await client.call_tool(tool_name, arguments)
+            result = await (client_override or client).call_tool(tool_name, arguments)
             if authority is not None and isinstance(result, dict):
                 result = {**result, "authority": authority}
             return result
@@ -351,7 +356,50 @@ class JiraMCPProxy:
         arguments: Dict[str, Any] = {"attachment_id": attachment_id}
         if isinstance(max_size_bytes, int):
             arguments["max_size_bytes"] = max_size_bytes
-        return await self._call("jira_get_attachment_content", arguments)
+        limit = max_size_bytes if isinstance(max_size_bytes, int) else 10 * 1024 * 1024
+        # The helper and caller share a private, caller-created directory. Jira
+        # content cannot select a filesystem destination. Keep large base64 out
+        # of MCP framing; hydrate the established return shape only after read-back.
+        with tempfile.TemporaryDirectory(prefix="von-jira-attachment-") as directory:
+            client = MCPStdIOClient(
+                replace(
+                    self._binary_config,
+                    env={
+                        **(self._binary_config.env or {}),
+                        "VON_JIRA_ATTACHMENT_STAGING_DIR": directory,
+                    },
+                )
+            )
+            result = await self._call(
+                "jira_get_attachment_content", arguments, client_override=client
+            )
+            if not isinstance(result, dict) or result.get("success") is not True:
+                return result
+            staged = result.get("staged_file") or {}
+            name = staged.get("name", "")
+            if (
+                not isinstance(name, str)
+                or len(name) != 36
+                or not name.endswith(".bin")
+                or any(char not in "0123456789abcdef" for char in name[:-4])
+            ):
+                raise JiraProxyError("Invalid attachment staging receipt")
+            path = Path(directory) / name
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > limit:
+                raise JiraProxyError("Invalid attachment staging file")
+            with path.open("rb") as stream:
+                data = stream.read(limit + 1)
+            if (
+                len(data) > limit
+                or len(data) != staged.get("size_bytes")
+                or len(data) != result.get("size_bytes")
+                or sha256(data).hexdigest() != staged.get("sha256")
+            ):
+                raise JiraProxyError("Attachment staging integrity mismatch")
+            result = dict(result)
+            result.pop("staged_file")
+            result["content_base64"] = base64.b64encode(data).decode("ascii")
+            return result
 
     async def get_transitions(self, *, issue_key: str) -> Dict[str, Any]:
         return await self._call("jira_get_transitions", {"issue_key": issue_key})
