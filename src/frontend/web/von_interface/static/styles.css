@@ -18315,6 +18315,22 @@ body.settings-body {
     .scrollable-field pre { max-width: 100%; overflow-x: auto; }
     .scrollable-field img { max-width: 100%; height: auto; }
 
+    .unified-message-content .message-compose-area {
+        position: fixed;
+        left: max(8px, env(safe-area-inset-left));
+        right: max(8px, env(safe-area-inset-right));
+        bottom: calc(var(--von-fixed-footer-clearance, 64px) + var(--von-keyboard-inset, 0px));
+        z-index: 100; padding: 8px; gap: 4px;
+        max-height: calc(var(--von-viewport-height, 100dvh) - 60px);
+        overflow-y: auto;
+    }
+    .unified-message-content .message-compose-row { flex-direction: row; align-items: flex-end; }
+    .unified-message-content .message-input {
+        min-width: 0; min-height: 44px; height: 44px; box-sizing: border-box; font-size: 16px;
+    }
+    .unified-message-content .send-message-btn { width: auto; min-height: 44px; }
+    .unified-message-content .message-view-content { padding-bottom: 130px; }
+
     .chat-composer {
         bottom: calc(var(--von-fixed-footer-clearance, 64px) + var(--von-keyboard-inset, 0px));
         max-height: calc(var(--von-viewport-height, 100dvh) - 60px);
