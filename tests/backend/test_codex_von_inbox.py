@@ -202,6 +202,7 @@ def test_two_queued_followups_preserve_both_coding_requests(fixture):
     assert "compact identity labels" in followup["content"]
     assert followup["message_ids"] == ["#V#question", "#V#second_question"]
     assert task["status"] == "pending" and len(comments) == 2
+    assert transitions == ['pending']
 
 
 def test_empty_old_or_foreign_mail_does_not_invoke_model(fixture, monkeypatch):
