@@ -7,6 +7,8 @@ schemas.
 
 from __future__ import annotations
 
+import pytest
+
 from src.backend.integrations.internal_mcp import build_default_catalogue
 from src.backend.integrations.internal_mcp.gateway import InternalMCPGateway
 from src.backend.integrations.internal_mcp.schemas import validate_payload
@@ -633,6 +635,80 @@ def test_task_import_jira_issues_gateway_backfill_and_namespace_identity_mapping
     assert isinstance(participant_map, dict)
     assert participant_map.get("jira-current-user") == "#V#current_user"
     _assert_schema_conformance(gateway, "task_import_jira_issues", payload)
+
+
+@pytest.mark.parametrize(
+    "owns_account,auto_map,explicit_mapping,expected",
+    [
+        (True, True, None, "#V#current_user"),
+        (False, True, None, None),
+        (True, False, None, None),
+        (True, True, "#V#recorded_person", "#V#recorded_person"),
+    ],
+)
+def test_source_import_maps_actor_without_namespace_only_for_account_owner(
+    monkeypatch, owns_account, auto_map, explicit_mapping, expected
+):
+    captured = {}
+    myself_calls = []
+
+    class Proxy:
+        async def get_myself(self):
+            myself_calls.append(True)
+            return {"accountId": "jira-current-user"}
+
+    async def get_proxy():
+        return Proxy()
+
+    async def capture_issue(*_args, **_kwargs):
+        return {"complete": True}, {
+            "key": "TEST-1",
+            "id": "1",
+            "fields": {"project": {"key": "TEST"}},
+        }
+
+    def import_issues(**kwargs):
+        captured.update(kwargs)
+        return {"success": True, "dry_run": True, "summary": {}, "issues": []}
+
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.get_jira_proxy",
+        get_proxy,
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.jira_proxy_mcp.jira_resource_binding_for_user",
+        lambda actor: "jira-owned-account" if owns_account and actor == "#V#current_user" else None,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.jira_source_retention_service.capture_issue",
+        capture_issue,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.jira_task_import_service.import_jira_issues_to_tasks",
+        import_issues,
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_event_integration_service.resolve_event_actor_context",
+        lambda **_kwargs: ("#V#current_user", None),
+    )
+    payload = _build_gateway().invoke(
+        "task_import_jira_issues",
+        {
+            "issue_keys": ["TEST-1"],
+            "actor_concept_id": "#V#current_user",
+            "preserve_source": True,
+            "dry_run": True,
+            "auto_map_namespace_to_jira_user": auto_map,
+            "jira_account_id_to_concept_id": (
+                {"jira-current-user": explicit_mapping} if explicit_mapping else {}
+            ),
+        },
+    ).payload
+    assert payload.get("success") is True
+    assert captured["jira_account_id_to_concept_id"].get("jira-current-user") == expected
+    assert bool(myself_calls) == (owns_account and auto_map)
+    assert captured["actor_concept_id"] == "#V#current_user"
+    assert captured["namespace"] is None
 
 
 def test_task_import_jira_issues_gateway_resolves_org_scope_for_backfill_and_import(

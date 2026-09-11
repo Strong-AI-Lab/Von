@@ -36126,7 +36126,11 @@ def _normalise_jira_labels(raw_labels: Any) -> list[str]:
 
 def _task_import_jira_issues(**kwargs):
     """Import Jira issues into Von tasks with dry-run and idempotent reruns."""
-    from .jira_proxy_mcp import get_jira_proxy, JiraProxyError
+    from .jira_proxy_mcp import (
+        get_jira_proxy,
+        jira_resource_binding_for_user,
+        JiraProxyError,
+    )
     from ...services.jira_task_import_service import (
         import_jira_issues_to_tasks,
         list_imported_jira_issue_keys,
@@ -36250,12 +36254,19 @@ def _task_import_jira_issues(**kwargs):
 
         if (
             auto_map_namespace_to_jira_user
-            and isinstance(namespace_value, str)
-            and namespace_value.strip()
             and hasattr(proxy, "get_myself")
         ):
             try:
-                myself_payload = await proxy.get_myself()
+                # Bulk imports supply an actor without a legacy namespace.
+                # Map that actor only when the governed account binding proves
+                # ownership; a local operator can also import for somebody else.
+                map_current_user = bool(namespace_value) or bool(
+                    actor_concept_id
+                    and jira_resource_binding_for_user(actor_concept_id)
+                )
+                myself_payload = (
+                    await proxy.get_myself() if map_current_user else None
+                )
                 account_id_value = (
                     myself_payload.get("accountId")
                     if isinstance(myself_payload, Mapping)
