@@ -718,3 +718,63 @@ def test_server_handoff_route_links_replays_and_rejects_second_replacement(
     )
     queue_rows = chat_prompt_queue_service.list_active_queue_records(scope=scope)
     assert [row["queue_id"] for row in queue_rows] == [created["queue_id"]]
+
+
+def test_steering_routes_use_authenticated_scope_and_exact_attempt(client):
+    from src.backend.services import chat_steering_service
+
+    scope = chat_prompt_queue_service.build_queue_scope(
+        user_concept_id="#V#test_user",
+        organisation_concept_id="#V#test_org",
+        namespace="#V#test_user@test_org",
+    )
+    created = chat_prompt_queue_service.create_queue_record(
+        scope=scope, prompt_raw="Original", session_id="session-1"
+    )
+    queue_id = created["queue_id"]
+    chat_prompt_queue_service._collection().update_one(
+        {"queue_id": queue_id},
+        {
+            "$set": {
+                "status": "in_progress",
+                "attempt_id": "attempt",
+                "active_conversation_key": "conversation",
+            }
+        },
+    )
+    url = f"/von/api/chat_prompt_queue/{queue_id}/steering"
+    response = client.post(
+        url,
+        json={
+            "attempt_id": "attempt",
+            "submission_id": "s",
+            "text": "Correction",
+            "user_id": "#V#impostor",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json["items"][0]["status"] == "pending"
+    assert (
+        client.post(
+            url,
+            json={"attempt_id": "wrong", "submission_id": "x", "text": "Wrong attempt"},
+        ).status_code
+        == 404
+    )
+    assert client.delete(url, json={}).status_code == 400
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#other"
+        sess["namespace"] = "#V#other@test_org"
+    assert client.get(url).status_code == 404
+    assert client.delete(url, json={"submission_id": "s"}).status_code == 404
+    assert (
+        len(
+            chat_steering_service.take(
+                scope=scope, queue_id=queue_id, attempt_id="attempt"
+            )
+        )
+        == 1
+    )
+    with client.session_transaction() as sess:
+        sess.clear()
+    assert client.get(url).status_code == 401

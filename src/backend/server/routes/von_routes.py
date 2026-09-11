@@ -1663,6 +1663,40 @@ def update_chat_prompt_queue_route(queue_id: str):
         )
 
 
+@von_bp.route(
+    "/api/chat_prompt_queue/<queue_id>/steering", methods=["GET", "POST", "DELETE"]
+)
+def chat_prompt_steering_route(queue_id: str):
+    from ...services import chat_steering_service
+
+    scope = _get_current_chat_prompt_queue_scope()
+    if isinstance(scope, tuple):
+        return scope
+    try:
+        payload = _chat_prompt_queue_payload()
+        if request.method == "POST":
+            result = chat_steering_service.submit(
+                scope=scope,
+                queue_id=queue_id,
+                attempt_id=payload.get("attempt_id"),
+                submission_id=payload.get("submission_id"),
+                text=payload.get("text"),
+            )
+        elif request.method == "DELETE":
+            result = chat_steering_service.cancel(
+                scope=scope,
+                queue_id=queue_id,
+                submission_id=payload.get("submission_id"),
+            )
+        else:
+            result = chat_steering_service.read(scope=scope, queue_id=queue_id)
+        return jsonify({"success": True, **result})
+    except Exception as exc:
+        return _chat_prompt_queue_error_response(
+            exc, action="steer", queue_id=queue_id, scope=scope
+        )
+
+
 @von_bp.route("/api/chat_prompt_queue/<queue_id>", methods=["DELETE"])
 def cancel_chat_prompt_queue_route(queue_id: str):
     scope = _get_current_chat_prompt_queue_scope()
@@ -13867,7 +13901,39 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
                 )
             assistant_opening_claimed = True
 
+        def _take_steering(*, close_if_empty: bool = False):
+            from ...services import chat_steering_service
+
+            token = getattr(g, _TURN_ADMISSION_CONTEXT_KEY, None)
+            if token is None or not getattr(token, "attempt_id", None):
+                return []
+            steering_items = chat_steering_service.take(
+                scope=token.scope,
+                queue_id=token.queue_id,
+                attempt_id=token.attempt_id,
+                close_if_empty=close_if_empty,
+            )
+            for item in steering_items:
+                if history_user_id:
+                    _add_chat_history_message(
+                        user_id=history_user_id,
+                        session_id=session_id,
+                        message={
+                            "role": "user",
+                            "content": item["text"],
+                            "author_user_id": user_concept_id,
+                            "turn_id": f"steer-{request_id}-{item['id']}",
+                            "steering_submission_id": item["id"],
+                        },
+                        namespace=history_namespace,
+                        organisation_concept_id=org_concept_id,
+                        role_in_org=role_in_org,
+                        skip_rag_indexing=True,
+                    )
+            return steering_items
+
         adaptive_turn_result = execute_adaptive_turn(
+            steering_reader=_take_steering,
             gateway=gateway,
             prompt=prompt_text,
             context=adaptive_input_context,
@@ -13933,7 +13999,12 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
             and bool(response_text.strip())
         )
         adaptive_delivery_success = adaptive_success or adaptive_partial_delivery
-        tool_messages = [dict(msg) for msg in adaptive_turn_result.extra_messages]
+        # Steering user messages were attributed and persisted on receipt,
+        # including turns that later stop. Finalisation must not append them twice.
+        tool_messages = [
+            dict(msg) for msg in adaptive_turn_result.extra_messages
+            if not msg.get("steering_submission_id")
+        ]
         tool_invocations = list(adaptive_turn_result.tool_invocations)
         auxiliary_llm_calls.extend(adaptive_turn_result.aux_llm_calls)
         deterministic_situation_projection: Mapping[str, Any] | None = None

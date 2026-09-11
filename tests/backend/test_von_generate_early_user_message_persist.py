@@ -233,3 +233,53 @@ def test_generate_continues_when_chat_history_context_read_is_transient(
     assert all(
         call.get("role") == "system" for call in llm.calls[-1]["context"]
     )
+
+
+def test_steering_normal_generate_admission_and_history(app, recorder, monkeypatch):
+    from flask import g
+    from src.backend.server.routes import von_routes
+    from src.backend.languagemodels.structured_tool_calling.types import LLMResponse
+
+    model_contexts = []
+
+    def generate_with_tools(*_args, **kwargs):
+        model_contexts.append(kwargs['context'])
+        return LLMResponse(text_response='Revised response')
+
+    monkeypatch.setattr(app.config['TEST_LLM'], 'generate_with_tools', generate_with_tools, raising=False)
+    original = von_routes.execute_adaptive_turn
+    receipts = []
+
+    def execute_with_incoming_steer(**kwargs):
+        token = getattr(g, von_routes._TURN_ADMISSION_CONTEXT_KEY)
+        assert token.queue_id and token.attempt_id
+        with app.app_context(), app.test_client() as sender:
+            with sender.session_transaction() as sess:
+                sess['user_concept_id'] = '#V#test_user'
+                sess['namespace'] = '#V#test_user'
+            url = f'/von/api/chat_prompt_queue/{token.queue_id}/steering'
+            response = sender.post(url, json={
+                'attempt_id': token.attempt_id, 'submission_id': 'normal-route',
+                'text': 'Use the revised scope',
+            })
+            assert response.status_code == 200
+        result = original(**kwargs)
+        with app.app_context(), app.test_client() as sender:
+            with sender.session_transaction() as sess:
+                sess['user_concept_id'] = '#V#test_user'
+                sess['namespace'] = '#V#test_user'
+            receipts.extend(sender.get(url).json['items'])
+        return result
+
+    monkeypatch.setattr(von_routes, 'execute_adaptive_turn', execute_with_incoming_steer)
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess['user_concept_id'] = '#V#test_user'
+            sess['namespace'] = '#V#test_user'
+        response = client.post('/von/generate', json={'prompt': 'Original scope'})
+    assert response.status_code == 200
+    assert response.json['response'] == 'Revised response'
+    assert any(message.get('role') == 'user' and message.get('content') == 'Use the revised scope'
+               for context in model_contexts for message in context)
+    assert [entry['message']['content'] for entry in recorder.user_message_calls] == ['Original scope', 'Use the revised scope']
+    assert receipts[0]['status'] == 'delivered'

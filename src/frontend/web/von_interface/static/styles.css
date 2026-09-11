@@ -18253,3 +18253,18 @@ body.settings-body {
 }
 .task-current-product-content pre { white-space: pre-wrap; }
 .task-continuation-instruction { min-height: 80px; resize: vertical; }
+
+.chat-steering-feedback {
+    max-height: 10rem;
+    overflow: auto;
+    overflow-wrap: anywhere;
+    font-size: 0.85rem;
+    padding: 0.4rem;
+}
+.chat-steering-feedback > div {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin-block: 0.3rem;
+}
+.chat-steering-feedback .btn-mini { flex-shrink: 0; }

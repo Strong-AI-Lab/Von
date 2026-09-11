@@ -16357,3 +16357,87 @@ def test_scoped_text_recovery_uses_exact_defaulted_language(
         assert failure["attempted_recovery_effect_id"] == recovery["effect_id"]
     assert recovery["canonical_readback"]["object_text_identity_sha256"]
     assert result.terminal_status == expected_terminal_status
+
+
+def test_steering_arriving_during_final_model_call_continues_same_turn():
+    client = _SequenceClient(
+        LLMResponse(text_response="Old answer"),
+        LLMResponse(text_response="Revised answer"),
+    )
+    delivered = False
+
+    def reader(*, close_if_empty=False):
+        nonlocal delivered
+        if close_if_empty and not delivered:
+            delivered = True
+            return [{"id": "steer-1", "text": "Use the revised scope"}]
+        return []
+
+    result = execute_adaptive_turn(
+        gateway=_gateway(lambda **_kwargs: {"success": True}),
+        prompt="Original job",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        steering_reader=reader,
+    )
+    assert result.response_text == "Revised answer"
+    assert len(client.calls) == 2
+    assert client.calls[1]["prompt"] == ""
+    assert client.calls[1]["context"][-1]["content"] == "Use the revised scope"
+    assert any(
+        m.get("steering_submission_id") == "steer-1" for m in result.extra_messages
+    )
+
+
+def test_steering_after_tool_keeps_receipt_and_does_not_repeat_effect():
+    read_count = 0
+    delivered = False
+
+    def read(**_kwargs):
+        nonlocal read_count
+        read_count += 1
+        return {"success": True, "record": "canonical evidence"}
+
+    def reader(*, close_if_empty=False):
+        nonlocal delivered
+        if read_count and not delivered:
+            delivered = True
+            return [{"id": "s", "text": "Use this evidence in a shorter answer"}]
+        return []
+
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="read",
+                    payload={"name": "general_read", "arguments": {"query": "record"}},
+                )
+            ],
+            continuation=LLMContinuation(
+                provider="test",
+                api_surface="responses",
+                model="test-model",
+                response_id="previous",
+            ),
+        ),
+        LLMResponse(text_response="Short answer"),
+    )
+    result = execute_adaptive_turn(
+        gateway=_gateway(read),
+        prompt="Read and explain",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        steering_reader=reader,
+    )
+    assert result.response_text == "Short answer"
+    assert read_count == 1
+    assert "continuation" not in client.calls[1]
+    assert "canonical evidence" in json.dumps(client.calls[1]["context"])
+    assert (
+        client.calls[1]["context"][-1]["content"]
+        == "Use this evidence in a shorter answer"
+    )
