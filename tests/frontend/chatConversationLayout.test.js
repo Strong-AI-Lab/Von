@@ -47,13 +47,14 @@ describe('conversation single-scroll layout', () => {
         expect(jumpRule).toContain('position: fixed');
     });
 
-    test('uses a horizontal conversation workspace as the accessible default', () => {
+    test('declares the desktop tray preference with a horizontal pre-initialisation fallback', () => {
         const fragment = parseTemplate(template);
         const workspace = fragment.querySelector('#conversationWorkspace');
         const sessionTabs = fragment.querySelector('#chatSessionTabs');
 
         expect(workspace).toBeTruthy();
-        expect(workspace.getAttribute('data-tabs-layout')).toBe('horizontal');
+        expect(workspace.getAttribute('data-tabs-layout')).toBe('vertical');
+        expect(workspace.getAttribute('data-effective-tabs-layout')).toBe('horizontal');
         expect(sessionTabs).toBeTruthy();
         expect(sessionTabs.getAttribute('role')).toBe('tablist');
         expect(sessionTabs.getAttribute('aria-orientation')).toBe('horizontal');

@@ -1,3 +1,4 @@
+import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_TRAY_HOVER_KEY, loadConversationLayoutPreferences, normaliseConversationLayout, saveConversationLayoutPreference } from './utils/conversationLayoutPreferences.js';
 import { supportsAudioRecording } from './dictation.js';
 import { ensureUniqueWindowSessionId, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import {
@@ -3766,14 +3767,22 @@ function getSpeechSettingsFromStorage() {
   };
 }
 
-function setupConversationHistorySettingsSection() {
+export function setupConversationHistorySettingsSection() {
   const recentLimitInput = document.getElementById('settingsConversationRecentLimitInput');
   const recentWindowDaysInput = document.getElementById('settingsConversationRecentWindowDaysInput');
-  if (!recentLimitInput && !recentWindowDaysInput) {
+  const layoutSelect = document.getElementById('settingsConversationLayoutSelect');
+  const hoverToggle = document.getElementById('settingsConversationTrayHoverToggle');
+  if (!recentLimitInput && !recentWindowDaysInput && !layoutSelect && !hoverToggle) {
     return;
   }
 
   const refreshUiFromSettings = () => {
+    const layout = loadConversationLayoutPreferences();
+    if (layoutSelect) layoutSelect.value = layout.layout;
+    if (hoverToggle) {
+      hoverToggle.checked = layout.expandOnHover;
+      hoverToggle.disabled = layout.layout === 'horizontal';
+    }
     const settings = loadConversationHistorySettings((key) => safeLocalStorageGet(key));
     if (recentLimitInput) {
       recentLimitInput.value = String(settings.recentLimit);
@@ -3784,6 +3793,22 @@ function setupConversationHistorySettingsSection() {
   };
 
   refreshUiFromSettings();
+  layoutSelect?.addEventListener('change', () => {
+    const value = normaliseConversationLayout(layoutSelect.value);
+    saveConversationLayoutPreference(CONVERSATION_LAYOUT_KEY, value);
+    notifyPreferenceChanged(CONVERSATION_LAYOUT_KEY, value);
+    refreshUiFromSettings();
+  });
+  hoverToggle?.addEventListener('change', () => {
+    saveConversationLayoutPreference(CONVERSATION_TRAY_HOVER_KEY, hoverToggle.checked);
+    notifyPreferenceChanged(CONVERSATION_TRAY_HOVER_KEY, hoverToggle.checked);
+  });
+  const onPreference = (event) => {
+    const key = event.type === 'storage' ? event.key : event?.detail?.key;
+    if (key === null || CONVERSATION_LAYOUT_KEYS.includes(key)) refreshUiFromSettings();
+  };
+  window.addEventListener('storage', onPreference);
+  window.addEventListener('von-preferences-changed', onPreference);
 
   if (recentLimitInput) {
     recentLimitInput.addEventListener('change', (event) => {
@@ -5400,6 +5425,10 @@ document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () =
     localStorage.removeItem(LS_CARTOUCHE_SHOW_ID);
     localStorage.removeItem(LS_CARTOUCHE_SHOW_KIND);
     localStorage.removeItem(LS_CARTOUCHE_KIND_AS_BG);
+    for (const key of CONVERSATION_LAYOUT_KEYS) {
+      localStorage.removeItem(key);
+      notifyPreferenceChanged(key, null);
+    }
     // Reset selects visually
     const orgSel = document.getElementById('currentOrganisationSelect'); if (orgSel) orgSel.selectedIndex = 0;
     const langSel = document.getElementById('preferredLanguageSelect'); if (langSel) langSel.value = 'en-NZ';

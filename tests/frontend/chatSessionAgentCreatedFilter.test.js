@@ -40,6 +40,8 @@ describe('chat session agent-created filtering', () => {
         `;
 
         localStorage.clear();
+        // These legacy context-menu cases start from an explicit horizontal choice.
+        localStorage.setItem('von:chatSessionTabsLayout', 'horizontal');
 
         global.fetch = jest.fn(async (url) => {
             const urlText = String(url);

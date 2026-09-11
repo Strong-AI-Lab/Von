@@ -126,6 +126,20 @@
 
             <div class="speech-settings-panel">
                 <div class="speech-settings-row">
+                    <label class="speech-settings-label" for="settingsConversationLayoutSelect">Conversation list on desktop</label>
+                    <select id="settingsConversationLayoutSelect" class="speech-settings-select">
+                        <option value="vertical">Left tray (default)</option>
+                        <option value="horizontal">Horizontal across top</option>
+                    </select>
+                </div>
+                <div class="speech-settings-row">
+                    <label for="settingsConversationTrayHoverToggle">
+                        <input id="settingsConversationTrayHoverToggle" type="checkbox" />
+                        Expand collapsed conversation tray on hover
+                    </label>
+                </div>
+                <small class="settings-note">Mobile and narrow windows keep the horizontal list. Layout, tray width and collapsed state are remembered in this browser.</small>
+                <div class="speech-settings-row">
                     <label class="speech-settings-label" for="settingsConversationRecentLimitInput">Max recent
                         conversations (N)</label>
                     <input id="settingsConversationRecentLimitInput" class="speech-settings-input" type="number" min="1"
