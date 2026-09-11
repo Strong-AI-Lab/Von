@@ -82,6 +82,8 @@ def test_create_task_route_parses_start_and_due_dates(monkeypatch):
             "evidence": "Printed document",
             "notes": "Needs a coloured copy",
             "reference_code": "TASK-001",
+            "requested_model": "gpt-6-astra",
+            "requested_reasoning_effort": "high",
         },
     )
 
@@ -97,6 +99,8 @@ def test_create_task_route_parses_start_and_due_dates(monkeypatch):
     assert captured["task_source_id"] == "#V#jira_imported_task_source"
     assert captured["report_to_concept_id"] == "#V#user_manager"
     assert captured["task_role"] == "Communicator"
+    assert captured["requested_model"] == "gpt-6-astra"
+    assert captured["requested_reasoning_effort"] == "high"
     assert captured["next_checkpoint"] == "Tomorrow morning"
     assert captured["progress_signal"] == "Confirmed by chat"
     assert captured["evidence"] == "Printed document"

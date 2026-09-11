@@ -63,6 +63,50 @@ def test_empty_poll_has_no_model_or_message(config, monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "requested,expected",
+    [
+        ({}, ("gpt-6-astra", "medium")),
+        ({"requested_model": "gpt-5.6-terra"}, ("gpt-5.6-terra", "medium")),
+        ({"requested_reasoning_effort": "high"}, ("gpt-6-astra", "high")),
+        (
+            {"requested_model": None, "requested_reasoning_effort": None},
+            ("gpt-6-astra", "medium"),
+        ),
+    ],
+)
+def test_task_model_settings_inherit_independently(requested, expected):
+    resolved = worker.resolve_execution_settings({}, requested)
+    assert (resolved["model"], resolved["reasoning_effort"]) == expected
+    for key in ("model", "reasoning_effort"):
+        assert resolved[key + "_source"] == (
+            "task"
+            if requested.get("requested_" + key) is not None
+            else "worker_default"
+        )
+
+
+def test_forbidden_task_model_is_reported_without_running_codex(config, monkeypatch):
+    monkeypatch.setattr(
+        worker.subprocess, "run", lambda *a, **kw: pytest.fail("model invoked")
+    )
+    reports = []
+    api = SimpleNamespace(
+        pending=lambda: [task(config)],
+        inputs=lambda _: {"requested_model": "gpt-5.6-sol"},
+        conversation=lambda _: {"available": False},
+        send=lambda *a: "#V#started",
+        tasks=SimpleNamespace(update_task_status=lambda *a, **kw: None),
+        finish=lambda state: (
+            reports.append(state["result"].copy()),
+            state.update(phase="waiting", message_id="#V#result"),
+        ),
+    )
+    worker.tick(config, api, 0)
+    assert reports[0]["status"] == "blocked"
+    assert "Sol-family" in reports[0]["summary"]
+
+
+@pytest.mark.parametrize(
     "request_deployment,changed,interrupted,expected",
     [
         (False, False, False, None),
@@ -352,6 +396,8 @@ assert 'OPENAI_API_KEY' not in os.environ
 assert 'MONGO_URI' not in os.environ
 assert '--sandbox' not in sys.argv
 assert 'default_permissions="test-profile"' in sys.argv
+assert sys.argv[sys.argv.index('--model') + 1] == 'gpt-6-astra'
+assert 'model_reasoning_effort="high"' in sys.argv
 result = Path(sys.argv[sys.argv.index('--output-last-message') + 1])
 result.write_text(json.dumps({'status':'completed','summary':'Fixture ran','evidence':'Checked','question':''}))
 """)
@@ -369,6 +415,7 @@ result.write_text(json.dumps({'status':'completed','summary':'Fixture ran','evid
     )
     state = {"task_id": "#V#task"}
     state_path = tmp_path / "state.json"
+    inputs = {"requested_model": "gpt-6-astra", "requested_reasoning_effort": "high"}
 
     def fail_fetch(args, **kwargs):
         if "fetch" in args:
@@ -378,13 +425,17 @@ result.write_text(json.dumps({'status':'completed','summary':'Fixture ran','evid
     with (tmp_path / "lock").open("w") as lock:
         monkeypatch.setattr(worker, "command", fail_fetch)
         with pytest.raises(OSError):
-            worker.launch(config, state, {}, {}, state_path, lock.fileno())
+            worker.launch(config, state, inputs, {}, state_path, lock.fileno())
         assert (Path(state["worktree"]) / ".git").is_dir()
         assert not state.get("checkout_prepared")
         monkeypatch.setattr(worker, "command", run)
-        worker.launch(config, state, {}, {}, state_path, lock.fileno())
+        worker.launch(config, state, inputs, {}, state_path, lock.fileno())
     checkout = Path(state["worktree"])
     assert state["result"]["status"] == "completed"
+    assert state["execution_settings"]["model"] == "gpt-6-astra"
+    assert state["execution_settings"]["reasoning_effort"] == "high"
+    context = json.loads((Path(state["run_dir"]) / "context.json").read_text())
+    assert context["execution_settings"] == state["execution_settings"]
     assert state["checkout_prepared"]
     assert (checkout / "AGENTS.md").read_text() == (source / "AGENTS.md").read_text()
     assert run(["git", "-C", str(checkout), "remote", "get-url", "origin"]) == str(

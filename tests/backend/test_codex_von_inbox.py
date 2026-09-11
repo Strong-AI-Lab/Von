@@ -280,6 +280,7 @@ def test_inbox_launch_is_read_only_and_inherits_the_single_worker_lock(
     def run(args, **kwargs):
         assert args[args.index("--sandbox") + 1] == "read-only"
         assert kwargs["pass_fds"] == (17,)
+        assert 'model_reasoning_effort="medium"' in args
         assert not set(kwargs["env"]) & {"OPENAI_API_KEY", "MONGO_URI"}
         output = inbox.Path(args[args.index("--output-last-message") + 1])
         inbox.write_json(

@@ -35235,6 +35235,11 @@ def _task_create(**kwargs):
     evidence = kwargs.get("evidence")
     notes = kwargs.get("notes")
     reference_code = kwargs.get("reference_code")
+    requested_settings = {
+        key: (value.strip() or None) if isinstance(value, str) else value
+        for key in ("requested_model", "requested_reasoning_effort")
+        if (value := kwargs.get(key)) is not None
+    }
     request_id = str(kwargs.get("request_id") or "").strip()
     idempotency_key = str(kwargs.get("idempotency_key") or "").strip()
 
@@ -35315,6 +35320,7 @@ def _task_create(**kwargs):
             "evidence": evidence,
             "notes": notes,
             "reference_code": reference_code,
+            **requested_settings,
         }
     creation_fingerprint = hashlib.sha256(
         json.dumps(
@@ -35330,6 +35336,7 @@ def _task_create(**kwargs):
         "description": description.strip(),
         "status": "pending",
         "priority": priority,
+        **requested_settings,
     }
 
     def _canonical_read_back_mismatches(task: dict[str, Any]) -> dict[str, Any]:
@@ -35456,6 +35463,7 @@ def _task_create(**kwargs):
                 evidence=evidence,
                 notes=notes,
                 reference_code=reference_code,
+                **requested_settings,
                 project_concept_id=kwargs.get("project_concept_id"),
                 collection_concept_ids=kwargs.get("collection_concept_ids"),
                 agent_creation_fingerprint=creation_fingerprint,
@@ -36952,6 +36960,8 @@ def _task_update_fields(**kwargs):
             "priority",
             "task_type_ids",
             "task_role",
+            "requested_model",
+            "requested_reasoning_effort",
             "next_checkpoint",
             "progress_signal",
             "evidence",
@@ -44886,6 +44896,8 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "report_to_concept_id": (str, type(None)),
                     "reports_to_concept_id": (str, type(None)),
                     "task_role": (str, type(None)),
+                    "requested_model": (str, type(None)),
+                    "requested_reasoning_effort": (str, type(None)),
                     "next_checkpoint": (str, type(None)),
                     "progress_signal": (str, type(None)),
                     "evidence": (str, type(None)),
@@ -44934,7 +44946,11 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 "assignee_concept_id when reporting responsibility. "
                 "Priority: low, medium, high, critical. Tasks start in 'pending' status and can include "
                 "planning metadata (components, fix versions, sprint values, backlog rank), canonical "
-                "task categories, source semantics, and richer task-detail fields."
+                "task categories, source semantics, and richer task-detail fields. "
+                "For coding-agent work, preserve a user-specified model and reasoning level in "
+                "requested_model (exact model ID, e.g. gpt-6-astra) and "
+                "requested_reasoning_effort (e.g. medium or high). Omit either to inherit "
+                "the coding worker default. These fields do not execute the task."
             ),
         ),
         MethodDefinition(
@@ -45132,13 +45148,15 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "Update multiple task fields in one operation. "
                     "Supported fields: status, assignee_concept_id, created_by_concept_id, "
                     "title, description, priority, task_type_ids, task_source_id, "
-                    "report_to_concept_id, task_role, next_checkpoint, progress_signal, "
+                    "report_to_concept_id, task_role, requested_model, requested_reasoning_effort, "
+                    "next_checkpoint, progress_signal, "
                     "evidence, notes, reference_code, start_date, due_date, labels, "
                     "components, fix_versions, sprint_values, backlog_rank, "
                     "reporter_concept_id, watcher_concept_ids, parent_task_concept_id, "
                     "epic_task_concept_id, current_work_product_concept_id. "
                     "For ordinary continuation use title, description, status, priority, "
-                    "task_type_ids, task_role, next_checkpoint, progress_signal, evidence, "
+                    "task_type_ids, task_role, requested_model, requested_reasoning_effort, "
+                    "next_checkpoint, progress_signal, evidence, "
                     "notes, start_date, due_date, current_work_product_concept_id, "
                     "assignee_concept_id (self or #V#von_system, creator only), and "
                     "report_to_concept_id (self)."

@@ -53,6 +53,33 @@ def fingerprint(value):
     ).hexdigest()
 
 
+def resolve_execution_settings(config, inputs):
+    """Resolve task preferences without substituting another requested model."""
+    resolved = {}
+    for name, default in (("model", "gpt-6-astra"), ("reasoning_effort", "medium")):
+        requested = inputs.get("requested_" + name)
+        configured = config.get(
+            "model" if name == "model" else "model_reasoning_effort"
+        )
+        value = requested if requested is not None else configured
+        value = default if value is None else value
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or any(c.isspace() for c in value.strip())
+        ):
+            raise ValueError(
+                f"Invalid {name}: specify one exact model or reasoning level"
+            )
+        resolved[name] = value.strip()
+        resolved[name + "_source"] = (
+            "task" if requested is not None else "worker_default"
+        )
+    if "sol" in resolved["model"].lower():
+        raise ValueError("Sol-family models are disabled for this worker")
+    return resolved
+
+
 def authorised_task(task, config):
     return (
         task.get("assignee_concept_id") == config["agent_id"]
@@ -171,6 +198,8 @@ class Von:
         return {
             "title": task["title"],
             "description": task.get("description"),
+            "requested_model": task.get("requested_model"),
+            "requested_reasoning_effort": task.get("requested_reasoning_effort"),
             "comments": comments,
             "replies": [
                 message for message in replies if not self.inbox_answered(message)
@@ -320,6 +349,13 @@ class Von:
             f"DGX worktree: {state.get('worktree', 'not started')}\n"
             f"Run: {state['attempt']}"
         ).strip()
+        if state.get("execution_settings"):
+            settings = state["execution_settings"]
+            content += (
+                f"\nExecution model: {settings['model']} ({settings['model_source']}); "
+                f"reasoning: {settings['reasoning_effort']} "
+                f"({settings['reasoning_effort_source']})."
+            )
         # Keep the delivery intent stable across a crash after a task transition.
         # A changed/cancelled task is left untouched; the run evidence still goes
         # to the original authorised delegator.
@@ -400,6 +436,12 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
     state.pop("report_task", None)
     state.pop("report_content", None)
     state.pop("deployment_final", None)
+    state.pop("execution_settings", None)
+    write_json(state_path, state)
+    settings = resolve_execution_settings(config, inputs)
+    state["execution_settings"] = settings
+    context["execution_settings"] = settings
+    write_json(context_path, context)
     write_json(state_path, state)
     if not state.get("checkout_prepared"):
         worktree.parent.mkdir(parents=True, exist_ok=True)
@@ -471,7 +513,9 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         "exec",
         "--strict-config",
         "--model",
-        config["model"],
+        settings["model"],
+        "-c",
+        "model_reasoning_effort=" + json.dumps(settings["reasoning_effort"]),
         "--cd",
         str(worktree),
         "--json",
@@ -670,7 +714,7 @@ def tick(config, api, lock_fd):
         )
         try:
             launch(config, state, inputs, conversation, path, lock_fd)
-        except (OSError, subprocess.CalledProcessError) as exc:
+        except (OSError, subprocess.CalledProcessError, ValueError) as exc:
             if "run_dir" not in state:
                 raise
             write_json(
@@ -678,6 +722,13 @@ def tick(config, api, lock_fd):
                 {"error_type": type(exc).__name__},
             )
             recover_result(state)
+            if isinstance(exc, ValueError):
+                state["result"]["summary"] = (
+                    "Coding execution settings rejected: " + str(exc)
+                )
+                state["result"][
+                    "question"
+                ] = "Correct this task's model or reasoning setting, then requeue it."
             write_json(path, state)
         apply_deployment(config, api, state, path, lock_fd)
         api.finish(state)
@@ -702,8 +753,7 @@ def main():
     options = parser.parse_args()
     os.umask(0o077)
     config = json.loads(Path(options.config).read_text())
-    if "sol" in config["model"].lower():
-        raise ValueError("Sol-family models are disabled for this worker")
+    resolve_execution_settings(config, {})
     state_root = Path(config["state_root"])
     state_root.mkdir(parents=True, exist_ok=True)
     with (state_root / "worker.lock").open("a") as lock:

@@ -453,7 +453,11 @@ def test_task_create_retry_reuses_canonical_task(monkeypatch):
 
     def fake_create(**kwargs):
         create_calls["count"] += 1
-        task = _owned_task()
+        task = {
+            **_owned_task(),
+            "requested_model": kwargs.get("requested_model"),
+            "requested_reasoning_effort": kwargs.get("requested_reasoning_effort"),
+        }
         persisted.update(
             {
                 "task": task,
@@ -475,6 +479,8 @@ def test_task_create_retry_reuses_canonical_task(monkeypatch):
     )
     arguments = {
         "title": "Agent task",
+        "requested_model": "gpt-6-astra",
+        "requested_reasoning_effort": "high",
         "description": "Test",
         "assignee_id": "#V#user_alice",
         "created_by_concept_id": "#V#user_alice",
@@ -492,6 +498,8 @@ def test_task_create_retry_reuses_canonical_task(monkeypatch):
     assert second["changed"] is False
     assert second["idempotent_replay"] is True
     assert create_calls["count"] == 1
+    assert first["requested_model"] == "gpt-6-astra"
+    assert second["requested_reasoning_effort"] == "high"
 
 
 def test_task_create_actor_scoped_idempotency_key_reuses_task_without_turn(
