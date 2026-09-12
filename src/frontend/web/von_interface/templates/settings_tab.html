@@ -1335,7 +1335,7 @@
                 document.dispatchEvent(new CustomEvent('authStatusChanged', { detail: authStatus || {} }));
                 const hostDocument = getSettingsHostDocument();
                 if (hostDocument !== document) {
-                    hostDocument.dispatchEvent(new CustomEvent('authStatusChanged', { detail: authStatus || {} }));
+                    hostDocument.dispatchEvent(new CustomEvent('von:studio-access-changed', { detail: authStatus || {} }));
                 }
             } catch { }
 

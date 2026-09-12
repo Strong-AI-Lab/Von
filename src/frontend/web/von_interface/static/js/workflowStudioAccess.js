@@ -20,9 +20,11 @@ export function setupWorkflowStudioAccess(onUnavailable) {
     }
   };
   window.matchMedia?.(STUDIO_MOBILE_QUERY).addEventListener('change', sync);
-  document.addEventListener('authStatusChanged', event => {
+  const updateAccess = event => {
     setWorkflowStudioAccess(event.detail);
     sync();
-  });
+  };
+  document.addEventListener('authStatusChanged', updateAccess);
+  document.addEventListener('von:studio-access-changed', updateAccess);
   sync();
 }

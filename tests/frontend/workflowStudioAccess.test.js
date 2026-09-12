@@ -51,10 +51,10 @@ describe('Studio admission and responsive navigation', () => {
         expect(document.body.dataset.activeTab).toBe('settingsTab');
         document.removeEventListener('von:tab-activated', changed);
     });
-    test('loss of authenticated capability closes Studio', () => {
+    test.each(['authStatusChanged', 'von:studio-access-changed'])('loss of capability closes Studio via %s', eventName => {
         setupTabNavigation();
         activateTab('workflowStudioTab');
-        document.dispatchEvent(new CustomEvent('authStatusChanged', { detail: { authenticated: false } }));
+        document.dispatchEvent(new CustomEvent(eventName, { detail: { authenticated: false } }));
         expect(canUseWorkflowStudio()).toBe(false);
         expect(document.body.dataset.activeTab).toBe('chatTab');
     });
