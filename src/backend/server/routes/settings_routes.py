@@ -958,6 +958,44 @@ def get_llm_info():
         return jsonify({"error": "Failed to retrieve LLM info."}), 500
 
 
+@settings_bp.route("/execution_cost_display", methods=["GET", "PUT"])
+def execution_cost_display():
+    """Read viewer-scoped thresholds or replace the authenticated user's pair."""
+    from ...services.execution_cost_display_service import (
+        PREDICATE, resolve_preferences, validate_preferences,
+    )
+
+    actor = get_effective_user_concept_id()
+    if not actor:
+        return _jsonify_no_store({"error": "authenticated_actor_context_required"}, 401)
+    effective = get_effective_context(
+        request.headers.get("X-Von-Window-Session"), dict(session), actor,
+    )
+    if request.method == "PUT":
+        import json
+        from ...services.ontology_mutation_command_service import execute_governed_ontology_method
+        from ...services.text_value_service import upsert_singleton_text_relation
+
+        try:
+            value = validate_preferences(request.get_json(silent=True))
+        except ValueError as exc:
+            return _jsonify_no_store({"error": str(exc)}, 400)
+        text = json.dumps(value, sort_keys=True)
+        provenance = {"source": "execution_cost_display_preferences", "actor_concept_id": actor}
+        result = execute_governed_ontology_method(
+            method_name="upsert_singleton_text_relation",
+            arguments={"concept_id": actor, "predicate": PREDICATE, "text": text,
+                       "language": "en-NZ", "provenance": provenance},
+            mutate=lambda: upsert_singleton_text_relation(
+                subject_concept_id=actor, predicate=PREDICATE, text=text,
+                lang="en-NZ", provenance=provenance,
+            ),
+        )
+        if result.get("success") is False:
+            return _jsonify_no_store(result, 503)
+    return _jsonify_no_store(resolve_preferences(actor, effective.get("organisation_id")))
+
+
 @settings_bp.route("/llm/cost_summary", methods=["GET"])
 def get_llm_cost_summary():
     """Return a bounded persisted cost summary for the current actor/model."""

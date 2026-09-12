@@ -1,4 +1,5 @@
 import { initialiseCompactChatComposer, isCompactComposer, resizeCompactDraft, shouldSubmitComposerKey } from './components/compactComposer.js';
+import { updateExecutionCost } from './components/executionCost.js';
 import { canUseWorkflowStudio } from './workflowStudioAccess.js';
 import { createChatSteeringControls } from './components/chatSteeringControls.js';
 import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows } from './components/conversationCatalogue.js';
@@ -9282,6 +9283,8 @@ function updateThinkingCardMeta(request, progress, cardRoot = null) {
         bits.push(formatThinkingDuration(elapsedMs));
     }
 
+    const durationBitCount = bits.length;
+
     // Tool count
     const done = effectiveProgress && Number.isFinite(effectiveProgress.tool_calls_done)
         ? Number(effectiveProgress.tool_calls_done)
@@ -9318,7 +9321,6 @@ function updateThinkingCardMeta(request, progress, cardRoot = null) {
         bits.push(lastActivityText);
     }
 
-    metaEl.textContent = bits.length > 0 ? bits.join(' \u00b7 ') : '';
     const lastActivityMs = resolveLastActivityTimestampMs(effectiveProgress);
     if (Number.isFinite(lastActivityMs)) {
         setUnambiguousTimestampTooltip(metaEl, new Date(lastActivityMs).toISOString(), 'Last activity: ');
@@ -9327,6 +9329,19 @@ function updateThinkingCardMeta(request, progress, cardRoot = null) {
         metaEl.removeAttribute('aria-label');
         metaEl.removeAttribute('data-original-title');
     }
+    // Keep the timestamp tooltip but do not let its aria-label mask the cost.
+    metaEl.removeAttribute('aria-label');
+    const costSlot = metaEl.querySelector('.thinking-execution-cost') || document.createElement('span');
+    metaEl.replaceChildren(document.createTextNode(bits.slice(0, durationBitCount).join(' · ')));
+    metaEl.appendChild(costSlot);
+    const remaining = bits.slice(durationBitCount).join(' · ');
+    if (remaining) metaEl.appendChild(document.createTextNode(` · ${remaining}`));
+    updateExecutionCost(
+        costSlot,
+        resolveThinkingLlmUsageCostSummary(request)?.estimated_cost,
+        buildConversationRuntimeCostContext(),
+        buildChatFetchHeaders(),
+    );
 }
 
 function recordToolUseHistory(request, progress) {

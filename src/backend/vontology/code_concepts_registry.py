@@ -59,6 +59,7 @@ _TEXT_PREDICATE_IDS = [
     "#V#has_constitutive_relation_requirements_json",
     "#V#hasVonOrgRole",
     "#V#hasVonLoginEmail",
+    "#V#hasExecutionCostDisplayPreferences",
 ]
 
 _FILE_METADATA_PREDICATE_IDS = [
