@@ -1398,8 +1398,7 @@ schedules enabled. A bounded or incomplete schedule listing does not prove that
 no prior schedule exists.
 
 If no suitable schedule exists after reconciliation, use the normal actor-bound
-schedule route with an interval of 3600
-seconds, a stable idempotency key such as
+schedule route with an interval of 3600 seconds, a stable idempotency key such as
 `hourly-owned-unnamed-conversation-naming-v1`, and an explicit allowed model in
 `default_inputs.requested_model`. For the bounded naming slice, `gpt-5.4` with
 `requested_model_parameters: {"reasoning_effort": "medium"}` is the initial
@@ -1421,8 +1420,8 @@ incomplete source coverage is not exhaustive success; resume/retry the existing
 instance from its checkpoint. Completion covers the traversed source snapshot,
 not concurrent additions. Check occurrence identity, step receipts and canonical
 titles before claiming the hourly responsibility is working; schedule creation
-and source publication alone are insufficient. JVNAUTOSCI-2698 owns the live
-activation and acceptance status.
+and source publication alone are insufficient. Record live activation and
+acceptance on the current requesting task.
 
 Awaited durable execution contract:
 
