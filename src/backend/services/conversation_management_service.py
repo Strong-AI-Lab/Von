@@ -773,6 +773,19 @@ def list_actor_conversations(
         else:
             phase = "shared"
             position = None
+            if len(conversations) >= safe_limit:
+                # The owned stream is exhausted, but the shared stream has
+                # not been read. Preserve that transition for the next page.
+                next_cursor = encode_opaque_cursor(
+                    purpose="conversation_list",
+                    payload={
+                        "scope": cursor_scope,
+                        "phase": "shared",
+                        "position": None,
+                        "coverage": _cursor_coverage(),
+                    },
+                    ttl_seconds=_CONVERSATION_CURSOR_TTL_SECONDS,
+                )
 
     if phase == "shared" and next_cursor is None and len(conversations) < safe_limit:
         remaining = max(1, safe_limit - len(conversations))
