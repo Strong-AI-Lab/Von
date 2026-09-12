@@ -1,3 +1,4 @@
+import { resizeCompactDraft, shouldSubmitComposerKey } from './compactComposer.js';
 import { initializeConceptAutocomplete } from './conceptAutocomplete.js';
 import { simpleMarkdownToHtml } from '../markdownUtils.js';
 import { profileButton, participantAvatar } from './participantProfile.js';
@@ -85,6 +86,7 @@ export async function openMessageExchange(row) {
     const input = _messagesContainer?.querySelector('#messageInput');
     if (input) {
         input.value = _exchangeDrafts.get(exchangeScope()) || '';
+        resizeCompactDraft(input);
         input.placeholder = `Reply to ${row.session_name}`;
     }
     const compose = _messagesContainer?.querySelector('#messageComposeArea');
@@ -264,7 +266,7 @@ function renderMessagesTabContent() {
                         <div id="messageComposeRecoveryNote" class="message-send-recovery-note"></div>
                     </div>
                     <div class="message-compose-row">
-                        <textarea id="messageInput" class="message-input" placeholder="Type your message..." rows="3"></textarea>
+                        <textarea id="messageInput" aria-label="Reply" class="message-input" placeholder="Type your message..." rows="3"></textarea>
                         <button id="sendMessageBtn" class="send-message-btn" type="button" aria-busy="false">Send</button>
                     </div>
                 </div>
@@ -343,12 +345,15 @@ function attachMessagesEventListeners() {
     const msgInput = _messagesContainer.querySelector('#messageInput');
     if (msgInput) {
         msgInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
+            if (shouldSubmitComposerKey(e)) {
                 e.preventDefault();
                 handleSendReply();
             }
         });
         msgInput.addEventListener('input', syncVisibleReplyDeliveryAttempt);
+        resizeCompactDraft(msgInput);
+        window.addEventListener('resize', resizeVisibleReplyComposer);
+        window.visualViewport?.addEventListener('resize', resizeVisibleReplyComposer);
     }
 
     const replyRecoverySelect = _messagesContainer.querySelector('#messageComposeRecoverySelect');
@@ -545,6 +550,7 @@ async function selectConversation(userId) {
     const replyInput = _messagesContainer?.querySelector('#messageInput');
     if (replyInput) {
         replyInput.value = '';
+        resizeCompactDraft(replyInput);
     }
     // Detach the in-memory attempt while changing scope without deleting the
     // session record. A matching recipient can bind it again after actor/thread
@@ -1456,10 +1462,15 @@ function replaceVisibleDeliveryAttempt(scope, {
     });
 }
 
+function resizeVisibleReplyComposer() {
+    resizeCompactDraft(_messagesContainer?.querySelector('#messageInput'));
+}
+
 function syncVisibleReplyDeliveryAttempt() {
     const replyInput = _messagesContainer?.querySelector('#messageInput');
     if (!replyInput) return;
 
+    resizeCompactDraft(replyInput);
     const draft = replyInput.value;
     const currentAttempt = getDeliveryAttempt(COMPOSE_SCOPE_REPLY);
     if (!currentAttempt) {
@@ -1622,6 +1633,7 @@ function restoreReplyDeliveryAttemptForCurrentScope() {
 
     _replyDeliveryAttempt = persistedAttempt;
     replyInput.value = persistedAttempt.draft;
+    resizeCompactDraft(replyInput);
     setComposeFailureState(COMPOSE_SCOPE_REPLY, persistedAttempt.recoveryState);
     return true;
 }
@@ -2036,6 +2048,7 @@ async function handleSendReply() {
             && activeReplyInput?.value.trim() === content
         ) {
             activeReplyInput.value = '';
+            resizeCompactDraft(activeReplyInput);
         }
         _exchangeDrafts.delete(exchangeScope());
         document.dispatchEvent(new CustomEvent('von:conversation-contribution'));
