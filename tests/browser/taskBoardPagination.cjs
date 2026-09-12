@@ -6,7 +6,7 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const root = path.resolve('src/frontend/web/von_interface/static');
 const output = path.resolve(process.argv[2] || '.run/task-board-pagination');
-const baseline = process.argv.includes('--baseline');
+const baseline = process.argv.find(arg => arg.startsWith('--baseline='))?.slice('--baseline='.length);
 const task = i => ({ task_concept_id: `#V#fixture_task_${i}`, title: `Research task ${i}`, description: 'Review the research evidence and record the outcome.', status: 'pending', priority: 'medium' });
 const requests = [];
 const stubs = {
@@ -35,7 +35,7 @@ const server = http.createServer((req,res) => {
         if(!file.startsWith(root + '/') || !fs.existsSync(file)) {res.statusCode=404;res.end();return;}
         res.setHeader('Content-Type',file.endsWith('.css')?'text/css':'text/javascript');
         let source=fs.readFileSync(file,'utf8');
-        if(baseline && url.pathname === '/styles.css') source=require('node:child_process').execFileSync('git',['show','HEAD:src/frontend/web/von_interface/static/styles.css'],{encoding:'utf8'});
+        if(baseline && url.pathname === '/styles.css') source=require('node:child_process').execFileSync('git',['show',`${baseline}:src/frontend/web/von_interface/static/styles.css`],{encoding:'utf8'});
         res.end(source);
     }
 });
