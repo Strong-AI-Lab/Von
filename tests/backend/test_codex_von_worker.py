@@ -457,6 +457,7 @@ result.write_text(json.dumps({'status':'completed','summary':'Fixture ran','evid
             "-C",
             str(source),
             "config",
+            "--local",
             "--get",
             "credential.https://github.com.helper",
         ],
@@ -464,3 +465,43 @@ result.write_text(json.dumps({'status':'completed','summary':'Fixture ran','evid
         capture_output=True,
     )
     assert untouched.returncode == 1
+
+
+def test_backend_root_rejects_copied_bundle_without_services(tmp_path):
+    with pytest.raises(RuntimeError, match="--backend-root"):
+        worker.bind_backend_root(tmp_path)
+
+
+def test_backend_root_rejects_already_imported_other_checkout(tmp_path):
+    service = tmp_path / "src/backend/services/task_management_service.py"
+    service.parent.mkdir(parents=True)
+    service.write_text("# fixture only\n")
+    with pytest.raises(RuntimeError, match="already belong to another checkout"):
+        worker.bind_backend_root(tmp_path)
+
+
+def test_backend_root_accepts_current_canonical_checkout(monkeypatch):
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    assert worker.bind_backend_root(root) == root
+    assert sys.path[0] == str(root)
+
+
+@pytest.mark.parametrize("missing", ["requested_model", "requested_reasoning_effort"])
+def test_old_backend_read_cannot_silently_launch_worker_defaults(
+    config, monkeypatch, missing
+):
+    row = task(config, requested_model="gpt-6-astra", requested_reasoning_effort="high")
+    row.pop(missing)
+    api = worker.Von(config)
+    monkeypatch.setattr(
+        api.tasks, "search_tasks", lambda **_: {"tasks": [row], "total": 1}
+    )
+    monkeypatch.setattr(api.tasks, "get_task", lambda _: row)
+    monkeypatch.setattr(
+        worker, "launch", lambda *a: pytest.fail("incompatible reader launched work")
+    )
+    with pytest.raises(RuntimeError, match="matching backend and worker release"):
+        worker.tick(config, api, 0)
+    with pytest.raises(RuntimeError, match="execution-preference fields"):
+        api.task(row["task_concept_id"])

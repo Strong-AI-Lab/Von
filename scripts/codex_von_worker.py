@@ -80,6 +80,40 @@ def resolve_execution_settings(config, inputs):
     return resolved
 
 
+def bind_backend_root(backend_root=None):
+    """Select one reviewed backend before imports, including copied script bundles."""
+    root = Path(backend_root or Path(__file__).resolve().parents[1]).resolve()
+    if not (root / "src/backend/services/task_management_service.py").is_file():
+        raise RuntimeError(
+            "Worker backend is missing; pass --backend-root with the "
+            "reviewed Von checkout containing canonical task services"
+        )
+    for name, module in tuple(sys.modules.items()):
+        if name == "src" or name.startswith("src."):
+            filename = getattr(module, "__file__", None)
+            if filename and not Path(filename).resolve().is_relative_to(root):
+                raise RuntimeError(
+                    "Worker backend imports already belong to another "
+                    "checkout; restart with the selected --backend-root"
+                )
+    sys.path.insert(0, str(root))
+    return root
+
+
+def require_task_execution_preferences(task):
+    # Current canonical point and list reads include both keys even when unset.
+    # An older backend omits them. Never turn an incompatible read into defaults.
+    missing = {"requested_model", "requested_reasoning_effort"} - task.keys()
+    if missing:
+        raise RuntimeError(
+            "Canonical task reader lacks execution-preference fields: "
+            + ", ".join(sorted(missing))
+            + ". Install the matching backend and worker release; "
+            "verify --backend-root before resuming pickup."
+        )
+    return task
+
+
 def authorised_task(task, config):
     return (
         task.get("assignee_concept_id") == config["agent_id"]
@@ -118,7 +152,7 @@ class Von:
         self.messages = message_service
 
     def task(self, task_id):
-        return self.tasks.get_task(task_id)
+        return require_task_execution_preferences(self.tasks.get_task(task_id))
 
     def native_writer(self, task):
         project_id = task.get("project_concept_id")
@@ -144,7 +178,7 @@ class Von:
                 if not authorised_task(task, self.config):
                     continue
                 if self.native_writer(task):
-                    yield task
+                    yield require_task_execution_preferences(task)
                 else:
                     self.send(
                         task,
@@ -161,6 +195,7 @@ class Von:
 
     def inputs(self, task):
         """Task comments and direct replies retain their actual authorship."""
+        require_task_execution_preferences(task)
         task_id = task["task_concept_id"]
         comments = []
         offset = 0
@@ -750,6 +785,11 @@ def tick(config, api, lock_fd):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--backend-root",
+        help="Reviewed canonical backend checkout; "
+        "required when running a copied worker script bundle",
+    )
     options = parser.parse_args()
     os.umask(0o077)
     config = json.loads(Path(options.config).read_text())
@@ -762,7 +802,7 @@ def main():
         except BlockingIOError:
             print('{"outcome":"already_running"}')
             return
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        bind_backend_root(options.backend_root)
         from src.backend.integrations.internal_mcp.gateway import (
             INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE,
             bind_internal_mcp_actor_context_source,

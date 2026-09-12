@@ -35189,6 +35189,7 @@ def _task_create(**kwargs):
         create_task,
         find_task_by_agent_creation_fingerprint,
         get_task,
+        _task_concept_id_for_agent_creation_fingerprint,
     )
 
     title = kwargs.get("title")
@@ -35214,7 +35215,31 @@ def _task_create(**kwargs):
         return scope_error
     assert actor_scope is not None
 
-    assignee_id = kwargs.get("assignee_id") or kwargs.get("assignee_concept_id")
+    if "parent_task_concept_id" in kwargs:
+        return {
+            **make_error_response(
+                "task_create_parent_unsupported",
+                "task_create does not support parent_task_concept_id. No task was "
+                "created. Omit it for an independent related task; a required child "
+                "relationship needs the separately authorised task_create_subtask "
+                "or task_set_parent capability.",
+            ),
+            "changed": False,
+        }
+    for aliases in (
+        ("assignee_id", "assignee_concept_id"),
+        ("report_to_concept_id", "reports_to_concept_id"),
+    ):
+        values = {str(kwargs[key]).strip() for key in aliases if kwargs.get(key)}
+        if len(values) > 1:
+            return make_error_response(
+                "INVALID_PARAM", f"Conflicting aliases: {', '.join(aliases)}"
+            )
+    assignee_id = str(
+        kwargs.get("assignee_id")
+        or kwargs.get("assignee_concept_id")
+        or actor_scope.user_concept_id
+    ).strip()
     session_id = kwargs.get("originating_session_id") or kwargs.get("session_id")
     created_by = kwargs.get("created_by_concept_id") or kwargs.get("namespace")
     priority = kwargs.get("priority", "medium")
@@ -35246,16 +35271,27 @@ def _task_create(**kwargs):
     actor_id = str(actor_scope.user_concept_id)
     actor_org_id = str(actor_scope.organisation_concept_id or "")
     if (
-        str(assignee_id or "").strip() != actor_id
-        or str(created_by or "").strip() != actor_id
+        str(created_by or "").strip() != actor_id
         or str(org_id or "").strip() != actor_org_id
     ):
         return make_error_response(
             "task_actor_scope_denied",
             (
-                "An ordinary-turn task must be assigned to and created by the "
+                "An ordinary-turn task must be created by the "
                 "authenticated actor in the authenticated organisation."
             ),
+        )
+    if not _task_continuation_assignee_allowed(assignee_id, actor_id, actor_org_id):
+        return make_error_response(
+            "task_assignment_scope_denied",
+            "The task creator may assign work to themselves, Von, or a coding "
+            "agent belonging to the same organisation.",
+        )
+    report_to_concept_id = str(report_to_concept_id or "").strip() or None
+    if report_to_concept_id not in (None, actor_id):
+        return make_error_response(
+            "task_report_scope_denied",
+            "Ordinary task creation may report to the authenticated actor.",
         )
     if len(idempotency_key) > 512:
         return make_error_response(
@@ -35301,6 +35337,10 @@ def _task_create(**kwargs):
             "request_id": request_id,
             "actor_id": actor_id,
             "organisation_concept_id": actor_org_id,
+            "assignee_concept_id": assignee_id,
+            "report_to_concept_id": report_to_concept_id,
+            "project_concept_id": kwargs.get("project_concept_id"),
+            "collection_concept_ids": kwargs.get("collection_concept_ids"),
             "title": title.strip(),
             "description": description.strip(),
             "originating_session_id": session_id,
@@ -35331,7 +35371,26 @@ def _task_create(**kwargs):
         ).encode("utf-8")
     ).hexdigest()
 
+    assignment_read_back_fields = {
+        "task_concept_id": _task_concept_id_for_agent_creation_fingerprint(
+            creation_fingerprint
+        ),
+        "created_by_concept_id": actor_id,
+        "organisation_concept_id": actor_org_id or None,
+        "assignee_concept_id": assignee_id,
+        "report_to_concept_id": report_to_concept_id,
+        **requested_settings,
+    }
+    if session_id:
+        from ...services.conversation_concept_service import (
+            _generate_conversation_concept_id,
+        )
+
+        assignment_read_back_fields["originating_conversation_id"] = (
+            _generate_conversation_concept_id(session_id)
+        )
     required_read_back_fields = {
+        **assignment_read_back_fields,
         "title": title.strip(),
         "description": description.strip(),
         "status": "pending",
@@ -35380,11 +35439,19 @@ def _task_create(**kwargs):
         # Existing tasks may since have progressed beyond pending. Verify their
         # durable creation fields without resetting or reassigning them.
         required = ("task_concept_id", "title", "description", "status", "priority")
-        if any(not task.get(field) for field in required):
+        mismatches = {
+            field: {"expected": expected, "actual": task.get(field)}
+            for field, expected in assignment_read_back_fields.items()
+            if task.get(field) != expected
+        }
+        if mismatches or any(not task.get(field) for field in required):
             incomplete = _incomplete_canonical_read_back_response(
                 task_concept_id=str(task.get("task_concept_id") or ""), task=task
             )
             incomplete["changed"] = False
+            incomplete["required_field_mismatches"] = (
+                mismatches or incomplete["required_field_mismatches"]
+            )
             return incomplete
         return {
             **task,
@@ -35409,6 +35476,16 @@ def _task_create(**kwargs):
             "assignee_concept_id": task.get("assignee_concept_id"),
             "organisation_concept_id": task.get("organisation_concept_id"),
             "task_execution_verified": False,
+            "task_fields": {
+                key: task.get(key)
+                for key in (
+                    "assignee_concept_id",
+                    "report_to_concept_id",
+                    "requested_model",
+                    "requested_reasoning_effort",
+                    "parent_task_concept_id",
+                )
+            },
         }
 
     def _reconcile_after_create_failure() -> dict[str, Any] | None:
@@ -35481,7 +35558,6 @@ def _task_create(**kwargs):
                 return reconciled_task
             raise
         task_concept_id = str(result.get("task_concept_id") or "")
-        required_read_back_fields["task_concept_id"] = task_concept_id
         try:
             canonical_read_back = get_task(task_concept_id)
         except Exception as exc:
@@ -36879,6 +36955,8 @@ def _task_continuation_readback(task_id, fields, task):
         "status": "verified" if not mismatches else "mismatch",
         "verified": not mismatches,
         "task": task,
+        "task_concept_id": task.get("task_concept_id"),
+        "task_fields": {key: task.get(key) for key in fields},
         "mismatched_fields": mismatches,
     }
 
@@ -44918,8 +44996,6 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             output_schema=task_create_output_schema,
             category="write",
             ordinary_turn_trusted_argument_bindings={
-                "assignee_id": "actor_user_concept_id",
-                "assignee_concept_id": "actor_user_concept_id",
                 "created_by_concept_id": "actor_user_concept_id",
                 "organisation_concept_id": "actor_organisation_concept_id",
                 "originating_session_id": "conversation_id",
@@ -44929,12 +45005,10 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             },
             ordinary_turn_fixed_arguments={
                 "session_id": None,
-                "report_to_concept_id": None,
-                "reports_to_concept_id": None,
             },
             ordinary_turn_effect=True,
             description=(
-                "Create a self-assigned Von task (stored as a Vontology concept) for "
+                "Create a Von task (stored as a Vontology concept) for "
                 "the authenticated actor and organisation, linked to the current "
                 "conversation. Identical retries in the same turn reuse the canonical "
                 "task. A durable workflow may instead provide a stable idempotency_key "
@@ -44942,9 +45016,16 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 "Use this to track work items, action items, or to-dos; creating such "
                 "records can itself be the requested outcome. This operation does not "
                 "execute the recorded work, send mail, or create a calendar event. "
-                "The assignee is the authenticated actor, not a person named in the "
-                "title/description or an 'assignee' argument. Read the returned "
-                "assignee_concept_id when reporting responsibility. "
+                "Assignment defaults to the authenticated actor. Explicit assignee_id "
+                "or assignee_concept_id may select Von or an eligible coding agent in "
+                "the actor's organisation. report_to_concept_id may select the actor. "
+                "Read the returned assignee and execution preferences when reporting "
+                "responsibility. Standalone native coding-agent tasks do not require "
+                "project or collection membership for worker eligibility; eligibility "
+                "is not evidence of pickup or execution. Source conversation linkage "
+                "does not grant transcript access. parent_task_concept_id is unsupported "
+                "here and is rejected before creation; independent related work does "
+                "not require a parent. "
                 "Priority: low, medium, high, critical. Tasks start in 'pending' status and can include "
                 "planning metadata (components, fix versions, sprint values, backlog rank), canonical "
                 "task categories, source semantics, and richer task-detail fields. "

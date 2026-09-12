@@ -1024,6 +1024,11 @@ def test_task_attachment_gateway_success_and_error_schema(monkeypatch):
 
 def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
     gateway = _build_gateway()
+    from src.backend.services.task_management_service import (
+        _task_concept_id_for_agent_creation_fingerprint,
+    )
+
+    canonical = {}
     from src.backend.security.access_control import override_current_actor
 
     def _fake_create_task(
@@ -1056,8 +1061,10 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
         project_concept_id=None,
         collection_concept_ids=None,
     ):
-        return {
-            "task_concept_id": "#V#task_123",
+        result = {
+            "task_concept_id": _task_concept_id_for_agent_creation_fingerprint(
+                agent_creation_fingerprint
+            ),
             "title": title,
             "description": description,
             "status": "pending",
@@ -1085,6 +1092,8 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
             "agent_creation_fingerprint": agent_creation_fingerprint,
             "agent_creation_request_id": agent_creation_request_id,
         }
+        canonical.update(result)
+        return result
 
     monkeypatch.setattr(
         "src.backend.services.task_management_service.create_task",
@@ -1092,13 +1101,7 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
     )
     monkeypatch.setattr(
         "src.backend.services.task_management_service.get_task",
-        lambda task_concept_id: {
-            "task_concept_id": task_concept_id,
-            "title": "Task with dates",
-            "description": "Details",
-            "status": "pending",
-            "priority": "medium",
-        },
+        lambda task_concept_id: dict(canonical),
     )
     monkeypatch.setattr(
         "src.backend.services.task_management_service.find_task_by_agent_creation_fingerprint",
@@ -1116,7 +1119,7 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
                 "epic_task_concept_id": "#V#task_epic_1",
                 "task_type_ids": ["#V#delegated_task_specification"],
                 "task_source_id": "#V#jira_imported_task_source",
-                "report_to_concept_id": "#V#user_manager",
+                "report_to_concept_id": "#V#user_alice",
                 "task_role": "Communicator",
                 "next_checkpoint": "Tomorrow morning",
                 "progress_signal": "Confirmed by chat",
@@ -1157,19 +1160,13 @@ def test_task_create_gateway_supports_start_date_and_epic(monkeypatch):
         },
     )
     assert material == verified == {"task-create"}
-    assert payload["canonical_read_back"] == {
-        "task_concept_id": "#V#task_123",
-        "title": "Task with dates",
-        "description": "Details",
-        "status": "pending",
-        "priority": "medium",
-    }
+    assert payload["canonical_read_back"] == canonical
     assert payload.get("start_date") == "2026-03-01T10:00:00+00:00"
     assert payload.get("due_date") == "2026-03-05T10:00:00+00:00"
     assert payload.get("epic_task_concept_id") == "#V#task_epic_1"
     assert payload.get("task_type_ids") == ["#V#delegated_task_specification"]
     assert payload.get("task_source_id") == "#V#jira_imported_task_source"
-    assert payload.get("report_to_concept_id") == "#V#user_manager"
+    assert payload.get("report_to_concept_id") == "#V#user_alice"
     assert payload.get("reference_code") == "TASK-001"
     _assert_schema_conformance(gateway, "task_create", payload)
 
@@ -1180,18 +1177,30 @@ def test_task_create_gateway_marks_required_persistence_failure_indeterminate(
     wrong_readback_id,
 ):
     gateway = _build_gateway()
+    from src.backend.services.task_management_service import (
+        _task_concept_id_for_agent_creation_fingerprint,
+    )
+
+    identity = {}
     from src.backend.security.access_control import override_current_actor
 
     monkeypatch.setattr(
         "src.backend.services.task_management_service.create_task",
         lambda **_kwargs: {
-            "task_concept_id": "#V#task_partial",
+            "task_concept_id": identity.setdefault(
+                "id",
+                _task_concept_id_for_agent_creation_fingerprint(
+                    _kwargs["agent_creation_fingerprint"]
+                ),
+            ),
             "title": "Create a task",
             "description": "Persist the required fields.",
             "status": "pending",
             "priority": "medium",
             "required_text_persistence_failures": (
-                [] if wrong_readback_id else [
+                []
+                if wrong_readback_id
+                else [
                     {
                         "predicate": "#V#hasPriority",
                         "exception_type": "TimeoutError",
@@ -1203,11 +1212,16 @@ def test_task_create_gateway_marks_required_persistence_failure_indeterminate(
     monkeypatch.setattr(
         "src.backend.services.task_management_service.get_task",
         lambda task_concept_id: {
-            "task_concept_id": "#V#wrong_task" if wrong_readback_id else task_concept_id,
+            "task_concept_id": (
+                "#V#wrong_task" if wrong_readback_id else task_concept_id
+            ),
             "title": "Create a task",
             "description": "Persist the required fields.",
             "status": "pending",
             "priority": "medium",
+            "created_by_concept_id": "#V#user_alice",
+            "assignee_concept_id": "#V#user_alice",
+            "organisation_concept_id": "#V#org_test",
         },
     )
     monkeypatch.setattr(
@@ -1235,10 +1249,10 @@ def test_task_create_gateway_marks_required_persistence_failure_indeterminate(
     assert payload["error_code"] == "task_canonical_read_back_incomplete"
     assert "canonical_readback" not in payload
     assert payload["effect_status"] == "indeterminate"
-    assert payload["task_concept_id"] == "#V#task_partial"
+    assert payload["task_concept_id"] == identity["id"]
     if wrong_readback_id:
         assert payload["required_field_mismatches"] == {
-            "task_concept_id": {"expected": "#V#task_partial", "actual": "#V#wrong_task"}
+            "task_concept_id": {"expected": identity["id"], "actual": "#V#wrong_task"}
         }
     else:
         assert payload["required_field_mismatches"] == {}

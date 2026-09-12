@@ -464,8 +464,6 @@ def test_ordinary_turn_read_projection_follows_capability_authority_metadata():
     task_create_definition = catalogue.get("task_create")
     assert task_create_definition.ordinary_turn_effect is True
     assert task_create_definition.ordinary_turn_trusted_argument_bindings == {
-        "assignee_id": "actor_user_concept_id",
-        "assignee_concept_id": "actor_user_concept_id",
         "created_by_concept_id": "actor_user_concept_id",
         "organisation_concept_id": "actor_organisation_concept_id",
         "originating_session_id": "conversation_id",
