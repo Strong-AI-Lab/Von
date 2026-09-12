@@ -34,29 +34,72 @@ export function renderImageComposer(parent, sessionId, changed) {
     parent.replaceChildren();
     for (const item of imageItems(sessionId)) {
         const card = document.createElement('div');
-        card.style.cssText = 'display:inline-flex;flex-direction:column;gap:4px;margin:6px;max-width:180px';
+        card.style.cssText = 'display:inline-flex;flex-direction:column;gap:4px;margin:6px;max-width:180px;min-width:0;overflow-wrap:anywhere';
         if (item.descriptor) renderImageAttachments(card, [item.descriptor]);
+        else if (item.previewUrl) {
+            const preview = document.createElement('img');
+            preview.src = item.previewUrl;
+            preview.alt = item.name;
+            preview.style.cssText = 'max-width:100%;max-height:140px;object-fit:contain';
+            card.appendChild(preview);
+        }
         const label = document.createElement('span');
-        label.textContent = item.error || (item.descriptor ? item.name : `Uploading ${item.name}…`);
+        label.textContent = item.error ? `${item.name}: ${item.error}` : (item.descriptor ? item.name : `Uploading ${item.name}…`);
         label.setAttribute('role', item.error ? 'alert' : 'status');
         card.appendChild(label);
+        const details = document.createElement('span');
+        details.textContent = `${item.type || 'Unknown type'} · ${item.size.toLocaleString()} bytes`;
+        card.appendChild(details);
+        if (item.error) {
+            const retry = document.createElement('button');
+            retry.type = 'button'; retry.textContent = 'Retry upload';
+            retry.setAttribute('aria-label', `Retry upload of ${item.name}`);
+            retry.onclick = () => { void item.retry(); };
+            card.appendChild(retry);
+        }
         const remove = document.createElement('button');
         remove.type = 'button'; remove.textContent = 'Remove'; remove.setAttribute('aria-label', `Remove ${item.name}`);
-        remove.onclick = () => { pending.set(sessionId, imageItems(sessionId).filter(x => x !== item)); changed(); };
+        remove.onclick = () => {
+            pending.set(sessionId, imageItems(sessionId).filter(x => x !== item));
+            releasePreview(item);
+            changed();
+        };
         card.appendChild(remove); parent.appendChild(card);
     }
 }
 export async function uploadConversationImage(file, sessionId, headers, changed) {
-    const item = {name: file.name};
+    const item = {
+        name: file.name, type: file.type, size: file.size,
+        previewUrl: typeof URL.createObjectURL === 'function' ? URL.createObjectURL(file) : null,
+    };
+    item.retry = () => uploadItem(item, file, sessionId, headers, changed);
     pending.set(sessionId, [...imageItems(sessionId), item]); changed();
+    return item.retry();
+}
+function releasePreview(item) {
+    if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+    item.previewUrl = null;
+}
+async function uploadItem(item, file, sessionId, headers, changed) {
+    if (item.uploading || !imageItems(sessionId).includes(item)) return false;
+    item.uploading = true;
+    item.error = null;
+    changed();
     try {
         if (imageItems(sessionId).length > 8) throw new Error('At most eight images per message. Remove an image before sending.');
         const form = new FormData(); form.append('file', file, file.name || 'image.png');
         const response = await fetch('/von/api/images/upload', {method:'POST', headers, body:form});
         const result = await response.json();
         if (!response.ok || !result.image_attachment) throw new Error(result.message || result.error || 'Image upload failed');
-        item.descriptor = result.image_attachment; known.set(item.descriptor.concept_id, item);
+        // Removing an in-flight upload must not restore it when the response arrives.
+        if (imageItems(sessionId).includes(item)) {
+            item.descriptor = result.image_attachment;
+            item.retry = () => Promise.resolve(true);
+            known.set(item.descriptor.concept_id, item);
+        }
+        releasePreview(item);
     } catch (error) { item.error = String(error.message || error); }
+    item.uploading = false;
     changed();
     return Boolean(item.descriptor);
 }

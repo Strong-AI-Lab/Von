@@ -72,6 +72,7 @@ def store_image(
             "attributes.conversation_image": True,
             "attributes.sha256": info["sha256"],
             "attributes.user_concept_id": user_concept_id,
+            "attributes.original_filename": filename,
             "attributes.image_provenance": dict(provenance or {"kind": "user_upload"}),
         },
         {"concept_id": 1},
@@ -86,11 +87,11 @@ def store_image(
         content_type=info["content_type"],
         sha256=info["sha256"],
         size_bytes=len(data),
-        metadata={"user_concept_id": user_concept_id, "original_filename": safe_name},
+        metadata={"user_concept_id": user_concept_id, "original_filename": filename},
     )
     record = create_computer_file_copy_instance(
         user_concept_id=user_concept_id,
-        name=safe_name,
+        name=filename,
         sha256=info["sha256"],
         size_bytes=len(data),
         content_type=info["content_type"],
@@ -109,7 +110,7 @@ def store_image(
     return {
         **info,
         "concept_id": record.concept_id,
-        "filename": safe_name,
+        "filename": filename,
         "provenance": dict(provenance or {"kind": "user_upload"}),
         "url": image_url(record.concept_id),
     }
