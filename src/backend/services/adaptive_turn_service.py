@@ -4764,6 +4764,100 @@ def _effect_postcondition_identity(
     return hashlib.sha256(_json_bytes(identity)).hexdigest(), identity
 
 
+def _reconcile_task_creation_attempts(
+    tool_invocations: Sequence[Mapping[str, Any]],
+    projected: dict[str, dict[str, Any]],
+) -> None:
+    """Reconcile a rejected create with a verified record for the same request.
+
+    A corrected invalid type changes the handler fingerprint, so neither an
+    exact effect ID nor a task ID exists to join the rejected attempt. Compare
+    the remaining creation arguments instead; assignment may be completed by
+    a later verified field update on the returned task. This is an evidence
+    projection only, and never changes the original attempt receipt.
+    """
+    assignment_fields = ("assignee_concept_id", "report_to_concept_id")
+
+    def arguments_for(invocation: Mapping[str, Any]) -> dict[str, Any]:
+        arguments = dict(invocation.get("effective_arguments") or {})
+        for alias, field in (
+            ("assignee_id", "assignee_concept_id"),
+            ("reports_to_concept_id", "report_to_concept_id"),
+            ("task_type_id", "task_type_ids"),
+        ):
+            if alias in arguments:
+                arguments.setdefault(field, arguments.pop(alias))
+        if not arguments.get("assignee_concept_id") and arguments.get(
+            "created_by_concept_id"
+        ):
+            arguments["assignee_concept_id"] = arguments["created_by_concept_id"]
+        arguments.setdefault("report_to_concept_id", None)
+        return arguments
+
+    for index, invocation in enumerate(tool_invocations):
+        if invocation.get("execution_method", invocation.get("tool")) != "task_create":
+            continue
+        state = projected.get(invocation.get("effect_id"), {})
+        if (
+            state.get("effect_status") not in {"failed", "not_started"}
+            or state.get("changed") is not False
+        ):
+            continue
+        expected = arguments_for(invocation)
+        if not expected.get("title") or not expected.get("description"):
+            continue
+        error_code, error = _effect_failure_fact(state)
+        corrected_invalid_type = (
+            error_code == "INVALID_DATA"
+            and "unknown task type" in str(error or "").lower()
+        )
+        for later_index in range(index + 1, len(tool_invocations)):
+            later = tool_invocations[later_index]
+            if later.get("execution_method", later.get("tool")) != "task_create":
+                continue
+            later_state = projected.get(later.get("effect_id"), {})
+            receipt = later_state.get("canonical_readback") or {}
+            task_id = receipt.get("task_concept_id")
+            if (
+                later_state.get("effect_status") != "succeeded"
+                or receipt.get("verified") is not True
+                or not task_id
+            ):
+                continue
+            observed_arguments = arguments_for(later)
+            excluded = set(assignment_fields)
+            if corrected_invalid_type:
+                excluded.add("task_type_ids")
+            if {k: v for k, v in expected.items() if k not in excluded} != {
+                k: v for k, v in observed_arguments.items() if k not in excluded
+            }:
+                continue
+            fields = dict(receipt.get("task_fields") or {})
+            recovery_id = later["effect_id"]
+            for update in tool_invocations[later_index + 1 :]:
+                update_state = projected.get(update.get("effect_id"), {})
+                update_receipt = update_state.get("canonical_readback") or {}
+                if (
+                    update.get("execution_method", update.get("tool"))
+                    == "task_update_fields"
+                    and update_state.get("effect_status") == "succeeded"
+                    and update_receipt.get("verified") is True
+                    and update_receipt.get("task_concept_id") == task_id
+                ):
+                    fields.update(update_receipt.get("task_fields") or {})
+                    recovery_id = update["effect_id"]
+            if any(
+                field in expected and fields.get(field) != expected[field]
+                for field in assignment_fields
+            ):
+                continue
+            state["recovered_by_effect_id"] = recovery_id
+            state["recovery_status"] = "succeeded"
+            state["reconciliation_basis"] = "later_verified_requested_task_record"
+            state["recovered_task_concept_id"] = task_id
+            break
+
+
 def _reconcile_task_update_attempts(
     tool_invocations: Sequence[Mapping[str, Any]],
     projected: dict[str, dict[str, Any]],
@@ -4872,6 +4966,7 @@ def _reconcile_effect_attempts_by_postcondition(
             if success[0] > index
             else "prior_exact_postcondition_success"
         )
+    _reconcile_task_creation_attempts(tool_invocations, projected)
     _reconcile_task_update_attempts(tool_invocations, projected)
     return projected
 
@@ -5880,6 +5975,11 @@ def _build_effect_outcome_report(
             effect_status in {"failed", "partial", "indeterminate", "not_started"}
             or state.get("changed") is True
             or (effect_status == "succeeded" and state.get("changed") is None)
+            or (
+                effect_status == "succeeded"
+                and isinstance(state.get("canonical_readback"), Mapping)
+                and state["canonical_readback"].get("verified") is True
+            )
             or state.get("outcome_resolved") is True
         ):
             continue

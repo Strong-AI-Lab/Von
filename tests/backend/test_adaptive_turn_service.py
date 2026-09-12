@@ -16441,3 +16441,266 @@ def test_steering_after_tool_keeps_receipt_and_does_not_repeat_effect():
         client.calls[1]["context"][-1]["content"]
         == "Use this evidence in a shorter answer"
     )
+
+
+@pytest.mark.parametrize(
+    "scenario", ["direct", "recovery", "assign", "replay", "partial", "partial_replay", "failure"]
+)
+def test_task_creation_requested_outcome_reaches_final_response(scenario: str) -> None:
+    from src.backend.integrations.internal_mcp.schemas import make_error_response
+    from src.backend.services.turn_execution_record_service import (
+        _build_tool_authored_mutation_effects,
+    )
+
+    task_id = "#V#task_agent_verified"
+    desired = {
+        "title": "Repair task reporting",
+        "description": "Verify and deliver the repair.",
+        "assignee_concept_id": "#V#codex_dgx",
+    }
+    receipt = {
+        "verified": True,
+        "status": "verified",
+        "task_concept_id": task_id,
+        "task_fields": {"assignee_concept_id": "#V#codex_dgx"},
+    }
+
+    def handler(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if (
+            arguments.get("task_type_id") == "#V#task_specification"
+            or name == "other_effect"
+        ):
+            return make_error_response("INVALID_DATA", "Unknown task type")
+        actual_receipt = {
+            **receipt,
+            "task_fields": {
+                "assignee_concept_id": arguments.get(
+                    "assignee_concept_id", "#V#codex_dgx"
+                )
+            },
+        }
+        return {
+            "success": True,
+            "effect_status": "succeeded",
+            "changed": scenario not in {"replay", "partial_replay"},
+            "idempotent_replay": scenario in {"replay", "partial_replay"},
+            "task_concept_id": task_id,
+            "canonical_readback": actual_receipt,
+        }
+
+    catalogue = MethodCatalogue()
+    for name in ("task_create", "task_update_fields", "other_effect"):
+        catalogue.register(
+            MethodDefinition(
+                name=name,
+                handler=lambda _name=name, **kwargs: handler(_name, kwargs),
+                input_schema=Schema(allow_unknown=True),
+                category="write",
+                ordinary_turn_effect=True,
+            )
+        )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue,
+        transport=InternalMCPTransport(write_timeout_sec=1),
+        enabled=True,
+    )
+    calls = []
+
+    def call(name: str, arguments: dict[str, Any]) -> None:
+        calls.append(
+            LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id=f"call-{len(calls)}",
+                        payload={"name": name, "arguments": arguments},
+                    )
+                ],
+            )
+        )
+
+    if scenario != "direct":
+        call("task_create", {**desired, "task_type_id": "#V#task_specification"})
+    if scenario != "failure":
+        call(
+            "task_create",
+            {
+                **desired,
+                **(
+                    {"assignee_concept_id": "#V#person"} if scenario == "assign" else {}
+                ),
+            },
+        )
+    if scenario == "assign":
+        call(
+            "task_update_fields",
+            {
+                "task_concept_id": task_id,
+                "fields": {"assignee_concept_id": "#V#codex_dgx"},
+            },
+        )
+    if scenario in {"partial", "partial_replay"}:
+        call("other_effect", {})
+    answer = (
+        f"Created task {task_id} and assigned it to #V#codex_dgx."
+        if scenario != "failure"
+        else "Task creation failed; no task was created."
+    )
+    client = _SequenceClient(*calls, LLMResponse(text_response=answer))
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Create and delegate the repair task.",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#person@org",
+        user_concept_id="#V#person",
+        org_concept_id="#V#org",
+        turn_id=f"task-outcome-{scenario}",
+        turn_budget_seconds=10,
+        final_synthesis_reserve_seconds=2,
+    )
+    if scenario in {"direct", "recovery", "assign", "replay"}:
+        assert result.terminal_status == "completed"
+        assert result.response_authority == "model"
+        assert result.response_text == answer
+        assert "Effect outcome report" not in result.response_text
+        if scenario != "direct":
+            assert result.tool_invocations[0]["recovery_status"] == "succeeded"
+            assert result.tool_invocations[0]["effect_status"] == "failed"
+        effects = _build_tool_authored_mutation_effects(
+            tool_invocations=result.tool_invocations,
+        )
+        assert effects
+        assert all(effect["status"] == "satisfied" for effect in effects)
+    else:
+        assert result.terminal_status == (
+            "effect_failed" if scenario == "failure" else "effect_partially_completed"
+        )
+        reports = [
+            row
+            for row in result.aux_llm_calls
+            if row.get("type") == "adaptive_turn_effect_outcome_report"
+        ]
+        report = reports[-1]
+        if scenario in {"partial", "partial_replay"}:
+            assert task_id in result.response_text
+            failed = [
+                fact
+                for fact in report["facts"]
+                if not fact.get("recovered_by_effect_id")
+                and fact["effect_status"] == "failed"
+            ]
+            assert [fact["tool"] for fact in failed] == ["other_effect"]
+            task_outcomes = [
+                fact["outcome"]
+                for fact in report["narration_context"]["operation_outcomes"]
+                if fact["operation"] == "Task create"
+            ]
+            assert task_outcomes
+            assert set(task_outcomes) <= {
+                "succeeded", "recovered by a later successful retry"
+            }
+        else:
+            assert not any(
+                fact.get("canonical_readback_verified") for fact in report["facts"]
+            )
+
+
+@pytest.mark.parametrize(
+    "difference",
+    [
+        "none",
+        "title",
+        "description",
+        "organisation_concept_id",
+        "requested_model",
+        "assignee_concept_id",
+        "unverified",
+        "changed",
+        "other_type_error",
+        "later_reassignment",
+    ],
+)
+def test_task_create_reconciliation_requires_matching_verified_requested_object(
+    difference: str,
+) -> None:
+    arguments = {
+        "title": "Requested work",
+        "description": "Exact scope",
+        "organisation_concept_id": "#V#org",
+        "assignee_concept_id": "#V#codex_dgx",
+        "requested_model": "test-model",
+    }
+    later_arguments = dict(arguments)
+    fields = {"assignee_concept_id": "#V#codex_dgx"}
+    if difference in arguments:
+        later_arguments[difference] = "different"
+    if difference == "assignee_concept_id":
+        fields["assignee_concept_id"] = "different"
+    invocations = [
+        {
+            "effect_id": "failed",
+            "tool": "task_create",
+            "effective_arguments": {
+                **arguments,
+                "task_type_id": "#V#task_specification",
+            },
+        },
+        {
+            "effect_id": "created",
+            "tool": "task_create",
+            "effective_arguments": later_arguments,
+        },
+    ]
+    snapshot = {
+        "failed": {
+            "effect_status": "failed",
+            "changed": difference == "changed",
+            "failure_fact": {
+                "error_code": "INVALID_DATA",
+                "error": (
+                    "Other validation failure"
+                    if difference == "other_type_error"
+                    else "Unknown task type"
+                ),
+            },
+        },
+        "created": {
+            "effect_status": "succeeded",
+            "changed": True,
+            "canonical_readback": {
+                "verified": difference != "unverified",
+                "task_concept_id": "#V#created",
+                "task_fields": fields,
+            },
+        },
+    }
+    if difference == "later_reassignment":
+        invocations.append(
+            {
+                "effect_id": "reassigned",
+                "tool": "task_update_fields",
+                "effective_arguments": {
+                    "task_concept_id": "#V#created",
+                    "fields": {"assignee_concept_id": "#V#other"},
+                },
+            }
+        )
+        snapshot["reassigned"] = {
+            "effect_status": "succeeded",
+            "changed": True,
+            "canonical_readback": {
+                "verified": True,
+                "task_concept_id": "#V#created",
+                "task_fields": {"assignee_concept_id": "#V#other"},
+            },
+        }
+    reconciled = _reconcile_effect_attempts_by_postcondition(
+        tool_invocations=invocations, effect_snapshot=snapshot
+    )
+    assert (reconciled["failed"].get("recovery_status") == "succeeded") is (
+        difference == "none"
+    )
+    assert "recovery_status" not in snapshot["failed"]
