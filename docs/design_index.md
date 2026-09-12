@@ -82,6 +82,7 @@ live.
 | Substantial, architecture-sensitive, or older-doc-dependent work | This index, then the applicable sections below |
 | Task product selection and continuing a responsibility from Tasks | [Task responsibility continuation](engineering/task_responsibility_continuation.md) |
 | Subscription-backed coding task pickup on the DGX | [Codex DGX worker pilot](engineering/codex_dgx_worker.md) |
+| Personal/team authority to assign coding agents | Draft [coding-agent assignment authority](engineering/coding_agent_assignment_authority_design.md); proposed only, no live grant or enforcement authority |
 | Coding-agent progress and completion messages in Von | [Interactive coding-agent messages](engineering/codex_dgx_worker.md#interactive-coding-agent-messages); operator-specific delivery configuration in personal `AGENTS.md` |
 | Enduring role competence, organisational continuity, active acquisition, learned reuse or transfer | [Role-learning convergence](engineering/role_learning_convergence.md), with the [staged development rehearsal](engineering/role_convergence_rehearsal.md); live Jira owns delivery status and the next integrating increment |
 | Material security exposure: authentication/authorisation, private or cross-namespace data, secrets, untrusted content with tool authority, effects outside ordinary bounded and recoverable delegation, deployment, or administrator surfaces | [Security considerations](engineering/security_considerations.md) |
@@ -154,6 +155,7 @@ human acceptance and promotion into a current public authority surface.
 | [Reliability Ratchet articles and case log](engineering/reliability_ratchet_articles_and_cases.md) | Active advisory source copy and evidence log | Use as a revisable diagnostic lens and dated case record; not as standing policy, repair authority, or proof of current behaviour |
 | [Ontology repair plans](engineering/ontology_repair_plan_design.md) | Design with implemented substrate | Use for the plan/approve/execute shape and its affordance argument; it adds no authority route, and agent-reachable ontology mutation remains an open decision |
 | [Multi-agent coordination](engineering/multi_agent_coordination_design.md) | Early design proposal | Use as a direction to evaluate, not implemented architecture |
+| [Coding-agent assignment authority](engineering/coding_agent_assignment_authority_design.md) | Draft / proposed; live inventory and private review handoff outstanding | Per-agent personal/team bindings and scoped grants; source audit and scenario walkthrough only, no implementation or activation authority |
 | [Vontology tooling from KA/KR literature](engineering/vontology_tooling_from_ka_kcap_kr_literature.md) | Research-backed advisory roadmap | Use for alternatives and research uptake, not present capability claims |
 
 ## 7. Dated snapshots, diagnostics, and proposals
