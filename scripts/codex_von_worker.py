@@ -19,8 +19,10 @@ import subprocess
 import sys
 import uuid
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
+ACTIVITY_CHECKPOINT_SECONDS = 15
 
 ACTIVE = {"pending", "in_progress", "blocked"}
 RESULT_SCHEMA = {
@@ -127,7 +129,7 @@ def authorised_task(task, config):
 def runtime_evidence(backend_root, api):
     root = Path(backend_root).resolve()
     return {
-        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "observed_at": datetime.now(UTC).isoformat(),
         "pid": os.getpid(),
         "commit": subprocess.check_output(
             ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
@@ -384,7 +386,7 @@ class Von:
             pages.append(page)
             cursor = page.get("next_cursor")
             if not cursor:
-                return {"available": True, "pages": pages}
+                return {"available": True, "session_id": session_id, "pages": pages}
 
     def send(self, task, key, content):
         c = self.config
@@ -443,6 +445,11 @@ class Von:
                 f"reasoning: {settings['reasoning_effort']} "
                 f"({settings['reasoning_effort_source']})."
             )
+        capture = state.get("capture", {})
+        if capture.get("status") == "complete":
+            content += f"\nVerified execution archive: {capture['archive_url']}"
+            if not capture.get("source_complete", True):
+                content += "\nThe manifest records incomplete source capture."
         # Keep the delivery intent stable across a crash after a task transition.
         # A changed/cancelled task is left untouched; the run evidence still goes
         # to the original authorised delegator.
@@ -460,12 +467,20 @@ class Von:
             state["report_task"], state["attempt"] + ":result", state["report_content"]
         )
         if scope_valid:
+            evidence_addition = (
+                f"{result['evidence']}\nVon result: {message_id}\n"
+                f"Execution archive: {capture.get('archive_url', 'unavailable')}\n"
+                f"DGX worktree: {state.get('worktree', 'not started')}"
+            )
+            evidence = task.get("evidence") or ""
+            if evidence_addition not in evidence:
+                evidence = "\n".join(filter(None, [evidence, evidence_addition]))
             # Idempotent reconciliation through the existing task evidence field.
             self.tasks.update_task_fields(
                 state["task_id"],
                 fields={
                     "progress_signal": result["summary"],
-                    "evidence": f"{result['evidence']}\nVon result: {message_id}\nDGX worktree: {state.get('worktree', 'not started')}",
+                    "evidence": evidence,
                     "next_checkpoint": result["question"]
                     or "Result available in Von messages.",
                 },
@@ -493,6 +508,44 @@ def command(args, **kwargs):
     ).stdout.strip()
 
 
+def activity_module():
+    try:
+        from . import codex_von_activity
+    except ImportError:
+        try:
+            import codex_von_activity
+        except ImportError:
+            from scripts import codex_von_activity
+    return codex_von_activity
+
+
+def archive_checkpoint(config, state, *, terminal=False):
+    return activity_module().try_checkpoint(config, state, terminal=terminal)
+
+
+def finish_captured(config, api, state, state_path):
+    if not archive_checkpoint(config, state, terminal=True):
+        state["phase"] = "archive_pending"
+        write_json(state_path, state)
+        if not state.get("archive_pending_reported"):
+            api.send(
+                {
+                    "task_concept_id": state["task_id"],
+                    "title": state.get("title", state["task_id"]),
+                },
+                state["attempt"] + ":archive-pending",
+                f"Coding outcome: {state['result']['status']}. {state['result']['summary']}\n"
+                "Execution archive finalisation is pending; the existing controller will retry. "
+                "The task is not being marked completed. Local originals are retained.",
+            )
+            state["archive_pending_reported"] = True
+        write_json(state_path, state)
+        return
+    state["phase"] = "reporting"
+    api.finish(state)
+    write_json(state_path, state)
+
+
 def launch(config, state, inputs, conversation, state_path, lock_fd):
     root = Path(config["state_root"])
     task_key = fingerprint(state["task_id"])[:16]
@@ -518,7 +571,16 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         worktree=str(worktree),
         run_dir=str(run_dir),
         input_hash=fingerprint(inputs),
+        started_at=datetime.now(UTC).isoformat(),
+        worker_revision=config.get("runtime_evidence", {}).get("commit"),
     )
+    for key in (
+        "capture",
+        "capture_provenance",
+        "archive_pending_reported",
+        "finished_at",
+    ):
+        state.pop(key, None)
     state.pop("result", None)
     state.pop("report_task", None)
     state.pop("report_content", None)
@@ -529,6 +591,9 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
     state["execution_settings"] = settings
     context["execution_settings"] = settings
     write_json(context_path, context)
+    write_json(state_path, state)
+    # Capture failure must not prevent useful bounded coding progress.
+    archive_checkpoint(config, state)
     write_json(state_path, state)
     if not state.get("checkout_prepared"):
         worktree.parent.mkdir(parents=True, exist_ok=True)
@@ -621,22 +686,34 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         ]
     else:
         args[2:2] = ["--sandbox", "workspace-write"]
-    with (
-        (run_dir / "events.jsonl").open("w") as events,
+    with (  # noqa: SIM117 - streams must outlive the process context
+        (run_dir / "events.jsonl").open("a") as events,
         (run_dir / "stderr.log").open("w") as errors,
     ):
         # The inherited lock keeps another poll out even if this controller exits.
-        completed = subprocess.run(
+        with subprocess.Popen(
             args,
-            check=False,
-            input=prompt,
+            stdin=subprocess.PIPE,
             text=True,
             env=environment,
             stdout=events,
             stderr=errors,
             pass_fds=(lock_fd,),
-        )
-    write_json(run_dir / "exit.json", {"returncode": completed.returncode})
+        ) as process:
+            process.stdin.write(prompt)
+            process.stdin.close()
+            while True:
+                try:
+                    process.wait(timeout=ACTIVITY_CHECKPOINT_SECONDS)
+                    break
+                except subprocess.TimeoutExpired:
+                    archive_checkpoint(config, state)
+                    write_json(state_path, state)
+    state["finished_at"] = datetime.now(UTC).isoformat()
+    write_json(
+        run_dir / "exit.json",
+        {"returncode": process.returncode, "finished_at": state["finished_at"]},
+    )
     recover_result(state)
     write_json(state_path, state)
 
@@ -757,19 +834,62 @@ def inbox_module():
     return codex_von_inbox
 
 
+def backfill_run(config, api, selection):
+    """Operator-selected pairs only; no session discovery or task rerun."""
+    task_id, separator, attempt = selection.partition("=")
+    if (
+        not separator
+        or len(attempt) != 32
+        or any(c not in "0123456789abcdef" for c in attempt)
+    ):
+        raise ValueError("Backfill requires TASK_CONCEPT_ID=32_HEX_ATTEMPT")
+    task = api.task(task_id)
+    if not authorised_task(task, config) or not api.native_writer(task):
+        raise PermissionError("Backfill task is outside this worker assignment")
+    run_dir = Path(config["state_root"]) / "runs" / attempt
+    context = json.loads((run_dir / "context.json").read_text())
+    if (
+        context.get("task_id") != task_id
+        or context.get("worker_identity") != config["agent_id"]
+    ):
+        raise ValueError("Backfill source does not match selected task/worker")
+    path = Path(config["state_root"]) / "archive-backfills" / (attempt + ".json")
+    state = (
+        json.loads(path.read_text())
+        if path.exists()
+        else {
+            "task_id": task_id,
+            "attempt": attempt,
+            "run_dir": str(run_dir),
+            "backfill": True,
+            "execution_settings": context.get("execution_settings", {}),
+        }
+    )
+    recover_result(state)
+    archive_checkpoint(config, state, terminal=True)
+    write_json(path, state)
+    return {"task_id": task_id, "attempt": attempt, "capture": state["capture"]}
+
+
 def tick(config, api, lock_fd):
     states_dir = Path(config["state_root"]) / "tasks"
     states_dir.mkdir(parents=True, exist_ok=True)
+    for path in sorted(
+        (Path(config["state_root"]) / "archive-backfills").glob("*.json")
+    ):
+        backfill = json.loads(path.read_text())
+        if backfill.get("capture", {}).get("status") != "complete":
+            archive_checkpoint(config, backfill, terminal=True)
+            write_json(path, backfill)
     # Reconcile an interrupted report before selecting any new work.
     for path in sorted(states_dir.glob("*.json")):
         state = json.loads(path.read_text())
         if state["phase"] == "running":
             recover_result(state)
             write_json(path, state)
-        if state["phase"] == "reporting":
+        if state["phase"] in {"reporting", "archive_pending"}:
             apply_deployment(config, api, state, path, lock_fd)
-            api.finish(state)
-            write_json(path, state)
+            finish_captured(config, api, state, path)
     if config.get("inbox_enabled") and inbox_module().tick(config, api, lock_fd):
         return
     for task in api.pending():
@@ -782,6 +902,8 @@ def tick(config, api, lock_fd):
             if path.exists()
             else {"task_id": task_id, "phase": "new"}
         )
+        if state["phase"] == "archive_pending":
+            continue
         state["title"] = task["title"]
         inputs = api.inputs(task)
         if (
@@ -820,14 +942,13 @@ def tick(config, api, lock_fd):
                 ] = "Correct this task's model or reasoning setting, then requeue it."
             write_json(path, state)
         apply_deployment(config, api, state, path, lock_fd)
-        api.finish(state)
-        write_json(path, state)
+        finish_captured(config, api, state, path)
         print(
             json.dumps(
                 {
                     "outcome": state["phase"],
                     "task_id": task_id,
-                    "message_id": state["message_id"],
+                    "message_id": state.get("message_id"),
                 }
             ),
             flush=True,
@@ -847,7 +968,15 @@ def main():
     parser.add_argument(
         "--check-task", help="Read back one assigned task without running work"
     )
+    parser.add_argument(
+        "--backfill-run",
+        action="append",
+        default=[],
+        help="Explicit TASK_CONCEPT_ID=ATTEMPT pair; at most 20; never executes coding",
+    )
     options = parser.parse_args()
+    if len(options.backfill_run) > 20:
+        parser.error("Backfill is bounded to 20 selected pairs")
     os.umask(0o077)
     config = json.loads(Path(options.config).read_text())
     resolve_execution_settings(config, {})
@@ -894,11 +1023,16 @@ def main():
                 )
             api = Von(config)
             evidence = runtime_evidence(backend_root, api)
+            config["runtime_evidence"] = evidence
             if options.check_task:
                 evidence["task_check"] = check_task(config, api, options.check_task)
                 print(json.dumps(evidence), flush=True)
                 return
             write_json(state_root / "runtime.json", evidence)
+            if options.backfill_run:
+                for selection in options.backfill_run:
+                    print(json.dumps(backfill_run(config, api, selection)), flush=True)
+                return
             tick(config, api, lock.fileno())
 
 

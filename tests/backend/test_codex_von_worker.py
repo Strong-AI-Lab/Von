@@ -18,6 +18,13 @@ worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
 
 
+@pytest.fixture(autouse=True)
+def isolated_archive_boundary(monkeypatch):
+    # Existing controller tests isolate publication; canonical archive capture
+    # and the real launch path are exercised in test_task_run_archives.py.
+    monkeypatch.setattr(worker, "archive_checkpoint", lambda *a, **kw: True)
+
+
 @pytest.fixture
 def config(tmp_path):
     return {

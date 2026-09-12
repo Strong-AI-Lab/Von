@@ -5,6 +5,7 @@
  * Tasks are stored as Vontology concepts and accessed via REST API.
  */
 
+import { openTaskRunActivity } from './taskRunActivity.js';
 import { deleteJson, getJson, patchJson, postJson, getUserContext, ensureUniqueWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
 import { activateTab } from '../tabNavigation.js';
 import { showToast } from '../utils/toast.js';
@@ -2899,6 +2900,7 @@ function renderTaskDetailsPanel(task, detailState) {
 
             <div class="task-detail-section">
                 <h4>Attachments</h4>
+                <button class="task-run-activity-btn" data-task-id="${escapeHtml(taskId)}">Coding run activity</button>
                 <ul class="task-detail-list">
                     ${renderTaskAttachmentRows(detailState.attachments)}
                 </ul>
@@ -3205,6 +3207,7 @@ function renderTaskInspector(task, detailState) {
 
             <div class="task-detail-section">
                 <h4>Attachments</h4>
+                <button class="task-run-activity-btn" data-task-id="${escapeHtml(taskId)}">Coding run activity</button>
                 <ul class="task-detail-list">
                     ${renderTaskAttachmentRows(detailState?.attachments)}
                 </ul>
@@ -3663,6 +3666,13 @@ function attachTaskEventListeners() {
     if (roots.length === 0) return;
 
     roots.forEach((root) => {
+        root.querySelectorAll('.task-run-activity-btn').forEach((button) => {
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void openTaskRunActivity(button.dataset.taskId);
+            });
+        });
         root.querySelectorAll('.task-execute-with-von-btn').forEach((button) => {
             button.addEventListener('click', async (event) => {
                 event.preventDefault();
