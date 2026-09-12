@@ -1274,3 +1274,49 @@ def remove_task_link_route(task_concept_id: str) -> ResponseReturnValue:
 def remove_task_link_post_route(task_concept_id: str) -> ResponseReturnValue:
     """Remove a typed link between tasks via POST payload."""
     return remove_task_link_route(task_concept_id)
+
+@task_bp.route("/<task_concept_id>/runs", methods=["GET"])
+@task_bp.route("/<task_concept_id>/runs/<run_id>", methods=["GET"])
+@task_bp.route("/<task_concept_id>/runs/<run_id>/download", methods=["GET"])
+def task_run_archive_route(task_concept_id: str, run_id: str | None = None):
+    """Read private worker activity through the trusted browser actor context."""
+    from flask import Response
+    from ...services import task_run_archive_service as archives
+
+    try:
+        # Reject client identity headers even in a permissive local profile.
+        if not _get_current_user_concept_id() or not _get_current_org_concept_id():
+            return jsonify({"error": "Trusted actor and organisation required"}), 401
+        if run_id is None:
+            result = archives.list_runs(
+                task_concept_id,
+                offset=max(0, int(request.args.get("offset", 0))),
+                limit=50,
+            )
+        elif request.path.endswith("/download"):
+            data = archives.download_archive(run_id, task_id=task_concept_id)
+            return Response(
+                data,
+                mimetype="application/zip",
+                headers={
+                    "Content-Disposition": f'attachment; filename="coding-run-{run_id}.zip"',
+                    "Cache-Control": "private, no-store",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+        else:
+            result = archives.read_activity(
+                run_id,
+                task_id=task_concept_id,
+                cursor=max(0, int(request.args.get("cursor", 0))),
+            )
+        response = jsonify(result)
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+    except PermissionError:
+        return jsonify({"error": "Run unavailable in this actor scope"}), 403
+    except ValueError:
+        return jsonify({"error": "Invalid activity cursor"}), 400
+    except Exception:
+        logger.warning("Task run archive read failed", exc_info=False)
+        return jsonify({"error": "Run capture storage unavailable; retry later"}), 503

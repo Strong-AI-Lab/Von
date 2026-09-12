@@ -398,3 +398,86 @@ processes/results, report replay, reassignment, invitation lookup, and Git
 preparation failure. Use the Jira decision surface for current installation,
 runtime receipts and remaining publication work; a repository merge alone does
 not prove that a scheduler or public runtime was activated.
+
+## Task-linked coding activity and archives (JVNAUTOSCI-2751)
+
+The reviewed controller can register a separate run identity before execution,
+then publish complete JSONL records in bounded batches during its existing wait
+loop. The task inspector's **Coding run activity** button opens private run
+history, paged records, capture freshness/error state and the final download.
+Refresh is explicit. Historical content is inert text, never executable HTML or
+instructions to another model. Changing the browser actor or organisation closes
+the view.
+
+`task_run_archive_service` owns operational run records in `task_run_archives`
+and immutable content-addressed objects through the existing canonical blob
+store. This is a run primitive, not another task writer, workflow, scheduler or
+telemetry platform. It does not replace the current work product or existing
+task evidence. Final ZIP attachments link through the private run download;
+the ordinary organisation-visible attachment upload is deliberately not used
+for transcript bytes. A reassigned, cancelled or unavailable task receives no
+new attachment, but the original private run record retains its task backlink.
+
+The controller's trusted actor and organisation determine the producer. The
+original worker/requester audience is intersected with source-conversation
+access, then rechecked on reads, including after invitation revocation. Task
+visibility alone does not grant archive access. The HTTP routes are read-only:
+
+- `GET /api/tasks/<task>/runs?offset=0` lists up to 50 runs;
+- `GET /api/tasks/<task>/runs/<attempt>?cursor=0` reads one activity batch;
+- `GET /api/tasks/<task>/runs/<attempt>/download` returns the verified ZIP.
+
+The source cursor counts original bytes, independently of redacted/exported
+bytes. Retry identities include the run, start/end cursor and source/export
+hashes. A partial final line waits until complete while the process is running;
+an interrupted terminal tail is retained as an explicitly malformed record.
+Finalisation reconciles the complete available event stream, source segment
+hashes, exported file sizes/hashes, event count, thread identity, outcome,
+missing files, redactions and exposed-summary availability. A digest-checked
+archive reference is required before the controller reports normal completion.
+Coding results remain intact when capture fails: `archive_pending` is retried
+on the existing controller's next opportunity, with a separate pending report.
+No coding effects are repeated to repair archive storage.
+
+Only `events.jsonl`, `context.json`, `schema.json`, `result.json`, `exit.json`,
+`stderr.log`, `launch-error.json`, `deployment.json` and `deployment.log` from
+the selected run are eligible. Local originals remain untouched. Credential
+patterns and known controller environment credentials are redacted with
+counts; opaque provider state is omitted. These are **available execution
+records**, not a comprehensive private reasoning transcript. No additional
+model call or summaries setting is introduced. Provider-exposed reasoning items
+are retained when emitted; an empty exec stream does not prove that no private
+reasoning occurred. Source rollouts are not collected because this route has no
+supported bounded rollout export configured; it never searches other sessions
+or authentication files. Legacy backfill containing a transcript without a
+stable source session locator fails explicitly rather than guessing its scope.
+
+The capture interval is 15 seconds while the child runs, with at most four
+roughly 512 KiB batches per live checkpoint. Limits are 16 MiB per record/batch,
+128 MiB per companion file, and 256 MiB per run archive. Exceeding the bounded
+route leaves finalisation pending and preserves local originals; it does not
+silently truncate them. The UI displays at most 16,000 characters per record;
+the downloadable redacted record is not shortened by that display limit.
+`source_complete` is separate from a successfully stored archive: a failed or
+interrupted run can have a durable archive whose manifest identifies missing
+source files. Controller and web runtime must resolve the same private canonical
+blob storage; a local receipt alone does not prove cross-process availability.
+
+For an explicitly selected historical task/run pair, the existing operator-bound
+controller accepts `--backfill-run 'TASK_CONCEPT_ID=ATTEMPT'` (repeat for at most
+20 pairs). It checks the exact context task/worker, shares the existing worker
+lock, does not launch Codex, and keeps a retry receipt in `archive-backfills/`.
+The ordinary next tick retries only those selected pending receipts. Do not
+scan the estate, remove originals, or run backfill against an active worker.
+
+Candidate acceptance is covered by `tests/backend/test_task_run_archives.py`:
+a deterministic executable traverses the actual `launch()` loop, exposes
+activity through the canonical Flask route before exit, then verifies the final
+ZIP through that route as the requester. Other cases cover partial lines,
+large outputs, corruption, redaction, source revocation, reassignment and
+interrupted finalisation. The 1,000-event fixture performs three run-record
+writes (registration, one batch, final reference), independently of event count.
+`tests/browser/taskRunActivity.cjs` checks desktop/mobile rendering, inert source
+text, refresh, scoped download and clearing on scope change using an isolated
+browser fixture. These tests do not prove live scheduler activation, public
+OAuth, actual provider summaries, or production historical backfill.
