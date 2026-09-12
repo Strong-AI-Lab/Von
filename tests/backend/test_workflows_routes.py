@@ -2606,7 +2606,9 @@ def test_workflow_definitions_list_refresh_in_progress_without_stale_returns_503
     assert resp.headers.get("Retry-After") == "1"
 
 
-def test_workflow_studio_bookmark_opens_tab_and_fragment_contains_monitor(app_client):
+def test_workflow_studio_bookmark_opens_tab_and_fragment_contains_monitor(
+    app_client, studio_admin
+):
     response = app_client.get("/von/workflow-studio")
     assert response.status_code == 302
     assert response.headers["Location"] == "/von/#workflowStudioTab"
@@ -2616,10 +2618,10 @@ def test_workflow_studio_bookmark_opens_tab_and_fragment_contains_monitor(app_cl
     assert 'id="workflowStatusPanel"' in html
     assert 'id="workflowEpisodesPopup"' in html
     assert 'id="workflowStudioCatalogue"' in html
-    assert '<body' not in html
+    assert "<body" not in html
 
 
-def test_workflow_studio_catalogue_endpoint(monkeypatch, app_client):
+def test_workflow_studio_catalogue_endpoint(monkeypatch, app_client, studio_admin):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
     seen: dict[str, object] = {}
@@ -2656,10 +2658,12 @@ def test_workflow_studio_catalogue_endpoint(monkeypatch, app_client):
     assert seen["include_designs"] is False
 
 
-def test_workflow_studio_detail_endpoint(monkeypatch, app_client):
+def test_workflow_studio_detail_endpoint(monkeypatch, app_client, studio_admin):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
-    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+    monkeypatch.setattr(
+        workflows_routes, "can_access_concept", lambda _workflow_id: True
+    )
     monkeypatch.setattr(
         workflows_routes,
         "build_workflow_studio_detail_payload",
@@ -2702,10 +2706,13 @@ def test_workflow_studio_detail_endpoint(monkeypatch, app_client):
 def test_workflow_studio_detail_hides_actor_incomplete_definition(
     monkeypatch,
     app_client,
+    studio_admin,
 ):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
-    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+    monkeypatch.setattr(
+        workflows_routes, "can_access_concept", lambda _workflow_id: True
+    )
 
     def _raise_actor_authority_error(*_args, **_kwargs):
         raise workflows_routes.WorkflowStudioAuthorityError(
@@ -2727,10 +2734,14 @@ def test_workflow_studio_detail_hides_actor_incomplete_definition(
     }
 
 
-def test_workflow_studio_authoring_preview_conflict_returns_409(monkeypatch, app_client):
+def test_workflow_studio_authoring_preview_conflict_returns_409(
+    monkeypatch, app_client, studio_admin
+):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
-    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+    monkeypatch.setattr(
+        workflows_routes, "can_access_concept", lambda _workflow_id: True
+    )
 
     def _raise_conflict(*_args, **_kwargs):
         raise workflows_routes.WorkflowStudioConflictError(
@@ -2753,10 +2764,14 @@ def test_workflow_studio_authoring_preview_conflict_returns_409(monkeypatch, app
     assert payload["error"] == "workflow_definition_hash_conflict"
 
 
-def test_workflow_studio_authoring_apply_endpoint(monkeypatch, app_client):
+def test_workflow_studio_authoring_apply_endpoint(
+    monkeypatch, app_client, studio_admin
+):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
-    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+    monkeypatch.setattr(
+        workflows_routes, "can_access_concept", lambda _workflow_id: True
+    )
 
     monkeypatch.setattr(
         workflows_routes,
@@ -2784,10 +2799,14 @@ def test_workflow_studio_authoring_apply_endpoint(monkeypatch, app_client):
     assert payload["publication"]["summary"]["workflows_published"] == 1
 
 
-def test_workflow_studio_authoring_proposal_submit_endpoint(monkeypatch, app_client):
+def test_workflow_studio_authoring_proposal_submit_endpoint(
+    monkeypatch, app_client, studio_admin
+):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
-    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+    monkeypatch.setattr(
+        workflows_routes, "can_access_concept", lambda _workflow_id: True
+    )
 
     captured: dict[str, object] = {}
 
@@ -2811,7 +2830,10 @@ def test_workflow_studio_authoring_proposal_submit_endpoint(monkeypatch, app_cli
     resp = app_client.post(
         "/api/workflow-studio/workflows/%23V%23alpha_workflow/proposals/authoring",
         json={
-            "authoring_spec": {"workflow_id": "#V#alpha_workflow", "steps": [{"state_id": "start"}]},
+            "authoring_spec": {
+                "workflow_id": "#V#alpha_workflow",
+                "steps": [{"state_id": "start"}],
+            },
             "base_definition_hash": "base-hash",
             "session_id": "session-1",
             "turn_id": "turn-1",
@@ -2828,10 +2850,14 @@ def test_workflow_studio_authoring_proposal_submit_endpoint(monkeypatch, app_cli
     assert payload["namespace"] == "#V#test_user@test_org"
 
 
-def test_workflow_studio_authoring_proposal_review_endpoint(monkeypatch, app_client):
+def test_workflow_studio_authoring_proposal_review_endpoint(
+    monkeypatch, app_client, studio_admin
+):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
-    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+    monkeypatch.setattr(
+        workflows_routes, "can_access_concept", lambda _workflow_id: True
+    )
 
     captured: dict[str, object] = {}
 
@@ -2851,7 +2877,11 @@ def test_workflow_studio_authoring_proposal_review_endpoint(monkeypatch, app_cli
 
     resp = app_client.post(
         "/api/workflow-studio/workflows/%23V%23alpha_workflow/proposals/review",
-        json={"action": "approve", "review_reason": "Safe to publish", "namespace": "#V#reviewer@test_org"},
+        json={
+            "action": "approve",
+            "review_reason": "Safe to publish",
+            "namespace": "#V#reviewer@test_org",
+        },
     )
 
     assert resp.status_code == 200
@@ -2871,10 +2901,13 @@ def test_workflow_studio_authoring_proposal_review_endpoint(monkeypatch, app_cli
 def test_workflow_studio_publication_supersede_endpoint_requires_replacement_id(
     monkeypatch,
     app_client,
+    studio_admin,
 ):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
-    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+    monkeypatch.setattr(
+        workflows_routes, "can_access_concept", lambda _workflow_id: True
+    )
     _authenticate_workflow_studio_client(app_client)
     resp = app_client.post(
         "/api/workflow-studio/workflows/%23V%23alpha_workflow/publication/supersede",
@@ -2886,10 +2919,14 @@ def test_workflow_studio_publication_supersede_endpoint_requires_replacement_id(
     assert payload["error"] == "replacement_workflow_id_required"
 
 
-def test_workflow_studio_description_proposal_endpoint(monkeypatch, app_client):
+def test_workflow_studio_description_proposal_endpoint(
+    monkeypatch, app_client, studio_admin
+):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
-    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+    monkeypatch.setattr(
+        workflows_routes, "can_access_concept", lambda _workflow_id: True
+    )
 
     captured: dict[str, str | None] = {}
 
@@ -2939,7 +2976,7 @@ def test_workflow_studio_description_proposal_endpoint(monkeypatch, app_client):
     }
 
 
-def test_workflow_studio_preview_remains_available_to_anonymous_new_target(
+def test_workflow_studio_preview_denies_anonymous_new_target(
     monkeypatch,
     app_client,
 ):
@@ -2964,8 +3001,8 @@ def test_workflow_studio_preview_remains_available_to_anonymous_new_target(
         },
     )
 
-    assert response.status_code == 200
-    assert response.get_json()["workflow_id"] == "#V#new_workflow"
+    assert response.status_code == 403
+    assert response.get_json() == {"error": "workflow_studio_admin_required"}
 
 
 @pytest.mark.parametrize(
@@ -3013,11 +3050,7 @@ def test_workflow_studio_anonymous_actor_cannot_mutate_new_target(
     )
 
     assert response.status_code == 403
-    assert response.get_json() == {
-        "error": "workflow_actor_authority_required",
-        "error_code": "workflow_actor_authority_required",
-        "workflow_id": "#V#new_workflow",
-    }
+    assert response.get_json() == {"error": "workflow_studio_admin_required"}
 
 
 @pytest.mark.parametrize(
@@ -3073,7 +3106,9 @@ def test_workflow_studio_anonymous_actor_cannot_mutate_public_target(
     def _unexpected_mutation(*_args, **_kwargs):
         raise AssertionError("anonymous Studio route must not enter mutation service")
 
-    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: True)
+    monkeypatch.setattr(
+        workflows_routes, "can_access_concept", lambda _workflow_id: True
+    )
     monkeypatch.setattr(workflows_routes, service_name, _unexpected_mutation)
 
     response = app_client.post(
@@ -3082,11 +3117,7 @@ def test_workflow_studio_anonymous_actor_cannot_mutate_public_target(
     )
 
     assert response.status_code == 403
-    assert response.get_json() == {
-        "error": "workflow_actor_authority_required",
-        "error_code": "workflow_actor_authority_required",
-        "workflow_id": "#V#public_workflow",
-    }
+    assert response.get_json() == {"error": "workflow_studio_admin_required"}
 
 
 @pytest.mark.parametrize(
@@ -3102,10 +3133,13 @@ def test_workflow_studio_authoring_routes_allow_provably_new_targets(
     app_client,
     path,
     service_name,
+    studio_admin,
 ):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
-    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: False)
+    monkeypatch.setattr(
+        workflows_routes, "can_access_concept", lambda _workflow_id: False
+    )
     _authenticate_workflow_studio_client(
         app_client,
         user_id="#V#author",
@@ -3147,6 +3181,7 @@ def test_workflow_studio_authoring_routes_conceal_hidden_existing_targets(
     app_client,
     path,
     service_name,
+    studio_admin,
 ):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
@@ -3192,10 +3227,13 @@ def test_workflow_studio_existing_target_mutations_conceal_hidden_workflows(
     app_client,
     path,
     payload,
+    studio_admin,
 ):
     import src.backend.server.routes.workflows_routes as workflows_routes
 
-    monkeypatch.setattr(workflows_routes, "can_access_concept", lambda _workflow_id: False)
+    monkeypatch.setattr(
+        workflows_routes, "can_access_concept", lambda _workflow_id: False
+    )
 
     response = app_client.post(
         f"/api/workflow-studio/workflows/%23V%23hidden_workflow/{path}",
@@ -3209,9 +3247,73 @@ def test_workflow_studio_existing_target_mutations_conceal_hidden_workflows(
     }
 
 
-def test_workflow_studio_page_route(app_client):
+def test_workflow_studio_page_route(app_client, studio_admin):
     resp = app_client.get("/von/workflow-studio")
 
-    assert resp.status_code == 200
-    assert b"Workflow Studio" in resp.data
-    assert b'href="/von/"' in resp.data
+    assert resp.status_code == 302
+    assert resp.headers["Location"] == "/von/#workflowStudioTab"
+
+
+@pytest.fixture()
+def studio_admin(monkeypatch, app_client):
+    from src.backend.security import workflow_studio_access
+
+    _authenticate_workflow_studio_client(app_client)
+    with app_client.session_transaction() as flask_session:
+        flask_session["user_email"] = "studio-admin@example.test"
+        flask_session["auth_provider"] = "browser_test_fixture"
+    monkeypatch.setattr(
+        workflow_studio_access,
+        "is_live_von_operational_administrator",
+        lambda actor: True,
+    )
+
+
+@pytest.mark.parametrize(
+    "identity", ["anonymous", "member", "org_admin", "stale_oauth", "unreadable_role"]
+)
+def test_studio_all_entry_points_deny_without_live_admin(
+    monkeypatch, app_client, identity
+):
+    from src.backend.security import workflow_studio_access
+
+    def resolve_role(actor):
+        if identity == "unreadable_role":
+            raise RuntimeError("role store unavailable")
+        return identity == "stale_oauth"
+
+    monkeypatch.setattr(
+        workflow_studio_access, "is_live_von_operational_administrator", resolve_role
+    )
+    if identity != "anonymous":
+        with app_client.session_transaction() as flask_session:
+            flask_session.update(
+                user_concept_id="#V#test_actor",
+                user_email="actor@example.test",
+                auth_provider=(
+                    "google_oauth"
+                    if identity == "stale_oauth"
+                    else "browser_test_fixture"
+                ),
+                role_in_org="admin" if identity == "org_admin" else "member",
+            )
+    rules = [
+        rule
+        for rule in app_client.application.url_map.iter_rules()
+        if "workflow-studio" in rule.rule
+    ]
+    assert len(rules) == 12
+    for rule in rules:
+        url = rule.rule.replace("<path:workflow_id>", "%23V%23test_workflow")
+        method = "POST" if "POST" in rule.methods else "GET"
+        response = app_client.open(
+            url, method=method, json={} if method == "POST" else None
+        )
+        assert response.status_code == 403, (identity, url, response.status_code)
+        assert response.get_json() == {"error": "workflow_studio_admin_required"}
+
+
+def test_studio_capability_uses_canonical_auth_status(app_client, studio_admin):
+    response = app_client.get("/von/api/auth/status")
+    assert response.get_json()["authenticated"] is True
+    assert response.get_json()["workflow_studio_access"] is True

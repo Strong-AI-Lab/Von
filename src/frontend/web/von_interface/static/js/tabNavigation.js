@@ -1,3 +1,4 @@
+import { canUseWorkflowStudio, setupWorkflowStudioAccess } from './workflowStudioAccess.js';
 import { fetchConceptList, initializeConceptTab, updateConceptTabUI } from './conceptTab.js';
 import { elements } from './domUtils.js';
 import { initializeDynamicTabs, loadDynamicConceptTabContent } from './dynamicTabs.js';
@@ -9,7 +10,8 @@ import { initializeVontologyTab } from './vontology.js';
 const GUARDED_TAB_IDS = new Set(['vontologyTab', 'importExportTab', 'annotationTab']);
 
 function isTabGuarded(tabId) {
-  return !isExpertTabsEnabled() && GUARDED_TAB_IDS.has(tabId);
+  return (tabId === 'workflowStudioTab' && !canUseWorkflowStudio())
+    || (!isExpertTabsEnabled() && GUARDED_TAB_IDS.has(tabId));
 }
 
 export function setupTabNavigation() {
@@ -17,6 +19,7 @@ export function setupTabNavigation() {
 
   // Initialize dynamic tabs functionality
   initializeDynamicTabs();
+  setupWorkflowStudioAccess(() => activateTab('chatTab'));
 
   // These need to be initialized here because they are used for setup
   elements.tabButtons = document.querySelectorAll('.tab-button');

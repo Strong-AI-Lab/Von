@@ -114,7 +114,10 @@ def _build_auth_status_payload() -> dict:
     if authenticated and auth_provider != "browser_test_fixture":
         from ...services.login_organisation_preference_service import initialise_login_context
         login_context = initialise_login_context(session)
+    from ...security.workflow_studio_access import can_access_workflow_studio
+
     return {
+        "workflow_studio_access": authenticated and can_access_workflow_studio(),
         "authenticated": authenticated,
         "email": user_email if authenticated else None,
         "name": (

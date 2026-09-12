@@ -1333,6 +1333,10 @@
             renderBrowserTestModeStatus(authStatus);
             try {
                 document.dispatchEvent(new CustomEvent('authStatusChanged', { detail: authStatus || {} }));
+                const hostDocument = getSettingsHostDocument();
+                if (hostDocument !== document) {
+                    hostDocument.dispatchEvent(new CustomEvent('authStatusChanged', { detail: authStatus || {} }));
+                }
             } catch { }
 
             const browserTestMode = authStatus?.browser_test_mode || {};

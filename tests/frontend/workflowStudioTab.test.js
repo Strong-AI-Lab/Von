@@ -1,3 +1,4 @@
+jest.mock('../../src/frontend/web/von_interface/static/js/workflowStudioAccess.js', () => ({ canUseWorkflowStudio: jest.fn(() => true) }));
 /** @jest-environment jsdom */
 jest.mock('../../src/frontend/web/von_interface/static/js/workflowStudioPage.js', () => ({
     initialiseWorkflowStudio: jest.fn(),
@@ -14,6 +15,7 @@ describe('Workflow Studio tab loading', () => {
     let container;
     beforeEach(() => {
         jest.clearAllMocks();
+        require('../../src/frontend/web/von_interface/static/js/workflowStudioAccess.js').canUseWorkflowStudio.mockReturnValue(true);
         document.body.innerHTML = '<section id="workflowStudioTab" data-src="/von/workflow-studio/content"></section>';
         container = document.getElementById('workflowStudioTab');
         global.fetch = jest.fn().mockResolvedValue({ ok: true, text: async () => '<input aria-label="Draft" value="original">' });
@@ -43,4 +45,21 @@ describe('Workflow Studio tab loading', () => {
         expect(initialiseWorkflowStudio).toHaveBeenCalledTimes(1);
         error.mockRestore();
     });
+    test('unavailable Studio never requests content', async () => {
+        require('../../src/frontend/web/von_interface/static/js/workflowStudioAccess.js').canUseWorkflowStudio.mockReturnValue(false);
+        await loadWorkflowStudioTab(container);
+        expect(fetch).not.toHaveBeenCalled();
+    });
+    test('resizing during content load does not initialise hidden Studio', async () => {
+        let resolve;
+        fetch.mockReturnValueOnce(new Promise(done => { resolve = done; }));
+        const loading = loadWorkflowStudioTab(container);
+        require('../../src/frontend/web/von_interface/static/js/workflowStudioAccess.js').canUseWorkflowStudio.mockReturnValue(false);
+        resolve({ ok: true, text: async () => '<div>Studio</div>' });
+        await loading;
+        expect(initialiseWorkflowStudio).not.toHaveBeenCalled();
+        expect(initializeWorkflowStatusPanel).not.toHaveBeenCalled();
+        expect(container.dataset.initialized).toBeUndefined();
+    });
+
 });

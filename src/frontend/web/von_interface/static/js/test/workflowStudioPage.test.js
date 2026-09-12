@@ -1,3 +1,4 @@
+jest.mock('../workflowStudioAccess.js', () => ({ canUseWorkflowStudio: jest.fn(() => true) }));
 import {
   initialiseWorkflowStudio,
   buildDraftSource,

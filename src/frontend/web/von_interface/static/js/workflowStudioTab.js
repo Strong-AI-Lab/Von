@@ -1,5 +1,7 @@
+import { canUseWorkflowStudio } from './workflowStudioAccess.js';
 // The Studio document and modules are requested only when its tab is activated.
 export async function loadWorkflowStudioTab(container) {
+  if (!canUseWorkflowStudio()) return;
   if (container.dataset.initialized === 'true' || container.dataset.loading === 'true') return;
   container.dataset.loading = 'true';
   container.setAttribute('aria-busy', 'true');
@@ -7,10 +9,12 @@ export async function loadWorkflowStudioTab(container) {
     const response = await fetch(container.dataset.src);
     if (!response.ok) throw new Error(`Workflow Studio returned HTTP ${response.status}`);
     const html = await response.text();
+    if (!canUseWorkflowStudio()) return;
     const [studio, monitor] = await Promise.all([
       import('./workflowStudioPage.js'),
       import('./chatTab.js')
     ]);
+    if (!canUseWorkflowStudio()) return;
     container.innerHTML = html;
     monitor.initializeWorkflowStatusPanel();
     // Initialise synchronously before the catalogue request; returning to the

@@ -1,3 +1,4 @@
+import { setWorkflowStudioAccess } from './workflowStudioAccess.js';
 import { setupDynamicLayout } from './components/dynamicLayout.js';
 import { initializeDomElements, initializeInfoPopup, loadAndDisplayGlobalModelInFooter, setFooterServerReachability } from './domUtils.js';
 import {
@@ -72,6 +73,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initializeDomElements();
   initializeInfoPopup();
   applyExpertTabGuards();
+  setWorkflowStudioAccess(authStatus);
   setupTabNavigation();
   setupSettingsFrameResizing();
   initialiseCopyJsonButtonPreCopyState();

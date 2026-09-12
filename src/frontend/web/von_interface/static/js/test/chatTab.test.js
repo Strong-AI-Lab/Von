@@ -1,3 +1,4 @@
+jest.mock('../workflowStudioAccess.js', () => ({ canUseWorkflowStudio: jest.fn(() => true) }));
 import {
     __testOnly_buildThinkingProgressPresentation,
     __testOnly_buildThinkingCardProgressViewModel,
@@ -1587,6 +1588,21 @@ describe('workflow monitor definitions refresh contention handling', () => {
 });
 
 describe('workflow monitor active snapshot degradation handling', () => {
+    test('mobile or denied Studio cannot fetch even when an old tab remains active', async () => {
+        const { canUseWorkflowStudio } = require('../workflowStudioAccess.js');
+        canUseWorkflowStudio.mockReturnValue(false);
+        try {
+            document.body.innerHTML = '<section id="workflowStudioTab" class="tab-content active"><div id="workflowStatusPanel"><div id="workflowStatusBody"></div></div></section>';
+            global.fetch = jest.fn();
+            await __testOnly_refreshWorkflowStatusSnapshot();
+            await __testOnly_refreshAvailableWorkflowDefinitions();
+            await __testOnly_refreshWorkflowCapabilityIndexStatus({ force: true });
+            expect(global.fetch).not.toHaveBeenCalled();
+        } finally {
+            canUseWorkflowStudio.mockReturnValue(true);
+        }
+    });
+
     test('does not fetch snapshots or definitions while the Studio tab is inactive', async () => {
         document.body.innerHTML = '<section id="workflowStudioTab" class="tab-content"><div id="workflowStatusPanel"><div id="workflowStatusBody"></div></div></section>';
         __testOnly_resetWorkflowStatusState();
