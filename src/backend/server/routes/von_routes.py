@@ -1,3 +1,4 @@
+from ...security.workflow_studio_access import require_workflow_studio_admin
 from flask import (
     Blueprint,
     request,
@@ -11368,12 +11369,14 @@ def serve_page():
 
 
 @von_bp.route("/workflow-studio")
+@require_workflow_studio_admin
 def serve_workflow_studio_page():
     """Keep existing Studio bookmarks on the authenticated application surface."""
     return redirect(url_for("von.serve_page", _anchor="workflowStudioTab"))
 
 
 @von_bp.route("/workflow-studio/content")
+@require_workflow_studio_admin
 def serve_workflow_studio_content():
     """Serve Studio markup on first tab activation; APIs retain actor checks."""
     return render_template("workflow_studio.html")

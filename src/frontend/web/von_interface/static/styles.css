@@ -18401,3 +18401,9 @@ body.settings-body {
     }
     .settings-container button, .settings-container select { min-height: 44px; }
 }
+
+/* Studio is an Admin desktop feature, including before JavaScript starts. */
+.tab-button[data-tab="workflowStudioTab"][hidden] { display: none !important; }
+@media (max-width: 800px), (max-width: 1024px) and (pointer: coarse) {
+  .tab-button[data-tab="workflowStudioTab"], #workflowStudioTab { display: none !important; }
+}

@@ -59,6 +59,7 @@ from ...workflows.workflow_listing_service import (
     filter_workflow_ids_for_current_actor,
     project_workflow_introspection_payload_for_current_actor,
 )
+from ...security.workflow_studio_access import require_workflow_studio_admin
 from ...workflows.workflow_studio_service import (
     WorkflowStudioAuthorityError,
     WorkflowStudioConflictError,
@@ -1040,6 +1041,7 @@ def api_get_workflow_capability_index_status():
 
 
 @workflows_bp.get("/api/workflow-studio/catalogue")
+@require_workflow_studio_admin
 def api_workflow_studio_catalogue():
     limit_raw = request.args.get("limit", "250")
     try:
@@ -1143,6 +1145,7 @@ def _resolve_workflow_studio_mutation_actor(workflow_id: str):
 
 
 @workflows_bp.get("/api/workflow-studio/workflows/<path:workflow_id>")
+@require_workflow_studio_admin
 def api_get_workflow_studio_workflow(workflow_id: str):
     target_not_found = _workflow_studio_target_not_found(workflow_id)
     if target_not_found is not None:
@@ -1198,6 +1201,7 @@ def api_get_workflow_studio_workflow(workflow_id: str):
 
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/authoring/preview")
+@require_workflow_studio_admin
 def api_preview_workflow_studio_authoring(workflow_id: str):
     payload = request.get_json(silent=True) or {}
     authoring_spec = payload.get("authoring_spec")
@@ -1240,6 +1244,7 @@ def api_preview_workflow_studio_authoring(workflow_id: str):
 
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/authoring/apply")
+@require_workflow_studio_admin
 def api_apply_workflow_studio_authoring(workflow_id: str):
     _actor_scope, actor_error_response = _resolve_workflow_studio_mutation_actor(
         workflow_id
@@ -1295,6 +1300,7 @@ def api_apply_workflow_studio_authoring(workflow_id: str):
 
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/proposals/authoring")
+@require_workflow_studio_admin
 def api_submit_workflow_studio_authoring_proposal(workflow_id: str):
     actor_scope, actor_error_response = _resolve_workflow_studio_mutation_actor(
         workflow_id
@@ -1347,6 +1353,7 @@ def api_submit_workflow_studio_authoring_proposal(workflow_id: str):
 
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/proposals/review")
+@require_workflow_studio_admin
 def api_review_workflow_studio_authoring_proposal(workflow_id: str):
     target_not_found = _workflow_studio_target_not_found(workflow_id)
     if target_not_found is not None:
@@ -1411,6 +1418,7 @@ def api_review_workflow_studio_authoring_proposal(workflow_id: str):
 
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/proposals/rollback")
+@require_workflow_studio_admin
 def api_rollback_workflow_studio_authoring_promotion(workflow_id: str):
     target_not_found = _workflow_studio_target_not_found(workflow_id)
     if target_not_found is not None:
@@ -1471,6 +1479,7 @@ def api_rollback_workflow_studio_authoring_promotion(workflow_id: str):
 
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/publication/demote")
+@require_workflow_studio_admin
 def api_demote_workflow_studio_publication(workflow_id: str):
     target_not_found = _workflow_studio_target_not_found(workflow_id)
     if target_not_found is not None:
@@ -1510,6 +1519,7 @@ def api_demote_workflow_studio_publication(workflow_id: str):
 
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/publication/supersede")
+@require_workflow_studio_admin
 def api_supersede_workflow_studio_publication(workflow_id: str):
     target_not_found = _workflow_studio_target_not_found(workflow_id)
     if target_not_found is not None:
@@ -1566,6 +1576,7 @@ def api_supersede_workflow_studio_publication(workflow_id: str):
 
 
 @workflows_bp.post("/api/workflow-studio/workflows/<path:workflow_id>/proposals/description")
+@require_workflow_studio_admin
 def api_build_workflow_studio_description_proposal(workflow_id: str):
     target_not_found = _workflow_studio_target_not_found(workflow_id)
     if target_not_found is not None:

@@ -1,3 +1,4 @@
+import { canUseWorkflowStudio } from './workflowStudioAccess.js';
 import { createChatSteeringControls } from './components/chatSteeringControls.js';
 import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows } from './components/conversationCatalogue.js';
 import { catalogueHasMore } from './components/conversationCatalogue.js';
@@ -1192,6 +1193,7 @@ function shouldMaintainSharedConversationStream(sessionId) {
 }
 
 function isWorkflowMonitorTabActive() {
+    if (!canUseWorkflowStudio()) return false;
     const { panel } = getWorkflowStatusElements();
     if (!panel) return false;
     const tab = panel.closest('.tab-content');
@@ -32197,6 +32199,7 @@ function clearWorkflowCapabilityIndexPollTimer() {
 }
 
 function shouldPollWorkflowCapabilityIndex() {
+    if (!isWorkflowMonitorTabActive()) return false;
     if (workflowStatusGroupUiState.globallyFurled) {
         return false;
     }
@@ -32312,6 +32315,7 @@ function describeWorkflowCapabilityIndexStatusFetchError(err) {
 }
 
 async function refreshWorkflowCapabilityIndexStatus({ silent = false, force = false } = {}) {
+    if (!isWorkflowMonitorTabActive()) return;
     const { panel } = getWorkflowStatusElements();
     if (!panel) return;
     ensureWorkflowCapabilityIndexStatusSubscription();
@@ -33543,12 +33547,14 @@ export function initializeWorkflowStatusPanel() {
 function syncWorkflowMonitorTabActivity() {
     if (!isWorkflowMonitorTabActive()) {
         stopWorkflowStatusStream('workflow_studio_hidden');
+        clearWorkflowCapabilityIndexPollTimer();
         clearWorkflowStatusSnapshotRetryTimer();
         clearWorkflowDefinitionsRetryTimer();
         setWorkflowEpisodesPopupVisible(false);
         return;
     }
     startWorkflowStatusStream();
+    syncWorkflowCapabilityIndexPolling();
     if (workflowDefinitionsState.visible) {
         void refreshAvailableWorkflowDefinitions({ silent: true });
     } else {

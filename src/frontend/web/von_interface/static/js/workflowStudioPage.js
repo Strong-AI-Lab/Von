@@ -1,3 +1,4 @@
+import { canUseWorkflowStudio } from './workflowStudioAccess.js';
 import { ensureUniqueWindowSessionId, getWindowSessionId, WINDOW_SESSION_HEADER } from './apiService.js';
 
 function escapeHtml(value) {
@@ -350,7 +351,9 @@ function buildWorkflowStudioRequestHeaders(options = {}) {
 }
 
 async function fetchJson(url, options = {}) {
+  if (!canUseWorkflowStudio()) throw new Error("Workflow Studio is unavailable in this view.");
   await ensureUniqueWindowSessionId?.();
+  if (!canUseWorkflowStudio()) throw new Error("Workflow Studio is unavailable in this view.");
   const { headers: _ignoredHeaders, ...fetchOptions } = options || {};
   const response = await fetch(url, {
     ...fetchOptions,
@@ -1675,6 +1678,7 @@ function bindEvents() {
 }
 
 export async function initialiseWorkflowStudio() {
+  if (!canUseWorkflowStudio()) return;
   // The tab shares the authenticated parent window and its current scope.
   cacheElements();
   bindEvents();
@@ -1695,7 +1699,7 @@ export async function initialiseWorkflowStudio() {
     renderAll();
   };
   const refreshIfActive = () => {
-    if (state.needsRefresh && document.getElementById('workflowStudioTab')?.classList.contains('active')) {
+    if (canUseWorkflowStudio() && state.needsRefresh && document.getElementById('workflowStudioTab')?.classList.contains('active')) {
       state.needsRefresh = false;
       void loadCatalogue();
     }
