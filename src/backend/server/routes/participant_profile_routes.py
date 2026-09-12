@@ -1,6 +1,7 @@
 """Common profile API for Settings, concepts, conversations and agent tools."""
 
 import io
+import json
 import logging
 
 from flask import jsonify, request, send_file, session
@@ -19,12 +20,16 @@ def register_participant_profile_routes(blueprint):
             return jsonify(error="profile_unavailable", message=str(exc)), 403
         except ValueError as exc:
             return jsonify(error="invalid_profile_image", message=str(exc)), 400
-        except Exception:  # noqa: BLE001 - provider/storage failures are reported at the HTTP boundary
+        # Provider/storage failures are reported at the HTTP boundary.
+        except Exception:  # noqa: BLE001
             _log.exception("Participant profile operation failed")
-            return jsonify(
-                error="profile_operation_failed",
-                message="The profile operation failed. Your existing avatar is unchanged unless saving completed; refresh to check.",
-            ), 503
+            return (
+                jsonify(
+                    error="profile_operation_failed",
+                    message="The profile operation failed. Your existing avatar is unchanged unless saving completed; refresh to check.",
+                ),
+                503,
+            )
 
     @blueprint.route("/api/participants/profile", methods=["GET"])
     def participant_profile():
@@ -54,9 +59,28 @@ def register_participant_profile_routes(blueprint):
                     remove=payload.get("remove") is True,
                     scope=payload.get("scope", "global_general"),
                     data=uploaded.read(MAX_IMAGE_BYTES + 1) if uploaded else None,
+                    crop=(
+                        json.loads(payload["crop"])
+                        if isinstance(payload.get("crop"), str)
+                        else payload.get("crop")
+                    ),
                 )
             }
         )
+
+    @blueprint.route("/api/participants/avatar/prepare", methods=["POST"])
+    def participant_avatar_prepare():
+        def prepare():
+            uploaded = request.files.get("file")
+            if uploaded is None:
+                raise ValueError("Choose an image first.")
+            return profiles.prepare_avatar(
+                data=uploaded.read(MAX_IMAGE_BYTES + 1),
+                filename=uploaded.filename or "avatar-source.png",
+                concept_id=request.form.get("concept_id"),
+            )
+
+        return perform(prepare)
 
     @blueprint.route("/api/participants/avatar/generate", methods=["POST"])
     def participant_avatar_generate():
@@ -66,6 +90,7 @@ def register_participant_profile_routes(blueprint):
                 "image": profiles.generate_avatar(
                     concept_id=payload.get("concept_id"),
                     prompt=payload.get("prompt"),
+                    source_image_concept_id=payload.get("source_image_concept_id"),
                 )
             }
         )

@@ -91,8 +91,28 @@ Avatar variants use Von's existing scope modes:
 Canonical file-copy visibility enforces the audience. Matching combined, user,
 organisation and global variants take precedence in that order; a variant from a
 different organisation is not selected as the current organisation's portrait.
-Publication creates a centred 256-pixel PNG derivative with source metadata
-removed. The original upload/generated candidate stays private. Replacing or
+Publication creates a 256-pixel PNG derivative with source metadata removed.
+The editor accepts a file picker or one dropped PNG, JPEG or WebP (up to 8 MiB),
+preserves the source through the private image store, and offers zoom and position
+controls. `/avatar/prepare` applies EXIF orientation before suggesting framing.
+The bundled OpenCV frontal-face detector runs locally: one detected face gets a
+suggested crop, while zero or multiple faces retain a centred crop for manual
+correction. Detector failure also preserves manual upload; locations do not
+identify people or enrol biometric identities. Detection can miss faces and is
+only an adjustable default.
+
+`/avatar` accepts an optional square `crop` (`x`, `y`, `size`) in oriented source
+pixels. `/avatar/generate` accepts a private `source_image_concept_id`; after
+checking its owner, it sends oriented, metadata-free photo pixels to the existing
+configured OpenAI client using image edits with `gpt-image-1.5`. The style is the
+user's prompt. Without a source it retains text-only generation. These are
+distinct provider operations; image-edit failure does not fall back to text-only
+generation. Generated candidates record their private source provenance and
+require explicit **Use avatar**. **Return to source photo** restores manual
+framing, including after provider failure. Existing MCP calls retain their
+previous text-generation and centred-publication interface.
+
+The original upload/generated candidate stays private. Replacing or
 removing a variant retires that publication, allowing another applicable variant
 to become visible. Image reads validate the viewer and window context, use private
 no-store caching, and never expose the private source blob URL in the public

@@ -7,6 +7,15 @@
 .participant-profile-dialog textarea { display: block; box-sizing: border-box; width: 100%; min-height: 80px; margin-top: 12px; padding: 8px; }
 .participant-avatar-preview { display: block; width: 160px; height: 160px; object-fit: cover; border-radius: 50%; margin: 12px auto; }
 .participant-avatar-preview[hidden] { display: none; }
+.participant-avatar-drop { display: block; border: 2px dashed #aebdca; border-radius: 8px; padding: 12px; margin-top: 12px; }
+.participant-avatar-drop input { display: block; max-width: 100%; margin-top: 8px; }
+.participant-avatar-crop { min-width: 0; margin: 12px 0; }
+.participant-avatar-crop label { display: block; }
+.participant-avatar-crop input { display: block; width: 100%; margin: 8px 0; }
+.participant-profile-dialog [hidden] { display: none; }
+.participant-profile-dialog { box-sizing: border-box; }
+.participant-profile-dialog select { max-width: 100%; }
+@media (max-width: 480px) { .participant-profile-dialog { padding: 16px; width: calc(100vw - 24px); } }
 .participant-profile-dialog > div > .participant-avatar { width: 64px; height: 64px; vertical-align: middle; }
 .unified-message-content { display: none; min-width: 0; min-height: 0; flex: 1; }
 .show-message-exchange > .chat-conversation-main { display: none; }

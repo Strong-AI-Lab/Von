@@ -81,6 +81,7 @@ dependencies = [
     "zope.proxy==5.2",
     "customtkinter>=5.2.2",
     "pillow>=8.0.0",
+    "opencv-python-headless>=4.10,<5",
     "annotated-types>=0.7.0",
     "asttokens>=3.0.0",
     "bibtexparser>=1.4.3",

@@ -97,7 +97,7 @@ export async function openParticipantProfile(conceptId = null) {
         status.textContent = '';
         if (!profile.can_edit) return;
         const audience = document.createElement('p');
-        audience.textContent = 'Generation makes one image request and may incur a provider charge. The preview stays private until you choose Use avatar. Choose who can see this avatar using its scope. More specific avatars take precedence in the matching context. Uploaded images are centred and cropped to a square.';
+        audience.textContent = 'Your source photo and previews stay private. Use avatar publishes only the cropped avatar to the selected scope.';
         const scope = document.createElement('select');
         scope.setAttribute('aria-label', 'Avatar scope');
         const scopeNames = { user_org_default: 'User and organisation', user_only_default: 'User only', organisation_general: 'Organisation', global_general: 'Global' };
@@ -108,43 +108,123 @@ export async function openParticipantProfile(conceptId = null) {
         input.type = 'file';
         input.accept = 'image/png,image/jpeg,image/webp';
         input.setAttribute('aria-label', 'Upload avatar image');
+        const dropZone = document.createElement('label');
+        dropZone.className = 'participant-avatar-drop';
+        dropZone.textContent = 'Drop a PNG, JPEG or WebP photo here, or choose a file (up to 8 MiB).';
+        dropZone.append(input);
         const preview = document.createElement('img');
         preview.className = 'participant-avatar-preview';
         preview.alt = 'Avatar preview';
         preview.hidden = true;
         const prompt = document.createElement('textarea');
-        prompt.placeholder = 'Describe an avatar to generate';
+        prompt.placeholder = 'Describe the desired avatar or photo style, e.g. a watercolour portrait';
         prompt.setAttribute('aria-label', 'Avatar image description');
         prompt.maxLength = 4000;
+        const generationNote = document.createElement('p');
+        generationNote.textContent = 'Generation sends your source photo and style description to the configured OpenAI image provider. One image request may incur a charge. Preview the result before choosing Use avatar.';
         let candidate = null;
-        let objectUrl = null;
+        let source = null;
         let pending = false;
+        const cropControls = document.createElement('fieldset');
+        cropControls.className = 'participant-avatar-crop';
+        cropControls.hidden = true;
+        const legend = document.createElement('legend');
+        legend.textContent = 'Adjust framing';
+        cropControls.append(legend);
+        const sliders = {};
+        for (const [key, name, min, max, value] of [
+            ['zoom', 'Zoom', 1, 8, 1], ['x', 'Horizontal position', 0, 100, 50], ['y', 'Vertical position', 0, 100, 50]
+        ]) {
+            const label = document.createElement('label');
+            label.textContent = name;
+            const slider = document.createElement('input');
+            slider.type = 'range'; slider.min = min; slider.max = max; slider.step = '0.01'; slider.value = value;
+            slider.setAttribute('aria-label', name);
+            slider.addEventListener('input', () => renderCrop());
+            sliders[key] = slider;
+            label.append(slider); cropControls.append(label);
+        }
+        const renderCrop = () => {
+            if (!source) return;
+            const { width, height, image, bitmap } = source;
+            const size = Math.min(width, height) / Number(sliders.zoom.value);
+            const x = (width - size) * Number(sliders.x.value) / 100;
+            const y = (height - size) * Number(sliders.y.value) / 100;
+            const canvas = document.createElement('canvas');
+            canvas.width = canvas.height = 256;
+            canvas.getContext('2d').drawImage(bitmap, x, y, size, size, 0, 0, 256, 256);
+            preview.src = canvas.toDataURL('image/png');
+            preview.hidden = false;
+            candidate = { image_concept_id: image.concept_id, crop: { x, y, size } };
+            cropControls.hidden = false;
+            use.disabled = pending;
+        };
+        const restoreSource = () => {
+            if (!source) return;
+            const { width, height, crop } = source;
+            sliders.zoom.value = Math.min(width, height) / crop.size;
+            const size = Math.min(width, height) / Number(sliders.zoom.value);
+            sliders.x.value = width === size ? 50 : crop.x / (width - size) * 100;
+            sliders.y.value = height === size ? 50 : crop.y / (height - size) * 100;
+            renderCrop();
+        };
+        const restore = button('Return to source photo', restoreSource);
+        restore.hidden = true;
         const run = async (message, action) => {
             if (pending) return;
             pending = true;
             status.textContent = message;
             body.querySelectorAll('button, input, textarea, select').forEach(el => { el.disabled = true; });
-            try { await action(); } catch (error) { status.textContent = error.message || 'Could not save the avatar. Try again.'; }
+            try { await action(); } catch (error) { status.textContent = error.payload?.message || error.message || 'Could not save the avatar. Try again.'; }
             finally {
                 pending = false;
                 body.querySelectorAll('button, input, textarea, select').forEach(el => { el.disabled = false; });
                 use.disabled = !candidate;
             }
         };
-        input.addEventListener('change', () => {
-            if (!input.files[0]) return;
-            if (objectUrl) URL.revokeObjectURL(objectUrl);
-            objectUrl = URL.createObjectURL(input.files[0]);
-            candidate = { file: input.files[0] };
-            preview.src = objectUrl;
-            preview.hidden = false;
-            use.disabled = false;
+        const chooseFile = file => run('Preparing your photo…', async () => {
+            if (!file) return;
+            if (file.size > 8 * 1024 * 1024 || !/\.(png|jpe?g|webp)$/i.test(file.name)) {
+                throw new Error('Choose a still PNG, JPEG or WebP image up to 8 MiB.');
+            }
+            const form = new FormData();
+            form.append('file', file);
+            form.append('concept_id', profile.concept_id);
+            const response = await fetch('/von/api/participants/avatar/prepare', {
+                method: 'POST', headers: { 'X-Von-Window-Session': await ensureUniqueWindowSessionId() }, body: form
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.message || 'Could not prepare this photo.');
+            const bitmap = new Image();
+            bitmap.src = result.image.url;
+            await bitmap.decode();
+            if (!dialog.isConnected) return;
+            source = { ...result, bitmap };
+            restore.hidden = false;
+            generate.textContent = 'Generate from photo';
+            restoreSource();
+            status.textContent = result.face_detection_available === false ? 'Automatic face framing is unavailable. You can still adjust the crop and use your photo.'
+                : result.face_count === 1 ? 'Face framed. Adjust the crop if needed, then choose Use avatar.'
+                : result.face_count > 1 ? 'Multiple faces found. Adjust the crop to choose the person you want.'
+                    : 'No face found. Adjust the crop to frame your photo.';
+        });
+        input.addEventListener('change', () => void chooseFile(input.files[0]));
+        for (const name of ['dragover', 'drop']) dropZone.addEventListener(name, event => {
+            event.preventDefault();
+            if (name === 'drop' && !pending) {
+                if (event.dataTransfer.files.length !== 1) { status.textContent = 'Drop one image at a time.'; return; }
+                void chooseFile(event.dataTransfer.files[0]);
+            }
         });
         const generate = button('Generate preview', () => run('Generating an image…', async () => {
-            const result = await postJson('/von/api/participants/avatar/generate', { concept_id: profile.concept_id, prompt: prompt.value });
+            const result = await postJson('/von/api/participants/avatar/generate', {
+                concept_id: profile.concept_id, prompt: prompt.value,
+                ...(source ? { source_image_concept_id: source.image.concept_id } : {})
+            });
             candidate = { image_concept_id: result.image.concept_id };
             preview.src = result.image.url;
             preview.hidden = false;
+            cropControls.hidden = true;
             status.textContent = 'Preview ready. Choose Use avatar to publish it.';
         }));
         const saved = result => {
@@ -158,24 +238,15 @@ export async function openParticipantProfile(conceptId = null) {
             status.textContent = 'Avatar saved.';
         };
         const use = button('Use avatar', () => run('Saving avatar…', async () => {
-            if (candidate.file) {
-                const form = new FormData();
-                form.append('file', candidate.file);
-                form.append('concept_id', profile.concept_id);
-                form.append('scope', scope.value);
-                const response = await fetch('/von/api/participants/avatar', { method: 'POST', headers: { 'X-Von-Window-Session': await ensureUniqueWindowSessionId() }, body: form });
-                const result = await response.json();
-                if (!response.ok) throw new Error(result.message || 'Upload failed.');
-                saved(result);
-            } else saved(await postJson('/von/api/participants/avatar', { concept_id: profile.concept_id, scope: scope.value, ...candidate }));
+            saved(await postJson('/von/api/participants/avatar', { concept_id: profile.concept_id, scope: scope.value, ...candidate }));
         }));
         use.disabled = true;
         const remove = button('Remove avatar', () => run('Removing avatar…', async () => {
             saved(await postJson('/von/api/participants/avatar', { concept_id: profile.concept_id, scope: scope.value, remove: true }));
             candidate = null;
             preview.hidden = true;
+            cropControls.hidden = true;
         }));
-        body.append(input, prompt, generate, preview, use, remove);
-        dialog.addEventListener('close', () => { if (objectUrl) URL.revokeObjectURL(objectUrl); });
+        body.append(dropZone, preview, cropControls, restore, prompt, generationNote, generate, use, remove);
     } catch (error) { status.textContent = error.message || 'Profile unavailable.'; }
 }
