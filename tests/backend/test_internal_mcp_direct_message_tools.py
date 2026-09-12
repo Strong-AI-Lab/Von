@@ -242,14 +242,14 @@ def test_message_and_task_identity_arguments_are_server_bound():
         },
         trusted_argument_values=trusted,
     )
-    assert task_payload["assignee_id"] == "#V#user_alice"
-    assert task_payload["assignee_concept_id"] == "#V#user_alice"
+    assert task_payload["assignee_id"] == "#V#spoofed"
+    assert "assignee_concept_id" not in task_payload
     assert task_payload["created_by_concept_id"] == "#V#user_alice"
     assert task_payload["organisation_concept_id"] == "#V#org_test"
     assert task_payload["originating_session_id"] == "conversation-trusted"
     assert task_payload["acting_user_concept_id"] == "#V#user_alice"
     assert task_payload["request_id"] == "turn-trusted"
-    assert task_payload["report_to_concept_id"] is None
+    assert task_payload["report_to_concept_id"] == "#V#outsider"
 
 
 def test_agent_visible_message_and_task_schemas_hide_trusted_identity_fields():
@@ -269,8 +269,6 @@ def test_agent_visible_message_and_task_schemas_hide_trusted_identity_fields():
         "request_id",
         "namespace",
         "author_concept_id",
-        "assignee_id",
-        "assignee_concept_id",
         "created_by_concept_id",
     }
     for tool_name, required_fields in expected_required.items():
@@ -291,6 +289,40 @@ def _owned_task(*, status: str = "pending") -> dict[str, Any]:
         "assignee_concept_id": "#V#user_alice",
         "created_by_concept_id": "#V#user_alice",
         "organisation_concept_id": "#V#org_test",
+    }
+
+
+def _created_task(kwargs):
+    from src.backend.services.task_management_service import (
+        _task_concept_id_for_agent_creation_fingerprint,
+    )
+    from src.backend.services.conversation_concept_service import (
+        _generate_conversation_concept_id,
+    )
+
+    return {
+        **_owned_task(),
+        **{
+            key: kwargs.get(key)
+            for key in (
+                "title",
+                "description",
+                "assignee_concept_id",
+                "created_by_concept_id",
+                "organisation_concept_id",
+                "report_to_concept_id",
+                "requested_model",
+                "requested_reasoning_effort",
+            )
+        },
+        "task_concept_id": _task_concept_id_for_agent_creation_fingerprint(
+            kwargs["agent_creation_fingerprint"]
+        ),
+        "originating_conversation_id": (
+            _generate_conversation_concept_id(kwargs["originating_session_id"])
+            if kwargs.get("originating_session_id")
+            else None
+        ),
     }
 
 
@@ -453,11 +485,7 @@ def test_task_create_retry_reuses_canonical_task(monkeypatch):
 
     def fake_create(**kwargs):
         create_calls["count"] += 1
-        task = {
-            **_owned_task(),
-            "requested_model": kwargs.get("requested_model"),
-            "requested_reasoning_effort": kwargs.get("requested_reasoning_effort"),
-        }
+        task = _created_task(kwargs)
         persisted.update(
             {
                 "task": task,
@@ -519,11 +547,7 @@ def test_task_create_actor_scoped_idempotency_key_reuses_task_without_turn(
 
     def fake_create(**kwargs):
         create_calls["count"] += 1
-        task = {
-            **_owned_task(),
-            "title": kwargs["title"],
-            "description": kwargs["description"],
-        }
+        task = _created_task(kwargs)
         persisted.update(
             {
                 "task": task,
@@ -587,14 +611,7 @@ def test_task_create_actor_scoped_idempotency_key_does_not_cross_actor(monkeypat
 
     def fake_create(**kwargs):
         fingerprints.append(kwargs["agent_creation_fingerprint"])
-        task = {
-            **_owned_task(),
-            "task_concept_id": f"#V#task_{len(fingerprints)}",
-            "title": kwargs["title"],
-            "description": kwargs["description"],
-            "assignee_concept_id": kwargs["assignee_concept_id"],
-            "created_by_concept_id": kwargs["created_by_concept_id"],
-        }
+        task = _created_task(kwargs)
         tasks[task["task_concept_id"]] = task
         return task
 
@@ -635,7 +652,8 @@ def test_task_create_reconciles_late_first_write_after_create_failure(monkeypatc
         find_calls["count"] += 1
         return None if find_calls["count"] == 1 else canonical_task
 
-    def fake_create(**_kwargs):
+    def fake_create(**kwargs):
+        canonical_task.update(_created_task(kwargs))
         raise task_management_service.TaskManagementError("duplicate concept_id")
 
     monkeypatch.setattr(

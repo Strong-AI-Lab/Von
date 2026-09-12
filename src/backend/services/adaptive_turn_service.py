@@ -4388,6 +4388,7 @@ def _canonical_effect_readback_receipt(raw_payload: Any) -> dict[str, Any] | Non
             "task_status",
             "verified_outcome",
             "task_execution_verified",
+            "task_fields",
         )
         if key in readback
     }
@@ -4763,6 +4764,62 @@ def _effect_postcondition_identity(
     return hashlib.sha256(_json_bytes(identity)).hexdigest(), identity
 
 
+def _reconcile_task_update_attempts(
+    tool_invocations: Sequence[Mapping[str, Any]],
+    projected: dict[str, dict[str, Any]],
+) -> None:
+    """Match later verified fields on the same task without forgiving omissions."""
+    for index, invocation in enumerate(tool_invocations):
+        if (
+            invocation.get("execution_method", invocation.get("tool"))
+            != "task_update_fields"
+        ):
+            continue
+        state = projected.get(invocation.get("effect_id"), {})
+        if (
+            state.get("effect_status") not in {"failed", "not_started"}
+            or state.get("changed") is not False
+        ):
+            continue
+        arguments = invocation.get("effective_arguments") or {}
+        task_id = arguments.get("task_concept_id") or arguments.get("task_id")
+        fields = arguments.get("fields")
+        if not task_id or not isinstance(fields, Mapping) or not fields:
+            continue
+        recovered = {}
+        # Only the latest successful read-back is current evidence. A later
+        # contradictory update must not be masked by an earlier matching one.
+        for later in tool_invocations[index + 1 :]:
+            later_state = projected.get(later.get("effect_id"), {})
+            receipt = later_state.get("canonical_readback") or {}
+            later_arguments = later.get("effective_arguments") or {}
+            later_task_id = later_arguments.get(
+                "task_concept_id"
+            ) or later_arguments.get("task_id")
+            if (
+                later.get("execution_method", later.get("tool")) != "task_update_fields"
+                or later_task_id != task_id
+                or later_state.get("effect_status") != "succeeded"
+                or receipt.get("verified") is not True
+                or receipt.get("task_concept_id") != task_id
+            ):
+                continue
+            observed = receipt.get("task_fields") or {}
+            for field, expected in fields.items():
+                if field in observed:
+                    if observed[field] == expected:
+                        recovered[field] = later["effect_id"]
+                    else:
+                        recovered.pop(field, None)
+        if recovered:
+            state["recovered_fields"] = sorted(recovered)
+            state["unresolved_fields"] = sorted(set(fields) - recovered.keys())
+            if not state["unresolved_fields"]:
+                state["recovered_by_effect_id"] = list(recovered.values())[-1]
+                state["recovery_status"] = "succeeded"
+                state["reconciliation_basis"] = "later_exact_task_fields_readback"
+
+
 def _reconcile_effect_attempts_by_postcondition(
     *,
     tool_invocations: Sequence[Mapping[str, Any]],
@@ -4815,6 +4872,7 @@ def _reconcile_effect_attempts_by_postcondition(
             if success[0] > index
             else "prior_exact_postcondition_success"
         )
+    _reconcile_task_update_attempts(tool_invocations, projected)
     return projected
 
 
@@ -5935,7 +5993,9 @@ def _build_effect_outcome_report(
             "effect_id": effect_id,
             "tool": tool_name,
             "effect_status": effect_status,
-            "changed": state.get("changed") if isinstance(state.get("changed"), bool) else None,
+            "changed": (
+                state.get("changed") if isinstance(state.get("changed"), bool) else None
+            ),
             "initial_effect_status": state.get("initial_effect_status"),
             "current_outcome_status": state.get("current_outcome_status"),
             # A handler-level canonical read-back already resolves a successful
@@ -5947,9 +6007,7 @@ def _build_effect_outcome_report(
                 or (effect_status == "succeeded" and canonical_readback_verified)
             ),
             "reconciliation_status": state.get("reconciliation_status"),
-            "canonical_readback_present": isinstance(
-                canonical_readback, Mapping
-            ),
+            "canonical_readback_present": isinstance(canonical_readback, Mapping),
             "canonical_readback_verified": canonical_readback_verified,
             "workflow_instance_operational_readback": (
                 workflow_instance_operational_readback
@@ -5957,9 +6015,7 @@ def _build_effect_outcome_report(
             "workflow_instance_readback_verified": (
                 workflow_instance_readback_verified
             ),
-            "workflow_instance_terminal_status": (
-                workflow_instance_terminal_status
-            ),
+            "workflow_instance_terminal_status": (workflow_instance_terminal_status),
             "workflow_id": state.get("workflow_id"),
             "instance_id": state.get("instance_id"),
             "target_ids": target_ids,
@@ -5972,6 +6028,19 @@ def _build_effect_outcome_report(
             "error": error_detail,
             "recovered_by_effect_id": state.get("recovered_by_effect_id"),
             "argument_identity": argument_identity or None,
+            "recovered_fields": state.get("recovered_fields"),
+            "unresolved_fields": state.get("unresolved_fields"),
+            "task_concept_id": (
+                canonical_readback.get("task_concept_id")
+                if isinstance(canonical_readback, Mapping)
+                else None
+            ),
+            "task_fields": (
+                canonical_readback.get("task_fields")
+                if isinstance(canonical_readback, Mapping)
+                and canonical_readback_verified
+                else None
+            ),
         }
         postcondition = _effect_postcondition_identity(invocation)
         if postcondition is not None:
@@ -5992,7 +6061,41 @@ def _build_effect_outcome_report(
         "model_error": "The model did not produce a reliable final answer.",
         "model_non_answer": "The model did not produce a usable final answer.",
     }.get(terminal_status, "This turn did not finish cleanly.")
+    from urllib.parse import quote
+
     lines = ["## Effect outcome report", "", heading]
+    task_records: dict[str, dict[str, Any]] = {}
+    for fact in facts:
+        task_id = fact.get("task_concept_id")
+        if (
+            task_id
+            and fact.get("canonical_readback_verified")
+            and fact.get("effect_status") == "succeeded"
+        ):
+            task_records.setdefault(task_id, {}).update(fact.get("task_fields") or {})
+    for task_id, fields in task_records.items():
+        lines.extend(
+            (
+                "",
+                f"Task [{task_id}](/?concept_id={quote(task_id, safe='')}) is confirmed.",
+            )
+        )
+        for field, label in (
+            ("assignee_concept_id", "Assigned to"),
+            ("report_to_concept_id", "Reports to"),
+            ("requested_model", "Requested model"),
+            ("requested_reasoning_effort", "Requested reasoning effort"),
+            ("parent_task_concept_id", "Parent task"),
+        ):
+            if field in fields:
+                value = fields[field]
+                lines.append(
+                    f"{label}: `{value}`."
+                    if value is not None
+                    else f"{label}: none recorded."
+                )
+        lines.append("These task records do not verify worker pickup or execution.")
+
     confirmed = [
         fact
         for fact in facts
@@ -6106,6 +6209,14 @@ def _build_effect_outcome_report(
             label = f"`{fact['tool']}`"
             status = str(fact.get("effect_status") or "unknown")
             details = [f"status `{status}`"]
+            if fact.get("recovered_fields"):
+                details.append(
+                    "later canonical read-back confirmed fields: "
+                    + ", ".join(fact["recovered_fields"])
+                )
+                details.append(
+                    "still unresolved: " + ", ".join(fact["unresolved_fields"])
+                )
             if int(fact.get("attempt_count") or 1) > 1:
                 details.append(
                     f"{fact['attempt_count']} attempts for this exact postcondition"

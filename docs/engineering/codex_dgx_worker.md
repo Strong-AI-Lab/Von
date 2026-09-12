@@ -3,7 +3,7 @@
 - **Kind:** Operator runbook and bounded capability description
 - **Lifecycle:** Pilot
 - **Owner:** Michael Witbrock / SAIL
-- **Last reviewed:** 11 September 2026
+- **Last reviewed:** 12 September 2026
 - **Decision surface:** [JVNAUTOSCI-2740](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2740)
 
 ## User workflow
@@ -154,6 +154,41 @@ Validate an actual agent-issued shell command before enabling polling.
 
 Install the worker, `codex_von_inbox.py`, and both adjacent `_prompt.md` files
 from the same reviewed revision. Run them with the project's PDM-managed Python environment.
+When these scripts are copied into a release bundle outside a complete checkout,
+pass `--backend-root /path/to/reviewed/Von` to the worker. This selects the
+canonical backend before any backend imports; a missing backend or previously
+loaded imports from another checkout fail with a restart instruction. A checkout
+installation defaults to the checkout containing the worker script.
+
+The selected backend must include task execution-preference hydration on both
+point and list reads. The adapter requires `requested_model` and
+`requested_reasoning_effort` keys even when their values are null. An older reader
+that omits them fails visibly before pickup instead of silently choosing defaults.
+Installing only a newer worker script cannot repair an older canonical reader.
+Do not change global model defaults to compensate for a mismatched installation.
+
+For an authorised upgrade, install the reviewed backend and worker bundle as one
+compatible release, retain the previous backend/bundle selection for rollback,
+and update the scheduled wrapper to pass the chosen backend explicitly. Preserve
+the existing worker lock, state directory, identities, memberships and task
+selectors. Let active work finish before switching the scheduled process; do not
+launch a second controller to test pickup. Before re-enabling the schedule, check
+a labelled isolated task through that adapter's point/list reads, `inputs` and
+`resolve_execution_settings`, including exact task-sourced model/reasoning values.
+This installation change is separate from repository publication and public web
+deployment and requires its own activation authority.
+
+Ordinary conversation `task_create` permits explicit assignment to a represented
+same-organisation coding agent using the continuation route's live membership
+checks. It verifies creator, organisation, assignee, report recipient, execution
+preferences and source link on canonical read-back. A standalone native task does
+not need a project or collection for worker eligibility. Eligibility and creation
+do not prove actual pickup. Unsupported `parent_task_concept_id` on creation is
+rejected before writing; the separately authorised `task_create_subtask` and
+`task_set_parent` routes remain the hierarchy surfaces. When an update recovers
+only some requested fields, the outcome report retains the task link and verified
+fields alongside the unresolved ones.
+
 A JSON config has these fields (paths are operator-selected):
 
 ```json
