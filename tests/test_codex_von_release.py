@@ -39,6 +39,11 @@ def source(tmp_path):
     service = source / "src/backend/services/task_management_service.py"
     service.parent.mkdir(parents=True)
     service.write_text("RELEASE = 'old'\n")
+    preferences = source / "src/backend/utils/task_execution_preferences.py"
+    preferences.parent.mkdir(parents=True)
+    preferences.write_bytes(
+        (repo / "src/backend/utils/task_execution_preferences.py").read_bytes()
+    )
     git(source, "add", ".")
     git(source, "commit", "-qm", "old fixture")
     old = git(source, "rev-parse", "HEAD")
@@ -75,7 +80,11 @@ sys.path.insert(0, str(root / 'scripts'))
 import codex_von_worker as worker
 worker.bind_backend_root(root)
 from src.backend.services import task_management_service as tasks
-print(json.dumps([worker.__file__, tasks.__file__, tasks.RELEASE]))
+from src.backend.utils import task_execution_preferences as preferences
+settings = worker.resolve_execution_settings({}, {
+    'requested_model': 'gpt-6-astra', 'requested_reasoning_effort': 'xhigh'})
+print(json.dumps([worker.__file__, tasks.__file__, tasks.RELEASE,
+                  preferences.__file__, settings]))
 """
     result = json.loads(
         subprocess.check_output(
@@ -86,6 +95,13 @@ print(json.dumps([worker.__file__, tasks.__file__, tasks.RELEASE]))
         str(new_path / "scripts/codex_von_worker.py"),
         str(new_path / "src/backend/services/task_management_service.py"),
         "new",
+        str(new_path / "src/backend/utils/task_execution_preferences.py"),
+        {
+            "model": "gpt-6-astra",
+            "model_source": "task",
+            "reasoning_effort": "xhigh",
+            "reasoning_effort_source": "task",
+        },
     ]
     assert releases.prepare(source, root, new) == new_path
     releases.activate(root, old_path)

@@ -75,6 +75,13 @@ def test_empty_poll_has_no_model_or_message(config, monkeypatch):
         ({}, ("gpt-6-astra", "medium")),
         ({"requested_model": "gpt-5.6-terra"}, ("gpt-5.6-terra", "medium")),
         ({"requested_reasoning_effort": "high"}, ("gpt-6-astra", "high")),
+        ({"requested_reasoning_effort": "xhigh"}, ("gpt-6-astra", "xhigh")),
+        ({"requested_reasoning_effort": "max"}, ("gpt-6-astra", "max")),
+        ({"requested_reasoning_effort": "ultra"}, ("gpt-6-astra", "ultra")),
+        (
+            {"requested_model": "provider/Model-Preview_vNext:2026"},
+            ("provider/Model-Preview_vNext:2026", "medium"),
+        ),
         (
             {"requested_model": None, "requested_reasoning_effort": None},
             ("gpt-6-astra", "medium"),
@@ -92,14 +99,29 @@ def test_task_model_settings_inherit_independently(requested, expected):
         )
 
 
-def test_forbidden_task_model_is_reported_without_running_codex(config, monkeypatch):
+@pytest.mark.parametrize(
+    "preferences,error",
+    [
+        ({"requested_model": "gpt-5.6-sol"}, "Sol-family"),
+        ({"requested_model": "Codex DGX"}, "exact model ID"),
+        ({"requested_model": "DGX Codex"}, "exact model ID"),
+        ({"requested_model": "#V#codex_dgx"}, "assignee_concept_id"),
+        ({"requested_model": "CodexDGX"}, "exact model ID"),
+        ({"requested_model": "Astra"}, "exact model ID"),
+        ({"requested_reasoning_effort": "extra_high"}, "xhigh"),
+        ({"requested_reasoning_effort": "extra-high"}, "xhigh"),
+    ],
+)
+def test_invalid_task_preferences_are_reported_without_running_codex(
+    config, monkeypatch, preferences, error
+):
     monkeypatch.setattr(
         worker.subprocess, "run", lambda *a, **kw: pytest.fail("model invoked")
     )
     reports = []
     api = SimpleNamespace(
         pending=lambda: [task(config)],
-        inputs=lambda _: {"requested_model": "gpt-5.6-sol"},
+        inputs=lambda _: preferences,
         conversation=lambda _: {"available": False},
         send=lambda *a: "#V#started",
         tasks=SimpleNamespace(update_task_status=lambda *a, **kw: None),
@@ -110,7 +132,7 @@ def test_forbidden_task_model_is_reported_without_running_codex(config, monkeypa
     )
     worker.tick(config, api, 0)
     assert reports[0]["status"] == "blocked"
-    assert "Sol-family" in reports[0]["summary"]
+    assert error in reports[0]["summary"]
 
 
 @pytest.mark.parametrize(

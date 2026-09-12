@@ -28,8 +28,20 @@ conversation text. Changes apply at the next launch, not midway through a run.
 
 The launch passes both resolved values explicitly to Codex and retains their
 values and sources in `execution_settings` in the run context/checkpoint and
-result message. Unsupported selections fail visibly through Codex; the worker
-does not substitute another model or reasoning level. The standing Sol block
+result message. Canonical creation/updates and worker launch share a narrow
+token validator: agent concept IDs, whitespace-containing values and the
+observed `CodexDGX`/`Astra` display-label mistakes are rejected as model IDs.
+`extra_high`/`extra-high` reasoning returns guidance to retry with `xhigh`,
+preserving the explicit choice. Rejected writes do not partially apply other
+task fields. No label is automatically mapped to a model or default.
+
+This is not an availability catalogue: other exact model and reasoning tokens
+are preserved, including future provider-supported values. The installed Codex
+protocol describes reasoning as a model-advertised string; the
+[public configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+also documents `xhigh`. Model/account availability and model-specific effort
+compatibility remain Codex's responsibility and can still fail visibly there.
+The worker does not substitute another model or reasoning level. The standing Sol block
 also applies to task overrides. Reply-only inbox runs use operator defaults
 because task selection happens within that reply.
 
