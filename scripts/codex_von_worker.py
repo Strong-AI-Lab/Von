@@ -58,6 +58,11 @@ def fingerprint(value):
 
 def resolve_execution_settings(config, inputs):
     """Resolve task preferences without substituting another requested model."""
+    # Import after the controller binds its coherent backend release.
+    from src.backend.utils.task_execution_preferences import (
+        normalise_task_execution_preference,
+    )
+
     resolved = {}
     for name, default in (("model", "gpt-6-astra"), ("reasoning_effort", "medium")):
         requested = inputs.get("requested_" + name)
@@ -66,15 +71,14 @@ def resolve_execution_settings(config, inputs):
         )
         value = requested if requested is not None else configured
         value = default if value is None else value
-        if (
-            not isinstance(value, str)
-            or not value.strip()
-            or any(c.isspace() for c in value.strip())
-        ):
+        value = normalise_task_execution_preference(
+            value, field_name="requested_" + name
+        )
+        if value is None:
             raise ValueError(
                 f"Invalid {name}: specify one exact model or reasoning level"
             )
-        resolved[name] = value.strip()
+        resolved[name] = value
         resolved[name + "_source"] = (
             "task" if requested is not None else "worker_default"
         )
@@ -979,7 +983,6 @@ def main():
         parser.error("Backfill is bounded to 20 selected pairs")
     os.umask(0o077)
     config = json.loads(Path(options.config).read_text())
-    resolve_execution_settings(config, {})
     state_root = Path(config["state_root"])
     state_root.mkdir(parents=True, exist_ok=True)
     with (state_root / "worker.lock").open("a") as lock:
@@ -989,6 +992,7 @@ def main():
             print('{"outcome":"already_running"}')
             return
         backend_root = bind_backend_root(options.backend_root)
+        resolve_execution_settings(config, {})
         from src.backend.integrations.internal_mcp.gateway import (
             INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE,
             bind_internal_mcp_actor_context_source,

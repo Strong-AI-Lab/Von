@@ -35261,11 +35261,19 @@ def _task_create(**kwargs):
     evidence = kwargs.get("evidence")
     notes = kwargs.get("notes")
     reference_code = kwargs.get("reference_code")
-    requested_settings = {
-        key: (value.strip() or None) if isinstance(value, str) else value
-        for key in ("requested_model", "requested_reasoning_effort")
-        if (value := kwargs.get(key)) is not None
-    }
+    from ...utils.task_execution_preferences import normalise_task_execution_preference
+
+    try:
+        requested_settings = {
+            key: normalise_task_execution_preference(value, field_name=key)
+            for key in ("requested_model", "requested_reasoning_effort")
+            if (value := kwargs.get(key)) is not None
+        }
+    except ValueError as exc:
+        return {
+            **make_error_response("INVALID_DATA", str(exc)),
+            "changed": False,
+        }
     request_id = str(kwargs.get("request_id") or "").strip()
     idempotency_key = str(kwargs.get("idempotency_key") or "").strip()
 
@@ -45032,8 +45040,12 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 "task categories, source semantics, and richer task-detail fields. "
                 "For coding-agent work, preserve a user-specified model and reasoning level in "
                 "requested_model (exact model ID, e.g. gpt-6-astra) and "
-                "requested_reasoning_effort (e.g. medium or high). Omit either to inherit "
-                "the coding worker default. These fields do not execute the task."
+                "requested_reasoning_effort (e.g. high or xhigh; extra-high is xhigh). "
+                "Agent names/IDs belong in assignee_concept_id, never requested_model; "
+                "use an exact model ID, not a display label such as Astra. Omit a "
+                "preference to inherit the worker default only if none was requested. "
+                "Malformed preferences are rejected before creation; correct and retry "
+                "without dropping the user's choice. These fields do not execute the task."
             ),
         ),
         MethodDefinition(
