@@ -29,6 +29,14 @@ DEFAULT_RENDERER_PROFILE_PREDICATE = "#V#has_renderer_profile_json"
 # and diagnostics use one authoritative seed set.
 _CANONICAL_RENDERER_PROFILE_BLUEPRINTS: tuple[dict[str, Any], ...] = (
     {
+        "renderer_id": "#V#conversation_image_renderer",
+        "renderer_type": "image",
+        "modalities": ["visual"],
+        "applies_to_object_kinds": ["retained_image"],
+        "priority": 80,
+        "screen_element_families": ["image"],
+    },
+    {
         "renderer_id": "#V#timeline_renderer",
         "renderer_type": "timeline",
         "modalities": ["visual"],

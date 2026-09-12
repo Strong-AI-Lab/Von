@@ -16704,3 +16704,46 @@ def test_task_create_reconciliation_requires_matching_verified_requested_object(
         difference == "none"
     )
     assert "recovery_status" not in snapshot["failed"]
+
+
+def test_image_only_native_output_is_a_completed_answer_and_is_retained(monkeypatch):
+    from src.backend.services import conversation_image_service as images
+    from src.backend.languagemodels.structured_tool_calling.types import LLMContentPart
+    import io
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.new('RGB', (16, 12), 'navy').save(buffer, 'PNG')
+    data = buffer.getvalue()
+    seen = []
+    def store(**kw):
+        seen.append(kw)
+        return {'concept_id': '#V#generated-fixture', **images.inspect_image(data), 'provenance': kw['provenance']}
+    monkeypatch.setattr(images, 'store_image', store)
+    client = _SequenceClient(LLMResponse(text_response='', content_parts=[
+        LLMContentPart('image', 'ig-1', image_data=data, provenance={'kind': 'generated'})]))
+    result = execute_adaptive_turn(gateway=_gateway(lambda **kw: {'success': True}),
+        prompt='Illustrate diffusion.', context=[], llm_client=client, model='test-model',
+        user_concept_id='#V#person', org_concept_id='#V#org', turn_id='visual-turn')
+    assert result.terminal_status == 'completed'
+    assert len(client.calls) == 1
+    assert result.content_parts[0]['asset']['concept_id'] == '#V#generated-fixture'
+    assert seen[0]['user_concept_id'] == '#V#person'
+    assert 'image_data' not in str(result)
+
+
+def test_generated_image_storage_failure_preserves_text_without_another_model_call(monkeypatch):
+    from src.backend.services import conversation_image_service as images
+    from src.backend.languagemodels.structured_tool_calling.types import LLMContentPart
+    monkeypatch.setattr(images, 'inspect_image', lambda b: {'content_type': 'image/png', 'sha256': 'a' * 64})
+    def fail(**kw): raise OSError('unavailable')
+    monkeypatch.setattr(images, 'store_image', fail)
+    client = _SequenceClient(LLMResponse(text_response='Useful explanation.', content_parts=[
+        LLMContentPart('text', 'text1', text='Useful explanation.'),
+        LLMContentPart('image', 'ig-1', image_data=b'fixture', provenance={'kind': 'generated'})]))
+    result = execute_adaptive_turn(gateway=_gateway(lambda **kw: {'success': True}),
+        prompt='Illustrate diffusion.', context=[], llm_client=client, model='test-model',
+        user_concept_id='#V#person', turn_id='visual-turn')
+    assert result.terminal_status == 'answer_partially_completed'
+    assert result.response_text == 'Useful explanation.'
+    assert result.content_parts[1]['kind'] == 'media_error'
+    assert len(client.calls) == 1

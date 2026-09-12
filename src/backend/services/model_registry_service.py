@@ -944,6 +944,9 @@ def _load_registry_from_vontology_graph_batched(
                         PRED_HAS_DEPLOYMENT_ID,
                     ),
                     "parameter_constraints": constraints,
+                    "image_generation": (_parse_registry_json(_first_batched_text(
+                        rows_by_concept, profile_concept_id, PRED_HAS_MODEL_CAPABILITIES_JSON
+                    ) or "") or {}).get("image_generation"),
                 }
             )
 
@@ -1167,6 +1170,9 @@ def _resolve_model_entry_from_graph(
                     predicate=PRED_HAS_DEPLOYMENT_ID,
                 ),
                 "parameter_constraints": parameter_constraints,
+                "image_generation": (_parse_registry_json(_get_first_text(
+                    profile_concept_id, predicate=PRED_HAS_MODEL_CAPABILITIES_JSON
+                ) or "") or {}).get("image_generation"),
             }
         )
 

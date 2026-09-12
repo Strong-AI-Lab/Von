@@ -4,6 +4,7 @@ from src.backend.services import renderer_applicability_vontology_service as ser
 def test_canonical_renderer_profile_concept_ids_are_deterministic() -> None:
     concept_ids = service.canonical_renderer_profile_concept_ids()
     assert concept_ids == (
+        "#V#conversation_image_renderer",
         "#V#timeline_renderer",
         "#V#workflow_renderer",
         "#V#table_renderer",

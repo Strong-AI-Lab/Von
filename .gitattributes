@@ -36,3 +36,6 @@
 *.xlsx binary
 *.zip binary
 *.gz binary
+
+# Rebuilt from the pinned npm lockfile; preserve upstream string whitespace.
+src/frontend/web/von_interface/static/vendor/conversation-visuals/** linguist-generated linguist-vendored -whitespace
