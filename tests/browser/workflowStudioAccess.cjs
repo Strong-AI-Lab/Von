@@ -58,11 +58,15 @@ fs.mkdirSync(evidence, { recursive: true });
                 }
             }
             await page.screenshot({ path: path.join(evidence, `${role}-${mobile ? 'mobile' : 'desktop'}.png`) });
-            // The standard AgentTest fixture provides this conversation; edit only a local draft.
+            // Use an existing conversation; edit only a local, unsent draft.
             await page.locator('[data-tab="chatTab"]').click();
-            await page.locator('.footer-org-menu-trigger').click();
-            await page.locator('.footer-org-option').filter({ hasText: 'University' }).click();
-            await page.locator('.message-conversation-row').filter({ hasText: 'Workflow Reviewer' }).click();
+            if (role === 'member') {
+                await page.locator('.footer-org-menu-trigger').click();
+                await page.locator('.footer-org-option').filter({ hasText: 'University' }).click();
+            }
+            await page.locator('.message-conversation-row').filter({
+                hasText: role === 'admin' ? /Codex DGX|Codex VS Code/ : 'Workflow Reviewer'
+            }).first().click();
             const draft = page.locator('#messageInput');
             await draft.fill('Unsent Studio access acceptance draft');
             if (!mobile && role === 'admin') await studioButton.click();
