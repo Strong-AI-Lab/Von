@@ -487,6 +487,67 @@ def test_backend_root_accepts_current_canonical_checkout(monkeypatch):
     assert sys.path[0] == str(root)
 
 
+def test_read_only_installed_adapter_check_preserves_exact_task_settings(
+    config, monkeypatch
+):
+    row = task(config, requested_model="gpt-6-astra", requested_reasoning_effort="high")
+    api = worker.Von(config)
+    monkeypatch.setattr(api.tasks, "get_task", lambda _: row)
+    monkeypatch.setattr(
+        api.tasks, "search_tasks", lambda **_: {"tasks": [row], "total": 1}
+    )
+    monkeypatch.setattr(
+        api.tasks, "list_task_comments", lambda *a, **kw: {"comments": [], "total": 0}
+    )
+    monkeypatch.setattr(api.messages, "get_messages_for_user", lambda *a, **kw: [])
+    monkeypatch.setattr(api, "pending", lambda: pytest.fail("pickup path entered"))
+    result = worker.check_task(config, api, row["task_concept_id"])
+    assert result == {
+        "task_id": row["task_concept_id"],
+        "status": "pending",
+        "eligible": True,
+        "pickup_performed": False,
+        "execution_settings": {
+            "model": "gpt-6-astra",
+            "model_source": "task",
+            "reasoning_effort": "high",
+            "reasoning_effort_source": "task",
+        },
+    }
+    evidence = worker.runtime_evidence(Path(__file__).resolve().parents[2], api)
+    assert Path(evidence["task_service_module"]).is_relative_to(
+        evidence["backend_root"]
+    )
+    assert len(evidence["commit"]) == 40
+    row["status"] = "completed"
+    assert worker.check_task(config, api, row["task_concept_id"])["eligible"] is False
+
+
+def test_adapter_check_rejects_cross_scope_before_reading_task_inputs(config):
+    row = task(config, organisation_concept_id="#V#other")
+    api = SimpleNamespace(
+        task=lambda _: row, inputs=lambda _: pytest.fail("read inputs")
+    )
+    with pytest.raises(PermissionError, match="assignment scope"):
+        worker.check_task(config, api, row["task_concept_id"])
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_adapter_check_exposes_stale_list_preferences(config, missing):
+    row = task(config, requested_model="gpt-6-astra", requested_reasoning_effort="high")
+    stale = {**row, "requested_reasoning_effort": None}
+    if missing:
+        stale.pop("requested_model")
+    api = SimpleNamespace(
+        task=lambda _: row,
+        native_writer=lambda _: True,
+        tasks=SimpleNamespace(search_tasks=lambda **_: {"tasks": [stale], "total": 1}),
+        inputs=lambda _: pytest.fail("resolved stale preferences"),
+    )
+    with pytest.raises(RuntimeError, match="execution.preference"):
+        worker.check_task(config, api, row["task_concept_id"])
+
+
 @pytest.mark.parametrize("missing", ["requested_model", "requested_reasoning_effort"])
 def test_old_backend_read_cannot_silently_launch_worker_defaults(
     config, monkeypatch, missing

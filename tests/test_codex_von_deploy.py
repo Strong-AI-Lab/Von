@@ -2,6 +2,7 @@ import socket
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -179,6 +180,139 @@ def test_recovery_only_cannot_start_a_new_deployment(deployment, monkeypatch):
     with pytest.raises(ValueError, match="existing deployment receipt"):
         deployer.execute(config, target, path, recover_only=True)
     assert not path.exists()
+
+
+def test_web_and_worker_release_activation_share_recovery_receipt(
+    deployment, monkeypatch
+):
+    config, previous, target, events, path = deployment
+    root = path.parent / "releases"
+    config["worker_release_root"] = str(root)
+    monkeypatch.setattr(deployer.releases, "current", lambda _: root / previous)
+    monkeypatch.setattr(deployer.releases, "verify", lambda *a: {})
+    monkeypatch.setattr(deployer.releases, "prepare", lambda p, r, c: root / c)
+    monkeypatch.setattr(deployer.runtime, "deploy", lambda **_: events.append("web"))
+    monkeypatch.setattr(
+        deployer, "verify", lambda c, sha: events.append("health") or {"commit": sha}
+    )
+    monkeypatch.setattr(
+        deployer.releases,
+        "activate",
+        lambda r, t: events.append("pointer") or {"commit": target},
+    )
+    receipt = deployer.execute(config, target, path)
+    assert receipt["status"] == "deployed"
+    assert events == ["web", "health", "pointer"]
+    assert receipt["previous_worker_release"] == str(root / previous)
+    assert receipt["worker_activation"]["commit"] == target
+
+
+def test_interrupted_pointer_switch_reconciles_without_web_restart(
+    deployment, monkeypatch
+):
+    config, previous, target, events, path = deployment
+    root = path.parent / "releases"
+    config["worker_release_root"] = str(root)
+    deployer.save(
+        path,
+        {
+            "status": "started",
+            "requested_commit": target,
+            "previous_commit": previous,
+            "previous_worker_release": str(root / previous),
+        },
+    )
+    monkeypatch.setattr(
+        deployer.runtime,
+        "_read_health",
+        lambda _: {"version_details": {"git_commit": target}},
+    )
+    monkeypatch.setattr(
+        deployer.runtime, "deploy", lambda **_: pytest.fail("restarted web")
+    )
+    monkeypatch.setattr(deployer.releases, "prepare", lambda p, r, c: root / c)
+    monkeypatch.setattr(deployer.releases, "activate", lambda r, t: {"commit": t.name})
+    receipt = deployer.execute(config, target, path)
+    assert receipt["status"] == "deployed"
+    assert receipt["worker_activation"]["commit"] == target
+    assert not events
+
+
+def test_worker_activation_failure_restores_both_selections(deployment, monkeypatch):
+    config, previous, target, events, path = deployment
+    root = path.parent / "releases"
+    config["worker_release_root"] = str(root)
+    monkeypatch.setattr(deployer.releases, "current", lambda _: root / previous)
+    monkeypatch.setattr(deployer.releases, "verify", lambda *a: {})
+    monkeypatch.setattr(deployer.releases, "prepare", lambda p, r, c: root / c)
+    monkeypatch.setattr(deployer.runtime, "deploy", lambda **_: None)
+
+    def activate(r, target_path):
+        events.append(("pointer", Path(target_path).name))
+        if Path(target_path).name == target:
+            raise OSError("fixture pointer switch failure")
+        return {"commit": previous}
+
+    monkeypatch.setattr(deployer.releases, "activate", activate)
+    receipt = deployer.execute(config, target, path)
+    assert receipt["status"] == "rolled_back"
+    assert receipt["worker_activation"]["commit"] == previous
+    assert events[-2:] == [("pointer", previous), ("recover", previous)]
+
+
+def test_worker_rollback_failure_does_not_skip_web_recovery(deployment, monkeypatch):
+    config, previous, target, events, path = deployment
+    config["worker_release_root"] = str(path.parent / "releases")
+    deployer.save(
+        path,
+        {
+            "status": "started",
+            "requested_commit": target,
+            "previous_commit": previous,
+            "previous_worker_release": "/fixture/old",
+        },
+    )
+
+    def fail(*a):
+        raise OSError("fixture inaccessible release")
+
+    monkeypatch.setattr(deployer.releases, "activate", fail)
+    receipt = deployer.execute(config, target, path)
+    assert receipt["status"] == "recovery_failed"
+    assert receipt["worker_recovery_failure_type"] == "OSError"
+    assert receipt["verification"]["commit"] == previous
+    assert events == [("recover", previous)]
+
+
+def test_revoked_request_cannot_select_a_new_worker_release(deployment, monkeypatch):
+    config, previous, target, events, path = deployment
+    root = path.parent / "releases"
+    config["worker_release_root"] = str(root)
+    deployer.save(
+        path,
+        {
+            "status": "started",
+            "requested_commit": target,
+            "previous_commit": previous,
+            "previous_worker_release": str(root / previous),
+        },
+    )
+    monkeypatch.setattr(
+        deployer.runtime,
+        "_read_health",
+        lambda _: {"version_details": {"git_commit": target}},
+    )
+    monkeypatch.setattr(deployer.releases, "current", lambda _: root / previous)
+    monkeypatch.setattr(deployer.runtime, "_git", lambda *a: previous)
+    monkeypatch.setattr(
+        deployer.releases, "prepare", lambda *a: pytest.fail("new activation")
+    )
+    monkeypatch.setattr(
+        deployer.releases, "activate", lambda r, p: {"commit": Path(p).name}
+    )
+    receipt = deployer.execute(config, target, path, recover_only=True)
+    assert receipt["status"] == "rolled_back"
+    assert receipt["worker_activation"]["commit"] == previous
 
 
 def test_failed_real_process_restores_previous_git_revision_and_http_service(
