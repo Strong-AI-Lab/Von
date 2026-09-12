@@ -3,18 +3,69 @@
  * JVNAUTOSCI-550: Replace hard-coded CSS positions with JavaScript calculation
  */
 export function setupDynamicLayout() {
-  // Reuse the actual diagnostic controls so their handlers and live values survive.
+  // Reparent live nodes so asynchronous refreshes and conversation scope survive.
   const footerContainer = document.querySelector('.footer-container');
-  const secondaryFooterItems = footerContainer
-    ? Array.from(footerContainer.children).filter(item => item.id !== 'modelInfoFooter') : [];
+  const footerHome = document.createComment('desktop footer');
+  footerContainer?.before(footerHome);
+  const aboutButton = document.getElementById('infoIcon');
+  const aboutHome = document.createComment('desktop organisation information');
+  aboutButton?.before(aboutHome);
+  const mobileControls = document.createElement('div');
+  mobileControls.className = 'mobile-shell-controls';
   const footerDetails = document.createElement('details');
   footerDetails.className = 'mobile-footer-details';
   const summary = document.createElement('summary');
   summary.textContent = 'Info';
-  summary.setAttribute('aria-label', 'Footer information and diagnostics');
+  summary.setAttribute('aria-label', 'Conversation model, cost, account and diagnostics');
   const detailsPanel = document.createElement('div');
   detailsPanel.className = 'mobile-footer-details-panel';
   footerDetails.append(summary, detailsPanel);
+  mobileControls.append(footerDetails);
+  let organisation = null;
+  let organisationHome = null;
+  const narrowLayout = () => window.matchMedia('(max-width: 800px), (max-width: 1024px) and (pointer: coarse)').matches;
+
+  function placeOrganisation() {
+    const fresh = footerContainer?.querySelector('.footer-org-switcher');
+    if (fresh && fresh !== organisation) {
+      organisation?.remove();
+      organisationHome?.remove();
+      organisation = fresh;
+      organisationHome = document.createComment('desktop organisation');
+      fresh.before(organisationHome);
+    }
+    if (organisation && narrowLayout()) {
+      if (organisation.parentElement !== mobileControls) mobileControls.prepend(organisation);
+      const button = organisation.querySelector('.footer-org-current-button');
+      const trigger = organisation.querySelector('.footer-org-menu-trigger');
+      let compactLabel = trigger?.querySelector('.mobile-org-label');
+      if (trigger && !compactLabel) {
+        compactLabel = document.createElement('span');
+        compactLabel.className = 'mobile-org-label';
+        trigger.prepend(compactLabel);
+      }
+      const label = button?.textContent || 'Personal';
+      if (compactLabel && compactLabel.textContent !== label) compactLabel.textContent = label;
+      trigger?.setAttribute('aria-label', `Switch organisation: ${button?.dataset.conceptName || label}`);
+    } else if (organisationHome?.isConnected && organisation?.parentNode !== organisationHome.parentNode) {
+      organisationHome.after(organisation);
+    }
+  }
+  footerDetails.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      footerDetails.open = false;
+      summary.focus();
+    }
+  });
+  document.addEventListener('pointerdown', event => {
+    if (footerDetails.open && !footerDetails.contains(event.target)) footerDetails.open = false;
+  });
+  // Rendering replaces children; compact canonical identity labels arrive later.
+  if (footerContainer && typeof MutationObserver === 'function') {
+    const observer = new MutationObserver(placeOrganisation);
+    observer.observe(footerContainer, { childList: true, subtree: true, characterData: true });
+    observer.observe(mobileControls, { childList: true, subtree: true, characterData: true });
+  }
 
   function updateLayout() {
     const header = document.getElementById('globalHeader');
@@ -27,26 +78,25 @@ export function setupDynamicLayout() {
       return;
     }
 
-    // Get actual header height including search box
+    const narrow = narrowLayout();
+    const headerSlot = header.querySelector('.global-organisation-identity') || header;
+    if (footerContainer && narrow && !mobileControls.isConnected) {
+      headerSlot.append(mobileControls);
+      detailsPanel.append(footerContainer);
+      if (aboutButton) detailsPanel.append(aboutButton);
+    } else if (!narrow && mobileControls.isConnected) {
+      footerHome.after(footerContainer);
+      if (aboutButton) aboutHome.after(aboutButton);
+      mobileControls.remove();
+    }
+    placeOrganisation();
     const headerHeight = header.getBoundingClientRect().height;
     tabContainer.style.top = `${headerHeight}px`;
-    const measuredTabHeight = Math.max(
-      44,
-      Math.ceil(tabContainer.getBoundingClientRect().height || tabContainer.scrollHeight || 44)
-    );
-    const tabHeight = measuredTabHeight;
-    const contentTop = headerHeight + tabHeight + 8; // 8px margin
-    const narrow = window.matchMedia('(max-width: 800px), (max-width: 1024px) and (pointer: coarse)').matches;
-    const footer = document.querySelector('.footer-container');
-    if (footer && narrow && !footerDetails.isConnected) {
-      detailsPanel.append(...secondaryFooterItems);
-      footer.append(footerDetails);
-    } else if (!narrow && footerDetails.isConnected) {
-      footer.append(...secondaryFooterItems);
-      footerDetails.remove();
-      footerDetails.open = false;
-    }
-    const footerSpace = narrow ? Math.ceil(footer?.getBoundingClientRect().height || 64) + 8 : Math.max(64, Math.ceil(footer?.getBoundingClientRect().height || 0));
+    const tabHeight = Math.max(44, Math.ceil(tabContainer.getBoundingClientRect().height || tabContainer.scrollHeight || 44));
+    const contentTop = headerHeight + tabHeight + 8;
+    const composer = document.querySelector('.chat-composer');
+    document.documentElement.style.setProperty('--von-mobile-composer-height', `${Math.ceil(composer?.getBoundingClientRect().height || 0)}px`);
+    const footerSpace = narrow ? 0 : Math.max(64, Math.ceil(footerContainer?.getBoundingClientRect().height || 0));
     // At normal zoom the visual viewport excludes the on-screen keyboard.
     // Pinch zoom must not resize the application or discard a draft.
     const viewport = window.visualViewport;
@@ -79,6 +129,11 @@ export function setupDynamicLayout() {
         area.style.marginTop = `${contentTop}px`;
       }
     });
+  }
+
+  const composer = document.querySelector('.chat-composer');
+  if (composer && typeof ResizeObserver === 'function') {
+    new ResizeObserver(() => requestAnimationFrame(updateLayout)).observe(composer);
   }
 
   // Initial layout
