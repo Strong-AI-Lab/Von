@@ -121,6 +121,7 @@ describe('message panel send failure recovery', () => {
         jest.resetModules();
         jest.clearAllMocks();
         delete global.fetch;
+        delete window.matchMedia;
     });
 
     test('new-message send failure keeps the draft inline and retries with the single shared organisation', async () => {
@@ -339,7 +340,8 @@ describe('message panel send failure recovery', () => {
         expect(showToast).not.toHaveBeenCalledWith('Failed to send message', 'error');
     });
 
-    test('reply send is single-flight and a same-draft retry reuses its delivery key', async () => {
+    test.each([false, true])('reply send is single-flight and retry reuses its key (compact=%s)', async compact => {
+        window.matchMedia = jest.fn(() => ({ matches: compact }));
         const { getJson, postJson, postJsonDetailed } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const { initializeMessagePanel, showMessagesTab } = require(modulePath);
         const firstSend = createDeferred();
@@ -377,6 +379,13 @@ describe('message panel send failure recovery', () => {
         const replyInput = document.getElementById('messageInput');
         const sendButton = document.getElementById('sendMessageBtn');
         replyInput.value = 'Please review this once.';
+        replyInput.dispatchEvent(new Event('input', { bubbles: true }));
+        for (const properties of [{ isComposing: true }, { keyCode: 229 }, { shiftKey: true }, ...(compact ? [{}] : [])]) {
+            const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...properties });
+            replyInput.dispatchEvent(event);
+            expect(event.defaultPrevented).toBe(false);
+            expect(postJsonDetailed).not.toHaveBeenCalled();
+        }
         sendButton.click();
 
         expect(postJsonDetailed).toHaveBeenCalledTimes(1);

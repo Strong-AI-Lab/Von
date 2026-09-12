@@ -11,6 +11,7 @@ export function createVoiceConversation({ button, status, getContext, onSubmit, 
         return !disposed && session === value;
     }
     function end(message = 'Voice ended. Microphone released.') {
+        status.dataset.passive = String(!session && !starting);
         generation++; starting = false;
         const old = session;
         old?.reporter.event('ended', { reason: 'ended' });
@@ -22,6 +23,7 @@ export function createVoiceConversation({ button, status, getContext, onSubmit, 
     }
     async function start() {
         if (session || starting) return end();
+        status.dataset.passive = 'false';
         starting = true; const token = ++generation;
         onActiveChange(true);
         button.textContent = 'End voice'; button.setAttribute('aria-pressed', 'true');

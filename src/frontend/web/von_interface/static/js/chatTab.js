@@ -1,3 +1,4 @@
+import { initialiseCompactChatComposer, isCompactComposer, resizeCompactDraft, shouldSubmitComposerKey } from './components/compactComposer.js';
 import { canUseWorkflowStudio } from './workflowStudioAccess.js';
 import { createChatSteeringControls } from './components/chatSteeringControls.js';
 import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows } from './components/conversationCatalogue.js';
@@ -6675,11 +6676,20 @@ function updateExternalConversationUi() {
 let chatSteeringControls = null;
 let chatSteeringSendButton = null;
 
+function updateSendButtonDraftReadiness() {
+    const sendButton = document.getElementById('sendButton');
+    if (!sendButton) return;
+    sendButton.dataset.hasDraft = String(Boolean(getPromptInputElement()?.value.trim())
+        || pendingFileCopyConceptIdsBySession.has(getPendingFileCopySessionKey(activeChatSessionId))
+        || imageItems(activeChatSessionId).length > 0);
+}
+
 function updateSendButtonForCurrentChatState() {
     const sendButton = document.getElementById('sendButton');
     if (!sendButton) {
         return;
     }
+    updateSendButtonDraftReadiness();
     const chatCreationInFlight = Boolean(newChatCreationInFlight);
     const uploadInFlight = !!getInFlightUploadStateForSession(activeChatSessionId);
     const imagePreparationBlocked = imagesBlocked(activeChatSessionId);
@@ -31244,6 +31254,7 @@ function handleConversationScrollPositionChange(scrollableField) {
 
 function resizePromptComposer(promptInput) {
     if (!(promptInput instanceof HTMLTextAreaElement)) return;
+    if (isCompactComposer()) { resizeCompactDraft(promptInput); return; }
     promptInput.style.height = 'auto';
     const minHeight = 44;
     const maxHeight = 144;
@@ -34427,6 +34438,8 @@ export function initializeChatTab() {
         }
     });
 
+    initialiseCompactChatComposer(promptInput.closest('.chat-composer'), resizePromptComposer);
+
     // Add event listeners
     sendButton.addEventListener('click', handleSendPrompt);
     resetButton.addEventListener('click', handleResetContext);
@@ -34443,11 +34456,12 @@ export function initializeChatTab() {
     promptInput.addEventListener('input', function () {
         setSelectedChatPromptQueueEntryId(null);
         resizePromptComposer(promptInput);
+        updateSendButtonDraftReadiness();
     });
     resizePromptComposer(promptInput);
 
     promptInput.addEventListener('keypress', function (event) {
-        if (event.key === 'Enter' && !event.shiftKey) {
+        if (shouldSubmitComposerKey(event)) {
             event.preventDefault();
             handleSendPrompt();
         }

@@ -62,7 +62,7 @@ export function createDictationController({ input, button, status, cancelButton,
     };
     const contextMenu = event => { if (touchOrigin || suppressClick) event.preventDefault(); };
 
-    function render(next, message = '') {
+    function render(next, message = '', passive = false) {
         state = next;
         current?.reporter?.event('state', { state: next });
         const busy = ['requesting', 'recording', 'transcribing'].includes(next);
@@ -77,6 +77,7 @@ export function createDictationController({ input, button, status, cancelButton,
         button.disabled = next === 'transcribing' || next === 'requesting';
         button.setAttribute('aria-pressed', String(next === 'recording' || voiceActive));
         button.classList.toggle('active-dictation', busy);
+        status.dataset.passive = String(passive);
         status.textContent = message;
         cancelButton.hidden = !current;
         retryButton.hidden = !(next === 'error' && current?.blob);
@@ -273,7 +274,7 @@ export function createDictationController({ input, button, status, cancelButton,
             }
             if (!statusDismissed && !voiceActive) render('idle', capability?.available
                 ? 'Recorded audio and visible conversation context are sent to OpenAI for transcription. Audio is not saved by Von.'
-                : capability?.reason || 'Recorded transcription is unavailable.');
+                : capability?.reason || 'Recorded transcription is unavailable.', true);
         }
     }
 
