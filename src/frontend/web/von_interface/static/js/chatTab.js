@@ -21461,18 +21461,6 @@ function submitChatPromptImmediately() {
     }
 }
 
-function formatBytesForUi(sizeBytes) {
-    const size = Number(sizeBytes);
-    if (!Number.isFinite(size) || size < 0) return '';
-    if (size < 1024) return `${size} B`;
-    const kb = size / 1024;
-    if (kb < 1024) return `${kb.toFixed(1)} KB`;
-    const mb = kb / 1024;
-    if (mb < 1024) return `${mb.toFixed(1)} MB`;
-    const gb = mb / 1024;
-    return `${gb.toFixed(2)} GB`;
-}
-
 let uploadUiState = {
     button: null,
     statusEl: null,
@@ -21552,11 +21540,26 @@ function refreshConversationImages() {
     let panel = document.getElementById('conversationImageComposer');
     if (!panel) {
         panel = document.createElement('div'); panel.id = 'conversationImageComposer';
-        panel.setAttribute('aria-label', 'Pending image attachments');
+        panel.setAttribute('aria-label', 'Pending attachments');
         document.getElementById('chatAttachmentStatus')?.parentElement?.appendChild(panel);
     }
-    renderImageComposer(panel, activeChatSessionId, refreshConversationImages);
+    renderImageComposer(panel, activeChatSessionId, () => {
+        syncConversationAttachmentWorkflowBinding(activeChatSessionId);
+        renderPendingAttachmentState();
+    });
     updateSendButtonForCurrentChatState();
+}
+
+function syncConversationAttachmentWorkflowBinding(sessionId) {
+    const key = getPendingFileCopySessionKey(sessionId);
+    const last = imageItems(sessionId).filter(item => item.descriptor && !item.type.startsWith('image/')).at(-1);
+    if (last) {
+        pendingFileCopyConceptIdsBySession.set(key, last.descriptor.concept_id);
+        pendingFileCopyDisplayNamesBySession.set(key, last.name);
+    } else {
+        pendingFileCopyConceptIdsBySession.delete(key);
+        pendingFileCopyDisplayNamesBySession.delete(key);
+    }
 }
 
 function renderPendingAttachmentState() {
@@ -21761,22 +21764,6 @@ function rekeyUploadStateForSession(uploadState, sessionId) {
     renderActiveUploadUi();
 }
 
-function appendUploadMessageForSession(sessionId, ...appendMessageArgs) {
-    const targetSessionId = normaliseHistorySessionId(sessionId);
-    if (
-        targetSessionId
-        && targetSessionId === normaliseHistorySessionId(activeChatSessionId)
-    ) {
-        appendMessage(...appendMessageArgs);
-        return true;
-    }
-    if (targetSessionId) {
-        invalidateSessionHistoryCache(targetSessionId);
-        refreshChatSessionTabActivityIndicators();
-    }
-    return false;
-}
-
 function isFileDragEvent(event) {
     const dt = event?.dataTransfer;
     if (!dt) return false;
@@ -21889,99 +21876,6 @@ function extractImageFilesFromClipboardEvent(event) {
     return collectedFiles;
 }
 
-async function uploadSingleFileToVon(file) {
-    if (!file) {
-        throw new Error('No file provided');
-    }
-
-    const formData = new FormData();
-    formData.append('file', file, file.name || 'uploaded_file');
-
-    const response = await fetch('/von/api/files/upload', {
-        method: 'POST',
-        headers: buildChatFetchHeaders(), // Note: browser sets Content-Type with boundary for FormData
-        body: formData
-    });
-
-    let data;
-    try {
-        data = await response.json();
-    } catch (_) {
-        data = null;
-    }
-
-    if (!response.ok || !data || data.success !== true) {
-        const detail = data?.message || data?.error || `HTTP ${response.status}`;
-        const uploadError = new Error(`Upload failed: ${detail}`);
-        uploadError.uploadDiagnostics = {
-            endpoint: '/von/api/files/upload',
-            status_code: response.status,
-            response_ok: response.ok,
-            response_body: (data && typeof data === 'object') ? data : null
-        };
-        throw uploadError;
-    }
-
-    return data;
-}
-
-function buildUploadFailureDiagnosticPayload(file, error, context = {}) {
-    const fileName = String(file?.name || '').trim();
-    const contentType = String(file?.type || '').trim();
-    const lastModifiedMs = Number.isFinite(file?.lastModified) ? Number(file.lastModified) : null;
-    const uploadDiagnostics = (error && typeof error === 'object' && error.uploadDiagnostics && typeof error.uploadDiagnostics === 'object')
-        ? error.uploadDiagnostics
-        : null;
-
-    let stackPreview = null;
-    if (typeof error?.stack === 'string' && error.stack.trim()) {
-        stackPreview = error.stack
-            .split('\n')
-            .slice(0, 6)
-            .map(line => line.trim())
-            .join('\n');
-    }
-
-    return {
-        type: 'file_upload_failure',
-        generated_at_utc: new Date().toISOString(),
-        file: {
-            name: fileName || null,
-            size_bytes: Number.isFinite(file?.size) ? Number(file.size) : null,
-            content_type: contentType || null,
-            last_modified_utc: lastModifiedMs ? new Date(lastModifiedMs).toISOString() : null
-        },
-        upload_context: {
-            index: Number.isFinite(context.index) ? Number(context.index) : null,
-            total: Number.isFinite(context.total) ? Number(context.total) : null,
-            active_chat_session_id: (
-                normaliseHistorySessionId(context.targetSessionId)
-                || normaliseHistorySessionId(activeChatSessionId)
-                || null
-            )
-        },
-        error: {
-            message: String(error?.message || error || 'Upload failed'),
-            name: String(error?.name || 'Error'),
-            stack_preview: stackPreview
-        },
-        upload_request: uploadDiagnostics
-    };
-}
-
-function buildTurnDiagnosticDebugPayload(errorMessage, diagnosticPayload) {
-    const diagnosticsEvent = (diagnosticPayload && typeof diagnosticPayload === 'object') ? diagnosticPayload : null;
-    return {
-        model: 'diagnostic',
-        error: errorMessage,
-        turn_diagnostics: {
-            event_count: diagnosticsEvent ? 1 : 0,
-            categories: diagnosticsEvent ? [String(diagnosticsEvent.type || 'unknown')] : [],
-            events: diagnosticsEvent ? [diagnosticsEvent] : []
-        }
-    };
-}
-
 async function performUploadFilesToVon(list, uploadState) {
     let uploadTargetSessionId = normaliseHistorySessionId(
         uploadState?.targetSessionId
@@ -22014,96 +21908,21 @@ async function performUploadFilesToVon(list, uploadState) {
         rekeyUploadStateForSession(uploadState, uploadTargetSessionId);
     }
 
-    const total = list.length;
     let successCount = 0;
     let failureCount = 0;
-    let index = 0;
 
     for (const file of list) {
-        if (file.type?.startsWith('image/')) {
-            index += 1;
-            const uploaded = await uploadConversationImage(file, uploadTargetSessionId, buildChatFetchHeaders(), refreshConversationImages);
-            if (uploaded) successCount += 1; else failureCount += 1;
-            continue;
-        }
-        index += 1;
-        const sizeLabel = formatBytesForUi(file.size);
-        appendUploadMessageForSession(
-            uploadTargetSessionId,
-            'User',
-            `Uploading file: ${file.name}${sizeLabel ? ` (${sizeLabel})` : ''}`
-        );
-        setUploadStatusForState(
-            uploadState,
-            `Uploading ${index}/${total}: ${file.name}`,
-            'uploading'
-        );
-
-        try {
-            const result = await uploadSingleFileToVon(file);
-            const conceptId = result?.uploaded?.concept_id;
-            const blobUri = result?.storage?.uri;
-            const blobKey = result?.storage?.key;
-            const blobBackend = result?.storage?.backend;
-            const historyRecorded = result?.chat_history_recorded === true;
-
-            const downloadUrl = conceptId
-                ? `/von/api/files/${encodeURIComponent(conceptId)}/download`
-                : null;
-
-            const details = [];
-            if (blobUri) details.push(`Blob: ${blobUri}`);
-            if (blobBackend || blobKey) details.push(`Blob key: ${String(blobBackend || '')}:${String(blobKey || '')}`.replace(/^:/, ''));
-            if (historyRecorded) details.push('Recorded in Conversation history.');
-            if (downloadUrl) details.push(`[Download attachment](${downloadUrl})`);
-
-            appendUploadMessageForSession(
-                uploadTargetSessionId,
-                'Von',
-                `File uploaded and registered as ${conceptId || '(unknown)'}${details.length ? `\n${details.join('\n')}` : ''}`
-            );
-
+        const uploaded = await uploadConversationImage(file, uploadTargetSessionId, buildChatFetchHeaders(), () => {
+            syncConversationAttachmentWorkflowBinding(uploadTargetSessionId);
+            renderPendingAttachmentState();
+        });
+        if (uploaded) {
             successCount += 1;
-
-            if (conceptId) {
-                rememberPendingUploadedFileCopyConceptId(
-                    conceptId,
-                    uploadTargetSessionId,
-                    file.name
-                );
+            if (!file.type.startsWith('image/')) {
+                const item = imageItems(uploadTargetSessionId).findLast(item => item.name === file.name && item.descriptor);
+                if (item) rememberPendingUploadedFileCopyConceptId(item.descriptor.concept_id, uploadTargetSessionId, file.name);
             }
-        } catch (error) {
-            console.error('[chatTab] file upload error', error);
-            const errorMessage = `File upload failed: ${String(error?.message || error)}`;
-            const diagnosticsPayload = buildUploadFailureDiagnosticPayload(file, error, {
-                index,
-                total,
-                targetSessionId: uploadTargetSessionId
-            });
-            const errorTurnId = `e-upload-${Date.now()}-${index}`;
-            setLlmDebugDataEntry(
-                errorTurnId,
-                buildTurnDiagnosticDebugPayload(errorMessage, diagnosticsPayload)
-            );
-            appendUploadMessageForSession(
-                uploadTargetSessionId,
-                'Error',
-                errorMessage,
-                errorTurnId,
-                true,
-                false,
-                null,
-                null,
-                null,
-                { diagnosticsPayload }
-            );
-            failureCount += 1;
-            setUploadStatusForState(
-                uploadState,
-                `Upload failed: ${file.name}`,
-                'error'
-            );
-        }
+        } else failureCount += 1;
     }
 
     const summary = `Upload complete: ${successCount} succeeded${failureCount ? `, ${failureCount} failed` : ''}.`;
@@ -34229,13 +34048,18 @@ export function initializeChatTab() {
             event.preventDefault();
             event.stopPropagation();
 
+            const clipboardText = event.clipboardData?.getData('text/plain');
+            if (clipboardText && promptInput) {
+                promptInput.setRangeText(clipboardText, promptInput.selectionStart, promptInput.selectionEnd, 'end');
+                promptInput.dispatchEvent(new Event('input', {bubbles:true}));
+            }
             // Route clipboard images through the same upload path used for
             // drag/drop and file-picker uploads so workflow handling is
             // consistent across all attachment entry points.
             void uploadFilesToVon(pastedImageFiles);
         };
 
-        chatTab.addEventListener('paste', handleClipboardImagePaste);
+        promptInput?.addEventListener('paste', handleClipboardImagePaste);
 
         // Local UI + drop handling
         const applyDragOverState = () => {
@@ -35636,7 +35460,7 @@ function getSelectedChatPromptQueueEntryForSend() {
     ) {
         return null;
     }
-    if (typeof entry.promptRaw !== 'string' || !entry.promptRaw.trim()) {
+    if (typeof entry.promptRaw !== 'string' || (!entry.promptRaw.trim() && !entry.executionEnvelope?.image_attachment_ids?.length)) {
         return null;
     }
     return entry;
@@ -37234,7 +37058,7 @@ async function sendQueuedChatPromptEntry(entryId) {
     if (sessionHead?.id !== nextEntry.id) {
         return false;
     }
-    if (!nextEntry || typeof nextEntry.promptRaw !== 'string' || !nextEntry.promptRaw.trim()) {
+    if (!nextEntry || typeof nextEntry.promptRaw !== 'string' || (!nextEntry.promptRaw.trim() && !nextEntry.executionEnvelope?.image_attachment_ids?.length)) {
         queuedChatPrompts = queuedChatPrompts.filter((entry) => entry?.id !== cleanEntryId);
         renderChatTaskQueuePanel();
         refreshChatSessionTabActivityIndicators();
@@ -37396,7 +37220,7 @@ async function handleSendPrompt(options = {}) {
     const promptForSend = normaliseVontologyIdsForBackend(promptRaw);
     const promptText = promptForSend.trim();
     const assistantOpening = options?.turnKind === 'assistant_opening';
-    const allowEmptyPrompt = assistantOpening && options?.allowEmptyPrompt === true;
+    const allowEmptyPrompt = (assistantOpening && options?.allowEmptyPrompt === true) || imageItems(targetSessionId).length > 0 || options?.executionEnvelope?.image_attachment_ids?.length > 0;
     if (
         directComposerSubmission
         && (getInFlightUploadStateForSession(targetSessionId) || imagesBlocked(targetSessionId))
@@ -37478,7 +37302,7 @@ async function handleSendPrompt(options = {}) {
         if (fromQueue) {
             return;
         }
-        if (!promptText) {
+        if (!promptText && !imageItems(targetSessionId).length) {
             return;
         }
         const submissionSessionKey = getChatRequestSessionKey(targetSessionId);
@@ -37543,7 +37367,7 @@ async function handleSendPrompt(options = {}) {
     const userTurnId = buildChatRequestTurnId('user', clientRequestId);
     const assistantTurnId = buildChatRequestTurnId('assistant', clientRequestId);
     const userTurnShouldRender = Boolean(
-        !assistantOpening && !observeServerDispatch && promptText
+        !assistantOpening && !observeServerDispatch && (promptText || imageItems(targetSessionId).length || options?.executionEnvelope?.image_attachment_ids?.length)
     );
     const userTurnTimestamp = userTurnShouldRender ? new Date().toISOString() : null;
     const executionContextBinding = synchroniseLlmExecutionContext();
@@ -37734,6 +37558,9 @@ async function handleSendPrompt(options = {}) {
         }
         if (!claimForegroundDelivery()) {
             return false;
+        }
+        if (request.executionEnvelope?.image_attachment_ids?.length && isRequestVisible() && promptInput.value === request.promptRaw) {
+            setPromptComposerValue('', { promptInput });
         }
         _acceptConversationSituationPayload(data, request.sessionId);
         const responsePresenterState = resolveResponsePresenterState(data);
@@ -38012,7 +37839,7 @@ async function handleSendPrompt(options = {}) {
         if (promptText) {
             rememberLastSubmittedUserPrompt(promptRaw);
         }
-        setPromptComposerValue('', { promptInput });
+        if (!request.executionEnvelope?.image_attachment_ids?.length) setPromptComposerValue('', { promptInput });
     }
 
     let generateTransportInterrupted = false;

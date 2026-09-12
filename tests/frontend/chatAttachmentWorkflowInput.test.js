@@ -250,7 +250,9 @@ describe('chat attachment workflow input binding', () => {
                 /File uploaded and registered as/g
             ) || []
         ).length;
-        expect(confirmationCount).toBe(1);
+        // Pending upload is not a sent conversation contribution.
+        expect(confirmationCount).toBe(0);
+        expect(document.querySelectorAll('#conversationImageComposer [aria-label="Remove slow-supervision.xlsx"]')).toHaveLength(1);
     }, 15000);
 
     test('send stays blocked until a slow upload can bind its file-copy id', async () => {
@@ -341,7 +343,7 @@ describe('chat attachment workflow input binding', () => {
         await Promise.resolve();
 
         expect(sendButton.disabled).toBe(false);
-        expect(sendButton.hasAttribute('title')).toBe(false);
+        expect(sendButton.getAttribute('title') || '').not.toContain('upload');
 
         await sendMessage();
 

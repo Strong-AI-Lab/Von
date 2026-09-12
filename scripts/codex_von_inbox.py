@@ -157,9 +157,74 @@ def recover(state):
     state["phase"] = "reporting"
 
 
+def prepare_attachment_inputs(config, context, run):
+    """Copy recipient-authorised bytes into this response's private sandbox.
+
+    Paths come from this receiving controller, never a sender's machine. The
+    canonical message is re-read by the loader; supplied descriptors confer no
+    authority. Retrying preparation replaces the same content-addressed files.
+    """
+    message = context.get("message", {})
+    references = message.get("attachments", [])
+    if not references:
+        return
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.services.message_attachment_service import (
+        attachment_text,
+        load_attachment_reference,
+    )
+
+    inputs = []
+    for reference in references[:8]:
+        item = {
+            "concept_id": reference.get("concept_id"),
+            "filename": reference.get("filename"),
+        }
+        try:
+            with override_current_actor(config["agent_id"], config["organisation_id"]):
+                info, data = load_attachment_reference(
+                    {
+                        "concept_id": reference.get("concept_id"),
+                        "message_id": reference.get("message_id")
+                        or message["message_id"],
+                    },
+                    config["agent_id"],
+                )
+            suffix = {
+                "image/png": ".png",
+                "image/jpeg": ".jpg",
+                "image/webp": ".webp",
+            }.get(info["content_type"], ".bin")
+            directory = Path(run) / "attachments"
+            directory.mkdir(mode=0o700, exist_ok=True)
+            path = directory / (info["sha256"] + suffix)
+            path.write_bytes(data)
+            path.chmod(0o600)
+            item.update(
+                local_path=str(path.resolve()),
+                content_type=info["content_type"],
+                sha256=info["sha256"],
+            )
+            if info["content_type"].startswith("image/"):
+                item["instruction"] = (
+                    "Use view_image on local_path to inspect the supplied original. Filename alone is not image evidence."
+                )
+            else:
+                item["content"] = attachment_text(info, data)
+        except (ValueError, PermissionError, OSError):
+            item["error"] = (
+                "Attachment unavailable in this response; do not claim to have inspected it."
+            )
+        inputs.append(item)
+    context["attachment_inputs"] = inputs
+    if len(references) > 8:
+        inputs.append({"error": "Only the first eight attachments were prepared in this run; remaining references have not been inspected."})
+
+
 def launch(config, state, lock_fd):
     run = Path(state["run_dir"])
     run.mkdir(parents=True, exist_ok=True)
+    prepare_attachment_inputs(config, state["context"], run)
     write_json(run / "schema.json", SCHEMA)
     write_json(run / "context.json", state["context"])
     prompt = Path(__file__).with_name("codex_von_inbox_prompt.md").read_text()
@@ -256,6 +321,11 @@ def finish(config, api, state, path):
                 "message_id": message["message_id"],
                 "content": message["content"],
                 "deployment_requested": result["deployment_requested"],
+                **(
+                    {"attachments": message["attachments"]}
+                    if message.get("attachments")
+                    else {}
+                ),
             }
             prior = task_followup(config, task_id)
             if not state.get("resume_applied"):
@@ -280,6 +350,11 @@ def finish(config, api, state, path):
                         *prior.get("message_ids", [prior["message_id"]]),
                         message["message_id"],
                     ]
+                    if prior.get("attachments") or followup.get("attachments"):
+                        followup["attachments"] = [
+                            *prior.get("attachments", []),
+                            *followup.get("attachments", []),
+                        ]
                 write_json(followup_path(config, task_id), followup)
                 if task["status"] != "pending":
                     api.tasks.update_task_status(

@@ -6844,7 +6844,20 @@ def _message_get_direct(**kwargs):
             "message_not_found",
             "No participant-visible internal direct message was found for that ID.",
         )
-    return {"success": True, "message": project_direct_message(message)}
+    from ...services.message_attachment_service import (
+        message_attachment_content,
+        message_attachment_descriptors,
+    )
+
+    attachments = message_attachment_descriptors(message)
+    return {
+        "success": True,
+        "message": project_direct_message(message),
+        "attachment_content": message_attachment_content(message, actor_scope.user_concept_id),
+        "image_attachments": [
+            a for a in attachments if a.get("content_type", "").startswith("image/")
+        ],
+    }
 
 
 def _message_list_direct(**kwargs):

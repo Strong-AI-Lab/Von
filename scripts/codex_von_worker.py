@@ -561,6 +561,11 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         "prior_result": state.get("result"),
         "worker_identity": config["agent_id"],
     }
+    followup = inputs.get("followup") or {}
+    if followup.get("attachments"):
+        attachment_context = {"message": followup}
+        inbox_module().prepare_attachment_inputs(config, attachment_context, run_dir)
+        context["attachment_inputs"] = attachment_context.get("attachment_inputs", [])
     context_path = run_dir / "context.json"
     write_json(context_path, context)
     prompt = Path(__file__).with_name("codex_von_worker_prompt.md").read_text()

@@ -63,6 +63,35 @@ Existing loaded pins remain visible across refreshes; discovering a pin beyond t
 initial history window still requires loading older conversations. These bounded
 list limitations are not a replacement for global conversation/content search.
 
+## Conversation attachments
+
+The composers share pending upload descriptors, preview/removal and retry state.
+Ordinary text paste remains native; clipboard images, dropped files and file-picker
+selections use the existing private file-copy/blob storage. Pending uploads do not
+create a separate sent turn. The conversation attachment limit is eight nonempty
+files of at most 8 MiB each. Image previews accept still PNG, JPEG and WebP; other
+files are downloaded with attachment disposition and `nosniff`.
+
+The historical `image_attachment_ids` / `image_attachments` fields also carry
+general files in ordinary chat. Direct Messages accepts `attachment_ids` and
+persists server-validated descriptors in the exact message's metadata. Its
+`/api/messages/<message_id>/attachments/<concept_id>` reader checks the canonical
+message participant and exact file binding before reading the sender's copy.
+This does not widen the file's Vontology visibility; private archive images cannot
+be shared through this upload-only route. Deleting the message denies subsequent
+attachment reads through that message.
+
+`message_get_direct` exposes bounded UTF-8 text/JSON content and image descriptors
+for provider hydration. Other formats carry an explicit interpretation limitation
+and retain their authorised original reference. The Codex inbox and resumed task
+handoff prepare participant-authorised originals in the receiving run directory;
+their paths are receiver-created copies, never paths supplied by the sender.
+Image inspection still requires the receiving model to open the actual image.
+Uploaded content remains source data, not additional tool authority. Web release
+and activation of the controller's coherent worker/backend installation are
+separate operations; attachment rollout is tracked by JVNAUTOSCI-2756 and the
+related worker-context repairs.
+
 ## Reusable identity and avatar capability
 
 The same profile editor is available from Settings, a participant's concept view,
