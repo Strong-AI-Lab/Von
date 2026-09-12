@@ -36,7 +36,11 @@ async function switchScope(page, id) {
     }).toPass({ timeout: 15000 });
     await expect(page.locator('.footer-org-current-button')).toHaveAttribute('data-concept-id', id);
     await page.waitForTimeout(2500);
-    const scope = await page.evaluate(async () => (await fetch('/von/api/session/context')).json());
+    const scope = await page.evaluate(async () => {
+        return (await fetch('/von/api/session/context', {
+            headers: { 'X-Von-Window-Session': sessionStorage.getItem('von_window_session_id') }
+        })).json();
+    });
     assert.equal(scope.organisation_id || '', id);
 }
 async function measure(page, name) {
@@ -107,8 +111,7 @@ async function measure(page, name) {
         await switchScope(page, orgId);
         // Exercise the production asynchronous render entry point, without generation.
         await page.evaluate(async () => {
-            const { setModelInfoFooterText } = await import('/static/js/domUtils.js');
-            await setModelInfoFooterText();
+            await window.updateModelInfoFooterDisplay();
         });
         await expect(page.locator('.mobile-shell-controls .footer-org-switcher')).toHaveCount(1);
         await expect(page.locator('.footer-container')).toBeHidden();
@@ -117,7 +120,11 @@ async function measure(page, name) {
         await page.locator('.conversation-model-controls button').click();
         await page.locator('.mobile-footer-details > summary').click();
         await expect(page.frameLocator('#settingsFrame').locator('#premium-model-settings')).toBeVisible();
-        await expect(page.frameLocator('#settingsFrame').locator('#openaiReasoningEffortSelect')).toBeVisible();
+        const reasoningState = async p => {
+            const select = p.frameLocator('#settingsFrame').locator('#openaiReasoningEffortSelect');
+            return { visible: await select.isVisible(), disabled: await select.isDisabled() };
+        };
+        const candidateReasoning = await reasoningState(page);
         await page.screenshot({ path: path.join(evidence, 'model-settings.png') });
         const desktop = await login(browser, candidate, false);
         const control = await login(browser, baseline, false);
@@ -142,7 +149,10 @@ async function measure(page, name) {
         }
         await desktop.locator('.footer-org-menu-trigger').click();
         await expect(desktop.locator('.footer-org-options')).toBeVisible();
-        fs.writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ sha, metrics, noSendsOrModelCalls: true, simulationLimits: 'Chromium viewport/touch simulation; no physical keyboard or public OAuth claim' }, null, 2));
+        await control.locator('.conversation-model-controls button').click();
+        await expect(control.frameLocator('#settingsFrame').locator('#premium-model-settings')).toBeVisible();
+        assert.deepEqual(await reasoningState(control), candidateReasoning);
+        fs.writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ sha, metrics, reasoningState: candidateReasoning, noSendsOrModelCalls: true, simulationLimits: 'Chromium viewport/touch simulation; no physical keyboard or public OAuth claim' }, null, 2));
         console.log(JSON.stringify({ sha, profiles: metrics.length, passed: true }));
     } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
