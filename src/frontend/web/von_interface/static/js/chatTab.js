@@ -38879,6 +38879,11 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageHeader.style.cssText = 'font-weight: bold; margin-bottom: 5px; font-size: 0.9em; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0;';
             messageHeader.style.color = sender === 'Error' ? '#dc3545' : '#28a745';
             const authorId = options.authorConceptId || (!isHistory ? getCurrentUserConceptId() : null);
+            // Legacy user turns without author metadata belong to the local user.
+            if (sender !== 'Error' && !externalActor
+                && (!authorId || authorId === getCurrentUserConceptId())) {
+                messageContainer.classList.add('own-contribution');
+            }
             if (sender !== 'Error' && !externalActor && authorId) messageHeader.append(participantIdentityAvatar(authorId, sender));
 
             const headerText = document.createElement('span');

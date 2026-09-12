@@ -75,3 +75,87 @@ test('cancelling a new message restores the ordinary conversation pane', async (
     document.getElementById('cancelNewMessage').click();
     expect(document.getElementById('conversationWorkspace').classList.contains('show-message-exchange')).toBe(false);
 });
+
+function unreadResponse() {
+    const result = response();
+    result.messages[0].relationships['#V#has_recipient'] = ['#V#alice'];
+    result.messages[0].concept_data.read_by = [];
+    return result;
+}
+function mockReadObserver() {
+    const observers = [];
+    global.IntersectionObserver = jest.fn(function (callback) {
+        this.callback = callback;
+        this.observe = jest.fn(); this.unobserve = jest.fn(); this.disconnect = jest.fn();
+        observers.push(this);
+    });
+    return observers;
+}
+function visibleEntry() {
+    document.getElementById('messageViewContent').getClientRects = () => [{}];
+    return { target: document.querySelector('[data-contribution-id]'), isIntersecting: true, intersectionRatio: 0.5 };
+}
+afterEach(() => { delete global.IntersectionObserver; });
+
+test('only visible incoming unread messages are marked, with confirmed labels and a catalogue refresh', async () => {
+    const observers = mockReadObserver();
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValueOnce(unreadResponse());
+    const panel = require(base + 'components/messagePanel.js');
+    await panel.openMessageExchange(row('#V#bob'));
+    expect(document.querySelector('.message-unread-label').textContent).toBe('Unread');
+    expect(api.postJson).toHaveBeenCalledTimes(1);
+    const entry = visibleEntry();
+    observers[0].callback([{ ...entry, isIntersecting: false, intersectionRatio: 0 }]);
+    expect(api.postJson).toHaveBeenCalledTimes(1);
+    api.postJson.mockResolvedValueOnce({ success: true, updated_count: 1 });
+    const refresh = jest.fn(); document.addEventListener('von:conversation-contribution', refresh, { once: true });
+    observers[0].callback([entry]); await flush();
+    expect(api.postJson).toHaveBeenLastCalledWith('/api/messages/read/bulk', { message_ids: ['one'] });
+    expect(document.querySelector('.message-unread-label')).toBeNull();
+    expect(refresh).toHaveBeenCalledTimes(1);
+});
+
+test('a failed visible read stays labelled and same-content refresh re-arms the observer', async () => {
+    const observers = mockReadObserver();
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValueOnce(unreadResponse());
+    const panel = require(base + 'components/messagePanel.js');
+    await panel.openMessageExchange(row('#V#bob'));
+    api.postJson.mockRejectedValueOnce(new Error('offline'));
+    observers[0].callback([visibleEntry()]); await flush();
+    expect(document.querySelector('.message-unread-label')).not.toBeNull();
+    expect(document.querySelector('.message-read-status').textContent).toContain('Retry');
+    api.postJson.mockResolvedValueOnce(unreadResponse());
+    await panel.refreshOpenMessageExchange();
+    expect(observers).toHaveLength(2);
+    expect(observers[1].observe).toHaveBeenCalledTimes(1);
+});
+
+test('partial update receipts do not optimistically clear unread contributions', async () => {
+    const observers = mockReadObserver();
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValueOnce(unreadResponse());
+    const panel = require(base + 'components/messagePanel.js');
+    await panel.openMessageExchange(row('#V#bob'));
+    api.postJson.mockResolvedValueOnce({ success: true, updated_count: 0 }).mockResolvedValueOnce(unreadResponse());
+    observers[0].callback([visibleEntry()]); await flush();
+    expect(document.querySelector('.message-unread-label')).not.toBeNull();
+    expect(document.querySelector('.message-read-status')).not.toBeNull();
+    expect(observers).toHaveLength(1); // No immediate retry loop on scope failure.
+});
+
+test('queued observers from a previous selection and hidden documents cannot mark messages', async () => {
+    const observers = mockReadObserver();
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValue(unreadResponse());
+    const panel = require(base + 'components/messagePanel.js');
+    await panel.openMessageExchange(row('#V#bob'));
+    const entry = visibleEntry();
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true });
+    observers[0].callback([entry]);
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false });
+    await panel.openMessageExchange(row('#V#carol'));
+    observers[0].callback([visibleEntry()]);
+    expect(api.postJson.mock.calls.filter(([url]) => url === '/api/messages/read/bulk')).toHaveLength(0);
+});

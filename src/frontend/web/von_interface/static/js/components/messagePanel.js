@@ -43,6 +43,7 @@ let _exchangeGeneration = 0;
 let _olderCursor = null;
 let _readObserver = null;
 const _exchangeDrafts = new Map();
+const _pendingReads = new Set();
 
 function exchangeScope(row = _exchange) {
     return row ? `${row.browser_scope ?? getSessionScopedOrgId() ?? ''}:${row.viewer_id}:${row.session_id}` : '';
@@ -121,24 +122,83 @@ export async function refreshOpenMessageExchange() {
     await loadConversation(_currentConversationUserId, { silent: true });
 }
 
+function isUnreadMessage(message) {
+    return (message.relationships?.['#V#has_recipient'] || []).includes(_currentUserId)
+        && !(message.concept_data?.read_by || []).includes(_currentUserId);
+}
+
+function updateUnreadMarkers() {
+    _messagesContainer?.querySelectorAll('[data-contribution-id]').forEach(element => {
+        const message = _currentMessages.find(item => item.concept_id === element.dataset.contributionId);
+        const unread = Boolean(message && isUnreadMessage(message));
+        element.classList.toggle('is-unread', unread);
+        let label = element.querySelector('.message-unread-label');
+        if (unread && !label) {
+            label = document.createElement('span');
+            label.className = 'message-unread-label';
+            label.textContent = 'Unread';
+            element.prepend(label);
+        } else if (!unread) label?.remove();
+    });
+}
+
 function observeDisplayedMessages() {
     _readObserver?.disconnect();
     if (typeof IntersectionObserver !== 'function') return;
     const root = _messagesContainer?.querySelector('#messageViewContent');
-    _readObserver = new IntersectionObserver(entries => {
-        if (document.hidden || !root?.getClientRects().length) return;
-        const ids = entries.filter(entry => entry.isIntersecting && entry.intersectionRatio > 0)
+    const generation = _exchangeGeneration;
+    const org = getSessionScopedOrgId();
+    const observer = new IntersectionObserver(entries => {
+        // Disconnected observers can still deliver entries for the old pane.
+        if (observer !== _readObserver || generation !== _exchangeGeneration
+            || org !== getSessionScopedOrgId() || document.hidden || !root?.getClientRects().length) return;
+        const ids = entries.filter(entry => entry.isIntersecting && entry.intersectionRatio > 0 && entry.target.isConnected)
             .map(entry => entry.target.dataset.contributionId)
-            .filter(id => _currentMessages.some(m => m.concept_id === id && (m.relationships?.['#V#has_recipient'] || []).includes(_currentUserId) && !(m.concept_data?.read_by || []).includes(_currentUserId)));
+            .filter(id => !_pendingReads.has(`${generation}:${id}`) && _currentMessages.some(m => m.concept_id === id && isUnreadMessage(m)));
         if (!ids.length) return;
-        const generation = _exchangeGeneration;
-        void postJson('/api/messages/read/bulk', { message_ids: ids }).then(() => {
+        ids.forEach(id => _pendingReads.add(`${generation}:${id}`));
+        entries.filter(entry => ids.includes(entry.target.dataset.contributionId))
+            .forEach(entry => observer.unobserve(entry.target));
+        void postJson('/api/messages/read/bulk', { message_ids: ids }).then(async response => {
+            if (generation !== _exchangeGeneration || org !== getSessionScopedOrgId()) return;
+            if (response?.success !== true) throw new Error('Read state was not saved');
+            // A full update receipt confirms every submitted ID, including loaded
+            // older pages. Partial receipts require read-back; never clear all IDs.
+            if (response.updated_count === ids.length) {
+                _currentMessages.forEach(message => {
+                    if (!ids.includes(message.concept_id)) return;
+                    message.concept_data ||= {};
+                    message.concept_data.read_by = [...new Set([...(message.concept_data.read_by || []), _currentUserId])];
+                });
+                updateUnreadMarkers();
+            } else await loadConversation(_currentConversationUserId, { silent: true, observeReads: false });
             if (generation !== _exchangeGeneration) return;
-            _currentMessages.forEach(m => { if (ids.includes(m.concept_id)) { m.concept_data ||= {}; m.concept_data.read_by = [...new Set([...(m.concept_data.read_by || []), _currentUserId])]; } });
-            document.dispatchEvent(new CustomEvent('von:conversation-contribution'));
-        }).catch(() => {});
+            if (_currentMessages.some(m => ids.includes(m.concept_id) && isUnreadMessage(m))) showReadFailure();
+            else {
+                root.querySelector('.message-read-status')?.remove();
+                document.dispatchEvent(new CustomEvent('von:conversation-contribution'));
+            }
+        }).catch(() => {
+            if (generation === _exchangeGeneration) showReadFailure();
+        }).finally(() => ids.forEach(id => _pendingReads.delete(`${generation}:${id}`)));
     }, { root, threshold: 0.01 });
-    root?.querySelectorAll('[data-contribution-id]').forEach(el => _readObserver.observe(el));
+    _readObserver = observer;
+    root?.querySelectorAll('.is-unread[data-contribution-id]').forEach(el => observer.observe(el));
+}
+
+function showReadFailure() {
+    const root = _messagesContainer?.querySelector('#messageViewContent');
+    if (!root || root.querySelector('.message-read-status')) return;
+    const status = document.createElement('div');
+    status.className = 'message-read-status';
+    status.setAttribute('role', 'status');
+    status.textContent = 'Could not save read state. Unread labels are retained. ';
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.textContent = 'Retry';
+    retry.onclick = () => observeDisplayedMessages();
+    status.append(retry);
+    root.prepend(status);
 }
 
 const COMPOSE_SCOPE_REPLY = 'reply';
@@ -627,7 +687,7 @@ function bindMessageStreamMenu(element, getOtherUserId) {
 /**
  * Load messages for a conversation with a specific user.
  */
-async function loadConversation(userId, { silent = false, before = null } = {}) {
+async function loadConversation(userId, { silent = false, before = null, observeReads = true } = {}) {
     if (_isLoading) return;
     _isLoading = true;
     const generation = _exchangeGeneration;
@@ -655,7 +715,11 @@ async function loadConversation(userId, { silent = false, before = null } = {}) 
         }
         const sameContent = JSON.stringify(nextMessages.map(m => [m.concept_id, m.concept_data?.content_fallback])) === JSON.stringify(_currentMessages.map(m => [m.concept_id, m.concept_data?.content_fallback]));
         _currentMessages = nextMessages;
-        if (silent && !before && sameContent) return;
+        if (silent && !before && sameContent) {
+            updateUnreadMarkers();
+            if (observeReads) observeDisplayedMessages();
+            return;
+        }
         if (before || !silent) _olderCursor = response.before || null;
         _currentUserId = response.current_user_id || null;
         await renderMessages();
@@ -673,7 +737,8 @@ async function loadConversation(userId, { silent = false, before = null } = {}) 
             jump.onclick = () => { contentEl.scrollTop = contentEl.scrollHeight; jump.remove(); };
             contentEl.append(jump);
         }
-        observeDisplayedMessages();
+        updateUnreadMarkers();
+        if (observeReads) observeDisplayedMessages();
     } catch (_) {
         if (generation === _exchangeGeneration && contentEl && !silent) contentEl.innerHTML = '<div class="message-error">Could not load this conversation. Try Refresh.</div>';
     } finally { if (generation === _exchangeGeneration) _isLoading = false; }
