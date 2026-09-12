@@ -38,7 +38,7 @@ describe('conversation single-scroll layout', () => {
         expect(composerRule).toContain('position: sticky');
         expect(template).toContain('class="chat-composer"');
         expect(template).toContain('<details class="chat-composer-more-actions">');
-        expect(template).toContain('<textarea id="promptInput" rows="1"');
+        expect(parseTemplate(template).querySelector('#promptInput').getAttribute('rows')).toBe('1');
     });
 
     test('positions the latest-message control against the viewport', () => {

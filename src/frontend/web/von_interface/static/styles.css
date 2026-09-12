@@ -8699,6 +8699,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 /* The same session list serves horizontal navigation, the docked tray and peek. */
 .chat-conversation-nav { display: contents; }
 .conversation-tray-header,
+.conversation-tray-context,
 .conversation-tray-resize { display: none; }
 
 .conversation-workspace[data-effective-tabs-layout="vertical"] {
@@ -8891,6 +8892,40 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 @media (prefers-reduced-motion: reduce) {
     .conversation-workspace[data-effective-tabs-layout="vertical"], .conversation-tray-toggle span { transition: none; }
 }
+
+/* Keep current context above the mobile list without moving any conversation. */
+.conversation-workspace[data-tray-mobile="true"] .chat-session-tabs-row {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    gap: 4px;
+}
+.conversation-workspace[data-tray-mobile="true"] .conversation-tray-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.conversation-workspace[data-tray-mobile="true"] .conversation-tray-heading { display: none; }
+.conversation-workspace[data-tray-mobile="true"] .conversation-tray-context {
+    display: block;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: 13px;
+    font-weight: 600;
+}
+.conversation-workspace[data-tray-mobile="true"] .conversation-tray-toggle {
+    flex-basis: 44px;
+    width: 44px;
+    height: 44px;
+}
+.conversation-workspace[data-tray-mobile="true"] .chat-session-tabs {
+    width: 100%;
+    flex: 0 1 auto;
+}
+.conversation-workspace[data-tray-mobile="true"][data-tray-collapsed="true"] .chat-session-tabs,
+.conversation-workspace[data-tray-mobile="true"][data-tray-collapsed="true"] .chat-session-history-summary,
+.conversation-workspace[data-tray-mobile="true"][data-tray-collapsed="true"] .catalogue-filters { display: none; }
 
 .chat-situation-toggle {
     min-height: 32px;
