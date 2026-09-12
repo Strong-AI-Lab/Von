@@ -37,6 +37,8 @@ import { elements, getCurrentUserConceptId, renderSpanSuggestions } from './domU
 import { activateTab } from './tabNavigation.js';
 import { isAnnotationEnabled } from './featureFlags.js';
 import { detectMarkdown, renderMarkdownViaServer } from './markdownUtils.js';
+import { renderConversationVisuals } from './conversationVisuals.js';
+import { renderRetainedConversationContent } from './retainedConversationContent.js';
 import {
     getSpeechSynthesisVoices,
     isTextToSpeechSupported,
@@ -15493,6 +15495,13 @@ function extractPresenterChannelsFromDisplayElements(value) {
         }
     }
 
+    const retainedText = contract.elements
+        .filter(element => element?.channel === 'screen' && element?.element_type === 'text_block'
+            && element?.provenance?.source === 'retained_content')
+        .sort((a, b) => a.order - b.order)
+        .map(element => element.payload?.text || '');
+    if (retainedText.length) screen = retainedText.join('\n');
+
     if (!(screen && screen.trim()) && !(spoken && spoken.trim())) {
         return null;
     }
@@ -19237,6 +19246,8 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
     if (container?.dataset?.renderMode === 'text') {
         return;
     }
+
+    renderRetainedConversationContent(container, debugData?.display_elements, renderChatMarkdownIntoContainer);
 
     const resolvedTableElements = resolveTableDisplayElements(debugData);
     const {
@@ -23034,7 +23045,8 @@ function cancelChatConceptMetaHydration() {
 
 function shouldRenderMarkdownForAssistant(message, _debugData) {
     const text = String(message ?? '');
-    return detectMarkdown(text);
+    return detectMarkdown(text) || Boolean(_debugData?.display_elements?.elements?.some(
+        element => element.provenance?.source === 'retained_content'));
 }
 
 function updateChatRenderModeBadge(badgeEl, messageTextEl, details = {}) {
@@ -23073,7 +23085,10 @@ function updateChatRenderModeBadge(badgeEl, messageTextEl, details = {}) {
 
 async function renderChatMarkdownIntoContainer(container, text) {
     const markdownText = String(text ?? '');
+    const generation = (Number(container.dataset.markdownGeneration) || 0) + 1;
+    container.dataset.markdownGeneration = String(generation);
     const html = await renderMarkdownViaServer(markdownText);
+    if (container.dataset.markdownGeneration !== String(generation)) return;
 
     // Cache rendered HTML so we can toggle without re-fetching.
     try {
@@ -23088,6 +23103,7 @@ async function renderChatMarkdownIntoContainer(container, text) {
     }
 
     container.innerHTML = html;
+    await renderConversationVisuals(container);
     convertQuotedInstructionBlockquotesToButtons(container);
     convertInlineQuotedStrongSegmentsToButtons(container);
     convertJustSayInstructionsToButtons(container);
@@ -23102,8 +23118,8 @@ async function renderChatMarkdownIntoContainer(container, text) {
     // Preserve clickable #V# tokens; cartouchify where allowed, otherwise linkify in-place.
     // Note: linkifyVontologyTokensInElement does NOT skip <pre>/<code> blocks so that #V# tokens
     // inside JSON or other code fences become clickable links with visible styling.
-    cartouchifyVontologyTokensInElement(container, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
-    linkifyVontologyTokensInElement(container, { skipSelectors: ['a', '.vontology-cartouche', 'button'] });
+    cartouchifyVontologyTokensInElement(container, { skipSelectors: ['pre', 'code', 'a', '.conversation-visual'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
+    linkifyVontologyTokensInElement(container, { skipSelectors: ['a', '.vontology-cartouche', 'button', '.conversation-visual'] });
     hydrateChatConceptCartouches(container);
     await resolveInlineVontologyAliasesInElement(container, { expectedRenderMode: 'rendered' });
 }
@@ -23144,12 +23160,13 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, _debugData) 
     const cachedHtml = messageTextEl?.dataset?.renderedHtml;
     if (cachedHtml) {
         messageTextEl.innerHTML = cachedHtml;
+        void renderConversationVisuals(messageTextEl);
         convertQuotedInstructionBlockquotesToButtons(messageTextEl);
         convertInlineQuotedStrongSegmentsToButtons(messageTextEl);
         convertJustSayInstructionsToButtons(messageTextEl);
         convertQuotedInstructionListItemsToButtons(messageTextEl);
-        cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
-        linkifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['a', '.vontology-cartouche', 'button'] });
+        cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a', '.conversation-visual'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
+        linkifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['a', '.vontology-cartouche', 'button', '.conversation-visual'] });
         hydrateChatConceptCartouches(messageTextEl);
         void resolveInlineVontologyAliasesInElement(messageTextEl, { expectedRenderMode: 'rendered' });
         renderTableDisplayElementsIntoContainer(messageTextEl, _debugData);
@@ -23925,6 +23942,7 @@ function shouldSkipInlineAliasTextNode(textNode) {
     if (!parent) {
         return true;
     }
+    if (parent.closest('.conversation-visual, svg, math, style')) return true;
 
     for (const selector of CHAT_INLINE_ALIAS_TEXT_SKIP_SELECTORS) {
         try {
@@ -23940,7 +23958,7 @@ function shouldSkipInlineAliasTextNode(textNode) {
 }
 
 function shouldSkipInlineAliasCodeElement(codeEl) {
-    if (!codeEl || codeEl.closest('pre')) {
+    if (!codeEl || codeEl.closest('pre, .conversation-visual') || codeEl.classList.contains('von-math-source')) {
         return true;
     }
     for (const selector of ['a', 'button', '.vontology-cartouche', '.vontology-inline-assertion']) {
@@ -29914,6 +29932,7 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             if (msg.role === 'assistant') {
                 const merged = {
                     ...(msg.llm_debug_data && typeof msg.llm_debug_data === 'object' ? msg.llm_debug_data : {}),
+                    display_elements: msg.display_elements || msg.llm_debug_data?.display_elements,
                     llm_execution_summary: (
                         msg.llm_execution_summary && typeof msg.llm_execution_summary === 'object'
                     ) ? msg.llm_execution_summary : null,
@@ -37788,8 +37807,8 @@ async function handleSendPrompt(options = {}) {
         applyImmediateThinkingTerminalOutcome(request);
 
         // Store LLM debug data if available
-        if (data.llm_debug) {
-            const enriched = enrichDebugDataWithSpeechPlanning(data.llm_debug, {
+        if (data.llm_debug || displayElements) {
+            const enriched = enrichDebugDataWithSpeechPlanning(data.llm_debug || {}, {
                 presenterChannels: responseChannels,
                 screenText,
                 spokenText,

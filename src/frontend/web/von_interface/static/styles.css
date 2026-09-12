@@ -18517,3 +18517,24 @@ body.settings-body {
     .unified-message-content .send-message-btn { padding: 0 12px; font-size: 14px; }
     .unified-message-content .message-reply-destination { margin: 0 0 4px; font-size: 12px; }
 }
+
+/* Source-based conversational visuals; original source stays independently usable. */
+.conversation-visual { max-width: 100%; min-width: 0; }
+.conversation-visual.visual-dark { color: #e5e7eb; background: #202e3b; }
+.conversation-visual.visual-dark .visual-source code { color: #e5e7eb; background: #15202c; }
+.conversation-visual.visual-dark .visual-error { color: #e5e7eb; background: #202e3b; }
+.conversation-visual .visual-source code { color: inherit; }
+.conversation-visual .visual-source button { color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 3px; }
+.conversation-visual.visual-display { display: block; margin: 1rem 0; }
+.conversation-visual .visual-output { max-width: 100%; }
+.conversation-visual.diagram .visual-output { display: block; overflow: auto; }
+.conversation-visual.diagram svg { display: block; width: 100%; height: auto; min-width: 480px; }
+.conversation-visual .katex-display { overflow-x: auto; overflow-y: hidden; padding: .3em 0; }
+.conversation-visual .visual-source { font: normal .8rem system-ui, sans-serif; }
+.conversation-visual .visual-source code { white-space: pre-wrap; display: block; overflow-wrap: anywhere; }
+.conversation-visual .visual-source code[hidden] { display: none; }
+.conversation-visual .visual-source button { font: inherit; margin: .15em .3em; }
+.conversation-visual.equation:not(.visual-display) .visual-source { display: inline; }
+.conversation-visual.equation:not(.visual-display) .visual-source > button:last-child { display: none; }
+.conversation-visual.equation:not(.visual-display) .visual-source:focus-within > button:last-child { display: inline; }
+.visual-error { display: block; padding: .5em; border-inline-start: 3px solid #b86615; }

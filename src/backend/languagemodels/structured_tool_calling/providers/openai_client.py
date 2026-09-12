@@ -12,6 +12,7 @@ import logging
 import re
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from time import monotonic
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
@@ -34,6 +35,7 @@ from ..transport import (
     sanitise_transport_telemetry_value,
 )
 from ..types import (
+    ImageGenerationOutcomeUnknownError,
     LLMContinuation,
     LLMResponse,
     StructuredToolCapabilityRejectedError,
@@ -721,6 +723,14 @@ class OpenAIClient(LLMClient):
         tools = [
             self._tool_definition_to_responses_dict(tool) for tool in available_tools
         ]
+        from ....services.conversation_output_capabilities import native_image_tool
+
+        image_tool = native_image_tool(decision)
+        if image_tool is not None:
+            tools.append(image_tool)
+            # A connection failure after provider acceptance is indeterminate;
+            # an SDK retry could buy a second image. The turn reports the failure.
+            request_client = request_client.with_options(max_retries=0)
         requested_parameters = (
             dict(llm_params) if isinstance(llm_params, Mapping) else {}
         )
@@ -840,13 +850,21 @@ class OpenAIClient(LLMClient):
             request_kwargs["stream"] = True
             request_kwargs["extra_headers"] = {"Accept": "text/event-stream"}
 
-        response = await request_client.responses.create(
-            model=request_model,
-            input=provider_image_messages(input_items, surface="responses"),  # type: ignore[arg-type]
-            instructions=system_message,
-            tools=tools,  # type: ignore[arg-type]
-            **request_kwargs,
-        )
+        try:
+            response = await request_client.responses.create(
+                model=request_model,
+                input=provider_image_messages(input_items, surface="responses"),  # type: ignore[arg-type]
+                instructions=system_message,
+                tools=tools,  # type: ignore[arg-type]
+                **request_kwargs,
+            )
+        except (openai.APIConnectionError, openai.InternalServerError) as exc:
+            if image_tool is not None:
+                raise ImageGenerationOutcomeUnknownError(
+                    "The connection ended while image generation was available. Its outcome is unknown; no generation retry was sent.",
+                    decision={**decision.to_telemetry(), "failure_kind": "image_generation_outcome_unknown"},
+                ) from exc
+            raise
         if decision.provider == "meta":
             response = await self._consume_meta_responses_stream(
                 response,
@@ -864,6 +882,16 @@ class OpenAIClient(LLMClient):
                 continuation=continuation,
             )
         )
+        if image_tool is not None:
+            parsed = replace(parsed, content_parts=[
+                replace(part, provenance={**part.provenance,
+                    "requested_image_model": image_tool["model"]})
+                if part.kind in {"image", "media_error"} else part
+                for part in parsed.content_parts
+            ])
+            parsed.transport_metadata["image_generation_tool"] = {
+                key: image_tool[key] for key in ("type", "model") if key in image_tool
+            }
         if continuation is not None:
             retained_count = (
                 0
@@ -1715,17 +1743,23 @@ class OpenAIClient(LLMClient):
         decision: StructuredToolTransportDecision,
         input_items: list[dict[str, Any]],
     ) -> LLMResponse:
+        from ....services.conversation_output_service import openai_visible_parts, without_image_bytes
         text_parts: list[str] = []
         tool_calls: List[ToolCall] = []
         diagnostics: List[Dict[str, Any]] = []
         output_items: list[dict[str, Any]] = []
         output_item_types: list[str] = []
         provider_function_call_ids: list[str] = []
+        visible_response = {
+            "id": _value(response, "id"), "model": _value(response, "model"),
+            "output": [_provider_item_mapping(item) for item in _value(response, "output") or []],
+        }
+        content_parts = openai_visible_parts(visible_response)
         for item in _value(response, "output") or []:
             item_type = str(_value(item, "type") or "unknown")
             output_item_types.append(item_type)
             dumped_item = _provider_item_mapping(item)
-            if dumped_item:
+            if dumped_item and item_type != "image_generation_call":
                 output_items.append(dumped_item)
             if item_type == "message":
                 for part in _value(item, "content") or []:
@@ -1871,10 +1905,11 @@ class OpenAIClient(LLMClient):
             text_response="".join(text_parts),
             tool_calls=tool_calls,
             raw_response=(
-                response.model_dump() if hasattr(response, "model_dump") else None
+                without_image_bytes(response.model_dump()) if hasattr(response, "model_dump") else None
             ),
             model=_value(response, "model"),
             usage=self._usage_mapping(_value(response, "usage"), responses=True),
+            content_parts=content_parts,
             tool_call_diagnostics=diagnostics,
             continuation=continuation,
             transport_metadata=transport_metadata,

@@ -55,6 +55,7 @@ _SCREEN_ELEMENT_FAMILY_ALIASES: dict[str, str] = {
 }
 _ALLOWED_SCREEN_ELEMENT_FAMILIES: frozenset[str] = frozenset(
     {
+        "image",
         "table",
         "workflow_view",
         "task_view",
