@@ -79,7 +79,7 @@ fs.mkdirSync(evidence, { recursive: true });
             await expect(page.frameLocator('#settingsFrame').locator('#preferredLanguageSelect')).toBeVisible();
             await context.close();
         }
-        const result = { commit, role, desktopAndMobile: true, draftsPreserved: true, generationBlocked: true, noWrites: true };
+        const result = { commit, role, desktopAndMobile: true, draftsPreserved: true, generationBlocked: true, noWorkflowOrMessageMutations: true };
         fs.writeFileSync(path.join(evidence, `${role}.json`), JSON.stringify(result, null, 2));
         console.log(JSON.stringify(result));
     } finally { await browser.close(); }
