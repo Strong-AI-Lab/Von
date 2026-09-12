@@ -1373,7 +1373,32 @@ The owned unnamed-conversation naming consumer is
 `#V#unnamed_conversation_naming_workflow`. Its repository bundle and prompt are
 release inputs for the startup bootstrap; execution reads the published
 Vontology definition and linked prompt. Bootstrap does not create an actor's
-schedule. Use the normal actor-bound schedule route with an interval of 3600
+schedule. Reuse this direct consumer for the bounded hourly naming job. A
+[recurring task continuation](task_responsibility_continuation.md#recurring-encounters)
+also uses a workflow schedule, then submits a separate Tasks/chat execution.
+That path is useful when a responsibility needs evolving task guidance, a work
+product and conversation continuity. It requires a pending or in-progress task
+assigned to Von, created by the actor, with an accessible actor-owned originating
+conversation in the same organisation. A recurring task type or a coding-agent
+assignment alone does not supply an hourly executor. The existing naming
+consumer already provides discovery, inspection, semantic title choice and
+guarded effects without that additional task launch. This is a reuse decision,
+not a measured claim about comparative model quality, cost or latency.
+
+Before creating a naming schedule, list the actor's schedules including disabled
+ones and read back candidate definitions and launch inputs. Reuse a matching
+schedule and explicitly resume it if paused. A create retry does not resume a
+paused schedule. Preserve an existing schedule ID: the creation identity hashes
+the actor, definition identity, cadence, inputs and caller key, so a stable key
+alone does not deduplicate legacy schedules or schedules with changed inputs or
+definition identities. Reconcile any older naming consumer before enabling a
+replacement, preserving active work and enough state to restore its prior
+enabled status. Do not create a second assignment or leave competing naming
+schedules enabled. A bounded or incomplete schedule listing does not prove that
+no prior schedule exists.
+
+If no suitable schedule exists after reconciliation, use the normal actor-bound
+schedule route with an interval of 3600
 seconds, a stable idempotency key such as
 `hourly-owned-unnamed-conversation-naming-v1`, and an explicit allowed model in
 `default_inputs.requested_model`. For the bounded naming slice, `gpt-5.4` with
