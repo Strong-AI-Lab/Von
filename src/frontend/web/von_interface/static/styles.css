@@ -10706,8 +10706,30 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     font-size: 0.75rem;
     color: #64748b;
     margin-left: auto;
+    white-space: normal;
+    flex-shrink: 1;
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    line-height: 1.5;
+    min-width: 0;
+}
+
+.thinking-execution-cost {
+    display: inline-block;
+    width: 20em;
+    max-width: 100%;
+    flex: 0 1 20em;
+    height: 1.5em;
     white-space: nowrap;
-    flex-shrink: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-variant-numeric: tabular-nums;
+}
+
+.thinking-execution-cost-high {
+    color: #b91c1c;
+    font-weight: 600;
 }
 
 .thinking-card-mode-switch {
