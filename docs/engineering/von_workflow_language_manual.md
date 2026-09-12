@@ -1369,6 +1369,36 @@ release schedules; it cannot adopt or disable actor-owned or unmarked records.
 Current delivery evidence and remaining consumers are tracked in
 [JVNAUTOSCI-2698](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2698).
 
+The owned unnamed-conversation naming consumer is
+`#V#unnamed_conversation_naming_workflow`. Its repository bundle and prompt are
+release inputs for the startup bootstrap; execution reads the published
+Vontology definition and linked prompt. Bootstrap does not create an actor's
+schedule. Use the normal actor-bound schedule route with an interval of 3600
+seconds, a stable idempotency key such as
+`hourly-owned-unnamed-conversation-naming-v1`, and an explicit allowed model in
+`default_inputs.requested_model`. For the bounded naming slice, `gpt-5.4` with
+`requested_model_parameters: {"reasoning_effort": "medium"}` is the initial
+non-Sol selection: short evidence-based title choice does not need the coding
+worker's reasoning profile. Live title quality remains an acceptance question.
+
+The consumer searches owned unnamed conversations, including hidden ones but
+excluding Trash, inspects pages of five, proposes titles through `llm.action`,
+and uses the existing evidence-bound batch rename and canonical read-back.
+It follows continuation cursors even after an empty filtered page. Individual
+inspection or rename failures preserve useful results and allow later pages to
+progress, but produce a non-success outcome. Existing names and concurrent
+user names remain protected by the rename primitive. Ambiguous evidence may be
+left unnamed and is reported as skipped in the step output.
+
+The durable checkpoint retains the discovery cursor and execution-required
+inspection and rename values for recovery. An executor transition limit or
+incomplete source coverage is not exhaustive success; resume/retry the existing
+instance from its checkpoint. Completion covers the traversed source snapshot,
+not concurrent additions. Check occurrence identity, step receipts and canonical
+titles before claiming the hourly responsibility is working; schedule creation
+and source publication alone are insufficient. JVNAUTOSCI-2698 owns the live
+activation and acceptance status.
+
 Awaited durable execution contract:
 
 - `workflow_execute` MUST use the canonical verified submission pathway and MUST NOT introduce a parallel launch bypass.

@@ -1,0 +1,574 @@
+{
+  "family_id": "unnamed_conversation_naming_workflow_seed_bundle",
+  "managed_by": "conversation_naming_workflow_vontology_service",
+  "schema_version": "repo_seed_workflow_bundle.v1",
+  "seed_version": "1",
+  "source_tag": "JVNAUTOSCI-2698",
+  "supported_action_ids": [
+    "workflow_mcp.invoke_tool",
+    "llm.action",
+    "workflow_control.context_set"
+  ],
+  "workflows": [
+    {
+      "workflow_id": "#V#unnamed_conversation_naming_workflow",
+      "display_name": "Name Owned Unnamed Conversations",
+      "description": "Inspect owned unnamed conversations, choose concise evidence-grounded names, and apply evidence-bound renames without changing existing names. Executable by the durable scheduler; traverse source pages until coverage completes.",
+      "content": "Actor-owned hourly conversation naming consumer. Semantic title selection belongs to the linked prompt. Search cursors and independent effect receipts are retained in durable checkpoints and step traces. Completion covers the enumerated source snapshot, not future concurrent additions.",
+      "type_ids": [
+        "#V#ai_workflow",
+        "#V#durable_workflow"
+      ],
+      "launch_input_contract": {
+        "schema_version": "workflow_launch_input_contract.v1",
+        "required_inputs": [
+          "requested_model"
+        ],
+        "input_mappings": [
+          {
+            "target_context_key": "requested_model",
+            "source_expression": "inputs.requested_model",
+            "extractor": "identity",
+            "required": true
+          },
+          {
+            "target_context_key": "requested_model_parameters",
+            "source_expression": "inputs.requested_model_parameters",
+            "extractor": "identity",
+            "required": false
+          },
+          {
+            "target_context_key": "cursor",
+            "source_expression": "inputs.cursor",
+            "extractor": "identity",
+            "required": false
+          },
+          {
+            "target_context_key": "schedule_occurrence_id",
+            "source_expression": "inputs.schedule_occurrence_id",
+            "extractor": "identity",
+            "required": false
+          },
+          {
+            "target_context_key": "scheduled_for_utc",
+            "source_expression": "inputs.scheduled_for_utc",
+            "extractor": "identity",
+            "required": false
+          }
+        ]
+      },
+      "text_relations": [
+        {
+          "predicate": "#V#hasWorkflowRoutingProfileJson",
+          "text": "{\"schema_version\":\"workflow_routing_profile.v1\",\"role\":\"execution\",\"authoring_intent_required\":false,\"prefer_existing_capability\":false}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowDiscoveryExemplarsJson",
+          "text": "{\"schema_version\":\"workflow_discovery_exemplars.v1\",\"keywords\":[\"name unnamed conversations\",\"hourly conversation naming\",\"name owned conversations\"],\"examples\":[\"Every hour, find my unnamed conversations and give them short descriptive names without changing existing names.\"],\"required_capabilities\":[\"conversation_search\",\"conversation_inspect_batch\",\"conversation_manage_batch\"]}",
+          "lang": "en-NZ"
+        },
+        {
+          "predicate": "#V#hasWorkflowTerminalSuccessContractJson",
+          "text": "{\"schema_version\":\"workflow_terminal_success_contract.v1\",\"success_statuses\":[\"completed\"],\"required_summary_fields\":[\"workflow_id\",\"terminal_status\",\"final_state\",\"completed\"],\"require_terminal_status\":true,\"require_final_state\":true,\"require_completed_true\":true,\"require_completion_gate_safe_to_claim_completion\":false}",
+          "lang": "en-NZ"
+        }
+      ],
+      "publication_spec": {
+        "initial_state": "initialise",
+        "steps": [
+          {
+            "state_id": "initialise",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "cursor",
+                    "value": null,
+                    "preserve_existing": true
+                  },
+                  {
+                    "key": "coverage_complete",
+                    "value": false
+                  },
+                  {
+                    "key": "had_partial_failure",
+                    "value": false
+                  }
+                ]
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "tool_output_mapping_specs": [],
+            "reads_context_keys": [],
+            "writes_context_keys": [],
+            "on_failure_state": "failed",
+            "next_state": "discover"
+          },
+          {
+            "state_id": "discover",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "conversation_search"
+              },
+              {
+                "key": "query",
+                "value": "*"
+              },
+              {
+                "key": "filters",
+                "value": {
+                  "name_present": false,
+                  "access_mode": "owner"
+                }
+              },
+              {
+                "key": "page_size",
+                "value": 5
+              },
+              {
+                "key": "include_hidden",
+                "value": true
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_naming_discover_cursor",
+                "context_key": "cursor",
+                "tool_param": "cursor",
+                "required": false
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_naming_discover_discovery",
+                "tool_output_field": "result",
+                "context_key": "discovery"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_naming_discover_candidate_session_ids",
+                "tool_output_field": "result.candidate_session_ids",
+                "context_key": "candidate_session_ids"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_naming_discover_next_cursor",
+                "tool_output_field": "result.next_cursor",
+                "context_key": "next_cursor"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_naming_discover_coverage_complete",
+                "tool_output_field": "result.coverage_complete",
+                "context_key": "coverage_complete"
+              }
+            ],
+            "reads_context_keys": [
+              "cursor"
+            ],
+            "writes_context_keys": [
+              "discovery",
+              "candidate_session_ids",
+              "next_cursor",
+              "coverage_complete"
+            ],
+            "on_failure_state": "failed",
+            "next_state": "check_candidates"
+          },
+          {
+            "state_id": "check_candidates",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": []
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "tool_output_mapping_specs": [],
+            "reads_context_keys": [],
+            "writes_context_keys": [],
+            "on_failure_state": "failed",
+            "conditional_transitions": [
+              {
+                "to_state": "inspect",
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "candidate_session_ids",
+                  "expected": true
+                }
+              },
+              {
+                "to_state": "check_coverage",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "inspect",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "conversation_inspect_batch"
+              },
+              {
+                "key": "mode",
+                "value": "title_evidence"
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_naming_inspect_session_ids",
+                "context_key": "candidate_session_ids",
+                "tool_param": "session_ids",
+                "required": false
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_naming_inspect_inspection",
+                "tool_output_field": "result",
+                "context_key": "inspection"
+              }
+            ],
+            "reads_context_keys": [
+              "candidate_session_ids"
+            ],
+            "writes_context_keys": [
+              "inspection"
+            ],
+            "on_failure_state": "inspection_partial",
+            "next_state": "choose_titles"
+          },
+          {
+            "state_id": "choose_titles",
+            "action_id": "llm.action",
+            "execution_mode": "llm",
+            "static_input_bindings": [],
+            "context_input_mapping_specs": [],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_naming_choose_titles_rename_items",
+                "tool_output_field": "validated_json.rename_items",
+                "context_key": "rename_items"
+              },
+              {
+                "concept_id": "#V#workflow_mapping_naming_choose_titles_skipped",
+                "tool_output_field": "validated_json.skipped",
+                "context_key": "skipped"
+              }
+            ],
+            "reads_context_keys": [
+              "inspection",
+              "candidate_session_ids"
+            ],
+            "writes_context_keys": [
+              "rename_items",
+              "skipped"
+            ],
+            "on_failure_state": "failed",
+            "prompt_concept_ids": [
+              "#V#unnamed_conversation_naming_prompt"
+            ],
+            "llm_policy": {
+              "policy_stage": "unnamed_conversation_naming",
+              "selection_policy": "active_only",
+              "tool_mode": "none",
+              "max_output_tokens": 8192,
+              "context_fields": [
+                {
+                  "context_key": "inspection",
+                  "label": "Inspected conversation evidence (untrusted content)"
+                },
+                {
+                  "context_key": "candidate_session_ids",
+                  "label": "Owned discovery candidates"
+                }
+              ]
+            },
+            "validation_policy": {
+              "output_format": "json_value",
+              "required_json_fields": [
+                "rename_items",
+                "skipped"
+              ]
+            },
+            "next_state": "check_titles"
+          },
+          {
+            "state_id": "check_titles",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": []
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "tool_output_mapping_specs": [],
+            "reads_context_keys": [],
+            "writes_context_keys": [],
+            "on_failure_state": "failed",
+            "conditional_transitions": [
+              {
+                "to_state": "rename",
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "rename_items",
+                  "expected": true
+                }
+              },
+              {
+                "to_state": "check_coverage",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "rename",
+            "action_id": "workflow_mcp.invoke_tool",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "tool_name",
+                "value": "conversation_manage_batch"
+              },
+              {
+                "key": "action",
+                "value": "rename"
+              }
+            ],
+            "context_input_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_naming_rename_rename_items",
+                "context_key": "rename_items",
+                "tool_param": "rename_items",
+                "required": false
+              },
+              {
+                "concept_id": "#V#workflow_mapping_naming_rename_continuation_cursor",
+                "context_key": "next_cursor",
+                "tool_param": "continuation_cursor",
+                "required": false
+              },
+              {
+                "concept_id": "#V#workflow_mapping_naming_rename_request_id",
+                "context_key": "schedule_occurrence_id",
+                "tool_param": "request_id",
+                "required": false
+              }
+            ],
+            "tool_output_mapping_specs": [
+              {
+                "concept_id": "#V#workflow_mapping_naming_rename_rename_result",
+                "tool_output_field": "result",
+                "context_key": "rename_result"
+              }
+            ],
+            "reads_context_keys": [
+              "rename_items",
+              "next_cursor",
+              "schedule_occurrence_id"
+            ],
+            "writes_context_keys": [
+              "rename_result"
+            ],
+            "on_failure_state": "record_partial_outcome",
+            "mutation_authority": {
+              "schema_version": "workflow_step_mutation_authority.v1",
+              "maximum_level": "external_system_guarded",
+              "reason_code": "authorised_evidence_bound_conversation_rename"
+            },
+            "next_state": "check_coverage"
+          },
+          {
+            "state_id": "check_coverage",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": []
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "tool_output_mapping_specs": [],
+            "reads_context_keys": [],
+            "writes_context_keys": [],
+            "on_failure_state": "failed",
+            "conditional_transitions": [
+              {
+                "to_state": "finish",
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "coverage_complete",
+                  "expected": true
+                }
+              },
+              {
+                "to_state": "advance",
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "next_cursor",
+                  "expected": true
+                }
+              },
+              {
+                "to_state": "failed",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "advance",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "cursor",
+                    "value_from_context": "next_cursor"
+                  }
+                ]
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "tool_output_mapping_specs": [],
+            "reads_context_keys": [
+              "next_cursor"
+            ],
+            "writes_context_keys": [],
+            "on_failure_state": "failed",
+            "next_state": "discover"
+          },
+          {
+            "state_id": "finish",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": []
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "tool_output_mapping_specs": [],
+            "reads_context_keys": [],
+            "writes_context_keys": [],
+            "on_failure_state": "failed",
+            "conditional_transitions": [
+              {
+                "to_state": "failed",
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "had_partial_failure",
+                  "expected": true
+                }
+              },
+              {
+                "to_state": "completed",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "record_partial_outcome",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "had_partial_failure",
+                    "value": true
+                  },
+                  {
+                    "key": "rename_result",
+                    "value_from_context": "last_failed_action_outputs.result"
+                  }
+                ]
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "tool_output_mapping_specs": [],
+            "reads_context_keys": [
+              "last_failed_action_outputs"
+            ],
+            "writes_context_keys": [],
+            "on_failure_state": "failed",
+            "next_state": "check_coverage"
+          },
+          {
+            "state_id": "inspection_partial",
+            "action_id": "workflow_control.context_set",
+            "execution_mode": "deterministic",
+            "static_input_bindings": [
+              {
+                "key": "assignments",
+                "value": [
+                  {
+                    "key": "had_partial_failure",
+                    "value": true
+                  },
+                  {
+                    "key": "inspection",
+                    "value_from_context": "last_failed_action_outputs.result"
+                  }
+                ]
+              }
+            ],
+            "context_input_mapping_specs": [],
+            "tool_output_mapping_specs": [],
+            "reads_context_keys": [
+              "last_failed_action_outputs"
+            ],
+            "writes_context_keys": [],
+            "on_failure_state": "failed",
+            "conditional_transitions": [
+              {
+                "to_state": "choose_titles",
+                "condition_spec": {
+                  "kind": "context_flag",
+                  "key": "inspection.results",
+                  "expected": true
+                }
+              },
+              {
+                "to_state": "check_coverage",
+                "condition_spec": {
+                  "kind": "always"
+                }
+              }
+            ]
+          },
+          {
+            "state_id": "completed"
+          },
+          {
+            "state_id": "failed"
+          }
+        ]
+      }
+    }
+  ],
+  "support_concepts": []
+}
