@@ -10,7 +10,7 @@ import { deleteJson, getJson, patchJson, postJson, getUserContext, ensureUniqueW
 import { activateTab } from '../tabNavigation.js';
 import { showToast } from '../utils/toast.js';
 import { renderMarkdownViaServer } from '../markdownUtils.js';
-import { selectBestNameForContext } from '../utils/nameSelection.js';
+import { selectBestNameForContext, selectShortestNameForContext } from '../utils/nameSelection.js';
 
 // Task panel state
 let _panelEl = null;
@@ -49,6 +49,7 @@ let _globalTaskLoadGeneration = 0;
 let _activeOrganisationConceptId;
 let _taskOrganisationOptions = [];
 let _taskOrganisationOptionsLoaded = false;
+const _taskOrganisationNameRequests = new Map();
 let _taskTaxonomy = {
     task_types: [],
     task_sources: [],
@@ -198,6 +199,7 @@ function resetTaskPanelScopedState(activeOrganisationConceptId, { actorChanged =
     _hiddenBulkTaskCollections = [];
     _taskQueueActivity = [];
     _taskQueueActivityError = '';
+    _taskOrganisationNameRequests.clear();
     if (actorChanged) {
         _taskOrganisationOptions = [];
         _taskOrganisationOptionsLoaded = false;
@@ -1888,6 +1890,7 @@ function renderTaskList() {
     }
 
     _taskListEl.innerHTML = html;
+    hydrateTaskOrganisationChips();
     if (isBoardView) {
         _taskListEl.scrollLeft = previousScrollLeft;
         _taskListEl.scrollTop = previousScrollTop;
@@ -2645,6 +2648,26 @@ function renderTaskHistoryRows(history) {
     `).join('');
 }
 
+function hydrateTaskOrganisationChips() {
+    _taskListEl.querySelectorAll('.task-organisation-chip[data-organisation-id]').forEach((chip) => {
+        const conceptId = chip.dataset.organisationId;
+        if (!conceptId) return;
+        let request = _taskOrganisationNameRequests.get(conceptId);
+        if (!request) {
+            request = getJson(`/api/concepts/${encodeURIComponent(conceptId)}`)
+                .then((concept) => Array.isArray(concept?.names) && concept.names.length
+                    ? concept.names : concept?.raw_doc?.names)
+                .catch(() => null);
+            _taskOrganisationNameRequests.set(conceptId, request);
+        }
+        void request.then((names) => {
+            if (!chip.isConnected || _taskOrganisationNameRequests.get(conceptId) !== request) return;
+            const shortestName = selectShortestNameForContext(names);
+            if (shortestName) chip.textContent = shortestName;
+        });
+    });
+}
+
 function getTaskOrganisationDisplayName(organisationConceptId) {
     const conceptId = normaliseTaskConceptId(organisationConceptId || '');
     if (!conceptId) return 'Unscoped';
@@ -3361,7 +3384,8 @@ function renderTaskItem(task) {
     const organisationChipHtml = `
         <div class="task-meta-chip-row">
             <span class="task-source-chip task-organisation-chip ${task.organisation_concept_id ? '' : 'task-organisation-unscoped'}"
-                title="Task organisation scope">
+                data-organisation-id="${escapeHtml(normaliseTaskConceptId(task.organisation_concept_id || ''))}"
+                title="Task organisation scope: ${escapeHtml(getTaskOrganisationDisplayName(task.organisation_concept_id))}">
                 ${escapeHtml(getTaskOrganisationDisplayName(task.organisation_concept_id))}
             </span>
         </div>
