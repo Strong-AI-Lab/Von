@@ -2,6 +2,7 @@
 *.json
 !.vscode/launch.json
 !package.json
+!package-lock.json
 !tsconfig.json
 !jest.config.js
 !scripts/*.json

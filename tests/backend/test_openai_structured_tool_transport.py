@@ -3159,3 +3159,67 @@ def test_image_bytes_reach_sdk_with_source_reference_and_no_retained_base64(
     assert descriptor["sha256"] in image_message["content"][0]["text"]
     assert base64.b64encode(data).decode() not in str(context)
     assert base64.b64encode(data).decode() not in str(result.continuation)
+
+
+def test_completed_native_image_is_visible_not_a_function_call(monkeypatch):
+    import base64, io
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.new('RGB', (16, 12), 'navy').save(buffer, 'PNG')
+    data = buffer.getvalue()
+    provider_response = {'id': 'resp-image', 'model': 'test-model', 'output': [
+        {'type': 'image_generation_call', 'id': 'ig-fixture', 'status': 'completed',
+         'result': base64.b64encode(data).decode()}]}
+    _install_profiles(monkeypatch, _registry_profiles(_responses_profile()))
+    calls = _install_fake_openai(monkeypatch, responses=[provider_response])
+    client = OpenAIClient(LLMClientConfig(model='test-model', provider='openai', api_key='test-key', temperature=None))
+    result = asyncio.run(client.generate_with_tools(prompt='Image please', available_tools=[_tool()]))
+    assert result.text_response == ''
+    assert result.has_visible_content()
+    assert result.tool_calls == []
+    assert result.content_parts[0].image_data == data
+    assert result.continuation is None
+    assert len(calls['responses']) == 1
+
+
+def test_profile_enabled_native_tool_is_separate_and_does_not_retry(monkeypatch):
+    from src.backend.services import model_registry_service
+    profile = {**_responses_profile(), 'image_generation': {'enabled': True, 'model': 'fixture-image-model', 'output_format': 'png'}}
+    registry = _registry_profiles(profile)
+    _install_profiles(monkeypatch, registry)
+    monkeypatch.setattr(model_registry_service, 'resolve_model_api_profiles', lambda **kw: registry)
+    calls = _install_fake_openai(monkeypatch, responses=[_text_response(model='test-model')])
+    client = OpenAIClient(LLMClientConfig(model='test-model', provider='openai', api_key='test-key', temperature=None))
+    asyncio.run(client.generate_with_tools(prompt='Useful visual', available_tools=[_tool()]))
+    assert calls['responses'][0]['tools'][-1] == {'type': 'image_generation', 'model': 'fixture-image-model', 'output_format': 'png'}
+    assert {'max_retries': 0} in calls['client_options']
+
+
+def test_native_generation_disconnect_is_not_retried_or_sent_to_fallback(monkeypatch):
+    import httpx
+    import openai
+    from src.backend.services import model_registry_service
+    from src.backend.languagemodels.structured_tool_calling.types import ImageGenerationOutcomeUnknownError
+
+    profile = {**_responses_profile(), 'image_generation': {'enabled': True, 'model': 'fixture-image-model'}}
+    registry = _registry_profiles(profile)
+    _install_profiles(monkeypatch, registry)
+    monkeypatch.setattr(model_registry_service, 'resolve_model_api_profiles', lambda **kw: registry)
+    failure = openai.APIConnectionError(request=httpx.Request('POST', 'https://fixture.invalid/responses'))
+    calls = _install_fake_openai(monkeypatch, responses=[failure])
+    client = OpenAIClient(LLMClientConfig(model='test-model', provider='openai', api_key='test-key', temperature=None))
+    with pytest.raises(ImageGenerationOutcomeUnknownError):
+        asyncio.run(client.generate_with_tools(prompt='Useful visual', available_tools=[_tool()]))
+    assert len(calls['responses']) == 1
+    assert calls['chat'] == []
+
+
+def test_unconfigured_profile_does_not_enable_paid_image_generation(monkeypatch):
+    from src.backend.services import model_registry_service
+    registry = _registry_profiles(_responses_profile())
+    _install_profiles(monkeypatch, registry)
+    monkeypatch.setattr(model_registry_service, 'resolve_model_api_profiles', lambda **kw: registry)
+    calls = _install_fake_openai(monkeypatch, responses=[_text_response(model='test-model')])
+    client = OpenAIClient(LLMClientConfig(model='test-model', provider='openai', api_key='test-key', temperature=None))
+    asyncio.run(client.generate_with_tools(prompt='Answer', available_tools=[_tool()]))
+    assert all(tool['type'] == 'function' for tool in calls['responses'][0]['tools'])

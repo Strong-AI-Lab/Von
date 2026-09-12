@@ -30,6 +30,7 @@ ALLOWED_DISPLAY_ELEMENT_TYPES = frozenset(
         "timeline",
         "task_view",
         "workflow_view",
+        "image",
     }
 )
 OPTIONAL_PAYLOAD_TITLE_ELEMENT_TYPES = frozenset(
@@ -1995,7 +1996,25 @@ def _validate_workflow_view_payload(
                 )
 
 
+def _validate_image_payload(*, payload: Mapping[str, Any], label: str, errors: list[str]) -> None:
+    if payload.get("version") != 1:
+        errors.append(f"{label}.payload.version must be 1")
+    asset = payload.get("asset")
+    if not isinstance(asset, Mapping):
+        errors.append(f"{label}.payload.asset must be a mapping")
+        return
+    if not isinstance(asset.get("concept_id"), str) or not asset["concept_id"].startswith("#V#"):
+        errors.append(f"{label}.payload.asset.concept_id must be a retained asset reference")
+    if asset.get("content_type") not in {"image/png", "image/jpeg", "image/webp"}:
+        errors.append(f"{label}.payload.asset.content_type is unsupported")
+    if not re.fullmatch(r"[a-f0-9]{64}", str(asset.get("sha256") or "")):
+        errors.append(f"{label}.payload.asset.sha256 is invalid")
+    if any(type(asset.get(key)) is not int or asset[key] <= 0 for key in ("width", "height")):
+        errors.append(f"{label}.payload.asset dimensions are invalid")
+
+
 _DISPLAY_ELEMENT_PAYLOAD_VALIDATORS: dict[str, Callable[..., None]] = {
+    "image": _validate_image_payload,
     "calendar_view": _validate_calendar_view_payload,
     "chart_view": _validate_chart_view_payload,
     "document_view": _validate_document_view_payload,
@@ -3512,6 +3531,7 @@ def build_turn_display_elements(
     *,
     response_text: str | None,
     presenter_channels: Mapping[str, Any] | None,
+    content_parts: Sequence[Mapping[str, Any]] | None = None,
     screen_table_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_workflow_elements: Sequence[Mapping[str, Any]] | None = None,
     screen_task_view_elements: Sequence[Mapping[str, Any]] | None = None,
@@ -3591,6 +3611,36 @@ def build_turn_display_elements(
                 },
             }
         )
+
+    if content_parts:
+        import hashlib
+        # Explicit ordered rich output owns the primary screen placement. The
+        # legacy text projection and other structured families remain available.
+        elements = [element for element in elements if element["element_id"] != "screen_text"]
+        seen = set()
+        for index, part in enumerate(content_parts):
+            part_id = str(part.get("part_id") or f"part-{index}")
+            if part_id in seen:
+                continue
+            seen.add(part_id)
+            kind = part.get("kind")
+            payload = {"text": str(part.get("text") or "")}
+            element_type = "text_block"
+            if kind == "image" and part.get("version") == 1:
+                from .conversation_output_service import public_asset
+                payload = {"version": 1, "asset": public_asset(part.get("asset") or {})}
+                validation_errors: list[str] = []
+                _validate_image_payload(payload=payload, label=part_id, errors=validation_errors)
+                if not validation_errors:
+                    element_type = "image"
+                else:
+                    payload = {"text": "Image reference could not be displayed."}
+            elif kind not in {"text", "media_error"} or part.get("version") != 1:
+                payload = {"text": f"Unsupported visual format: {kind} (version {part.get('version')})."}
+            elements.append({"element_id": "content_" + hashlib.sha256(part_id.encode()).hexdigest()[:20],
+                             "element_type": element_type, "channel": "screen", "order": 10 + index,
+                             "intent": "primary_response", "payload": payload,
+                             "provenance": {"source": "retained_content", "part_id": part_id}})
 
     if spoken_text:
         spoken_source = (

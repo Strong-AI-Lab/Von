@@ -13976,6 +13976,7 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
         )
         adaptive_success = adaptive_terminal_status == "completed"
         response_text = adaptive_turn_result.response_text
+        response_content_parts = [dict(part) for part in getattr(adaptive_turn_result, "content_parts", ())]
         updated_conversation_situation_text = getattr(
             adaptive_turn_result, "conversation_situation", None
         )
@@ -14126,7 +14127,7 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
             default=True
         )
 
-        if presenter_mode_requested and not canonical_outcome_response:
+        if presenter_mode_requested and not canonical_outcome_response and not response_content_parts:
             screen_tag_present = _presenter_tag_present(response_text, "screen")
             screen_backfill_screen_tag_present = screen_tag_present
             required_screen_json_fence = _extract_required_screen_json_fence(
@@ -14716,6 +14717,8 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
             # A failed primary model call must not trigger another call to the
             # same unavailable provider merely to narrate the failure.
             spoken_backfill_second_pass_reason = "turn_not_deliverable"
+        elif response_content_parts:
+            spoken_backfill_second_pass_reason = "retained_visual_output"
         elif presenter_mode_requested:
             if presenter_channels_missing:
                 needs_spoken_backfill = True
@@ -15000,6 +15003,19 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
                 if isinstance(screen_text_value, str) and screen_text_value.strip():
                     response_text = screen_text_value.strip()
 
+        if response_content_parts:
+            # The retained sequence owns visible placement. A presenter cannot
+            # replace pixels with a paraphrase or require text for image success.
+            for part in response_content_parts:
+                if part.get("kind") == "text":
+                    channels = _extract_presenter_channels(str(part.get("text") or ""))
+                    if channels and channels.get("screen"):
+                        part["text"] = channels["screen"]
+            response_text = "\n\n".join(str(part.get("text") or "") for part in response_content_parts
+                                         if part.get("kind") in {"text", "media_error"}).strip()
+            if isinstance(presenter_channels, dict):
+                presenter_channels["screen"] = response_text
+
         resource_annotation_applied = False
         if adaptive_delivery_success and resource_presentation_plan:
             try:
@@ -15161,6 +15177,7 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
         )
         display_elements_contract = build_turn_display_elements(
             response_text=response_text,
+            content_parts=response_content_parts,
             presenter_channels=(
                 presenter_channels if isinstance(presenter_channels, dict) else None
             ),
@@ -15767,6 +15784,7 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
             refresh_llm_debug_timing_fn=_refresh_llm_debug_timing_payload,
             persist_user_message=not assistant_opening,
             user_image_attachments=request_image_attachments,
+            assistant_content_parts=response_content_parts,
             assistant_message_metadata=(
                 {"turn_kind": "assistant_opening", "initiation_id": initiation_id}
                 if assistant_opening
@@ -15876,7 +15894,9 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
                 ),
             )
         )
-        final_success_body["image_attachments"] = []
+        from ...services.conversation_output_service import image_assets
+        final_success_body["content_parts"] = response_content_parts
+        final_success_body["image_attachments"] = image_assets(response_content_parts)
         for image_message in tool_messages:
             try:
                 image_payload = json.loads(image_message.get("content", "{}"))
@@ -15885,6 +15905,8 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
                 )
             except (ValueError, TypeError, AttributeError):
                 pass
+        final_success_body["image_attachments"] = list({asset["concept_id"]: asset
+            for asset in final_success_body["image_attachments"] if asset.get("concept_id")}.values())
         if adaptive_delivery_success:
             _mark_background_generate_completed_if_ready(
                 background_task_id=background_task_id,

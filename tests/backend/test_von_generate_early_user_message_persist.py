@@ -128,6 +128,51 @@ def test_user_message_persisted_exactly_once(app, recorder):
     assert user_calls[0]["message"]["role"] == "user"
 
 
+@pytest.mark.parametrize("mixed", [False, True])
+def test_generate_retains_native_image_only_and_mixed_output(app, recorder, monkeypatch, mixed, isolated_window_session_db):
+    import base64
+    import io
+    from PIL import Image
+    from src.backend.services import conversation_image_service as images
+    from src.backend.services.conversation_output_service import openai_visible_parts
+    from src.backend.languagemodels.structured_tool_calling.types import LLMResponse
+
+    stream = io.BytesIO()
+    Image.new("RGB", (16, 12), "navy").save(stream, "PNG")
+    data = stream.getvalue()
+    provider_items = [{"type": "image_generation_call", "id": "ig-route", "status": "completed",
+                       "result": base64.b64encode(data).decode()}]
+    if mixed:
+        def text(ident, value):
+            return {"type": "message", "id": ident, "content": [{"type": "output_text", "text": value}]}
+        provider_items = [text("before", "Before."), *provider_items, text("after", "After.")]
+    parts = openai_visible_parts({"id": "resp-route", "model": "fixture", "output": provider_items})
+    monkeypatch.setattr(images, "store_image", lambda **kw: {
+        "concept_id": "#V#route-image", **images.inspect_image(data), "provenance": kw["provenance"]})
+    calls = []
+    def generate_with_tools(*args, **kwargs):
+        calls.append(kwargs)
+        return LLMResponse(text_response="Before.\nAfter." if mixed else "", content_parts=parts)
+    monkeypatch.setattr(app.config["TEST_LLM"], "generate_with_tools", generate_with_tools, raising=False)
+    with app.test_client() as client:
+        with client.session_transaction() as sess:
+            sess["user_concept_id"] = "#V#test_user"
+            sess["namespace"] = "#V#test_user"
+        response = client.post("/von/generate", json={"prompt": "Draw a useful scene."})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["success"] is True
+    assert len(calls) == 1
+    assert len(body["image_attachments"]) == 1
+    expected = ["text_block", "image", "text_block"] if mixed else ["image"]
+    visible = [e for e in body["display_elements"]["elements"] if e["channel"] == "screen"]
+    assert [e["element_type"] for e in visible] == expected
+    saved = recorder.assistant_message_calls[-1]["message"]
+    assert saved["content_parts"] == body["content_parts"]
+    assert saved["image_attachments"][0]["sha256"] == images.inspect_image(data)["sha256"]
+    assert base64.b64encode(data).decode() not in str(body)
+
+
 def test_user_message_persisted_before_assistant(app, recorder):
     """User message must be persisted before the assistant response."""
     client = app.test_client()

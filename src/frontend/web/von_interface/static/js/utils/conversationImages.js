@@ -10,14 +10,38 @@ export function renderImageAttachments(parent, images) {
     gallery.style.cssText = 'display:flex;flex-wrap:wrap;gap:12px;margin:8px 0';
     for (const item of images) {
         if (!item?.concept_id) continue;
+        if ([...parent.querySelectorAll('[data-image-id]')].some(node => node.dataset.imageId === item.concept_id)) continue;
+        const figure = document.createElement('figure');
+        figure.dataset.imageId = item.concept_id;
+        figure.style.cssText = 'margin:0;max-width:100%;min-width:0';
         const url = `/von/api/images/${encodeURIComponent(item.concept_id)}/original`;
         const link = document.createElement('a');
         link.href = url; link.target = '_blank'; link.rel = 'noopener';
         const img = document.createElement('img');
-        img.src = url; img.alt = item.filename || 'Attached image';
-        img.style.cssText = 'max-width:min(100%,640px);max-height:420px;object-fit:contain';
-        img.addEventListener('error', () => { img.alt = 'Image unavailable or access denied. Open the original to inspect the error.'; });
-        link.appendChild(img); gallery.appendChild(link);
+        img.src = url; img.alt = item.caption || item.alt || (item.provenance?.kind === 'generated' ? 'Generated image' : item.filename || 'Attached image');
+        img.style.cssText = 'max-width:min(100%,640px);max-height:420px;height:auto;object-fit:contain';
+        img.addEventListener('error', () => {
+            const message = 'Image unavailable or access denied. Open the original to inspect the error.';
+            img.alt = message;
+            if (!figure.querySelector('.image-unavailable')) {
+                const notice = document.createElement('p');
+                notice.className = 'image-unavailable'; notice.setAttribute('role', 'status');
+                notice.textContent = message; figure.appendChild(notice);
+            }
+        });
+        link.setAttribute('aria-label', `Open original: ${img.alt}`);
+        link.appendChild(img); figure.appendChild(link); gallery.appendChild(figure);
+        const caption = document.createElement('figcaption');
+        const generated = item.provenance?.kind === 'generated';
+        caption.textContent = item.caption || (generated ? 'Generated image' : '');
+        if (item.provenance?.parent_concept_ids?.length || item.provenance?.parent_concept_id) {
+            const original = document.createElement('a');
+            const id = item.provenance.parent_concept_id || item.provenance.parent_concept_ids[0];
+            original.href = `/von/api/images/${encodeURIComponent(id)}/original`;
+            original.target = '_blank'; original.rel = 'noopener'; original.textContent = 'View source image';
+            caption.append(' · ', original);
+        }
+        figure.appendChild(caption);
         const source = item.provenance;
         if (source?.kind === 'otter_archive' && source.artifact_id) {
             const citation = document.createElement('a');
@@ -27,7 +51,7 @@ export function renderImageAttachments(parent, images) {
             gallery.appendChild(citation);
         }
     }
-    parent.appendChild(gallery);
+    if (gallery.childNodes.length) parent.appendChild(gallery);
 }
 export function renderImageComposer(parent, sessionId, changed) {
     if (!parent) return;
