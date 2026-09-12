@@ -8695,7 +8695,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     transition: grid-template-columns 180ms ease;
 }
 
-.conversation-workspace[data-effective-tabs-layout="vertical"][data-tray-collapsed="true"] {
+.conversation-workspace[data-effective-tabs-layout="vertical"][data-tray-collapsed="true"][data-tray-peek="false"] {
     grid-template-columns: 48px minmax(0, 1fr);
 }
 
@@ -8730,14 +8730,8 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 }
 
 .conversation-workspace[data-effective-tabs-layout="vertical"][data-tray-peek="true"] .chat-session-tabs-row {
-    width: var(--conversation-tray-width, 260px);
-    box-shadow: 8px 8px 24px rgba(15, 23, 42, 0.16);
-    animation: conversationTrayPeek 160ms ease-out;
-}
-
-@keyframes conversationTrayPeek {
-    from { clip-path: inset(0 calc(100% - 48px) 0 0); }
-    to { clip-path: inset(0 0 0 0); }
+    /* Use the animated grid track so revealing navigation never covers content. */
+    width: 100%;
 }
 
 .conversation-workspace[data-effective-tabs-layout="vertical"] .conversation-tray-header {
@@ -8883,7 +8877,6 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 }
 @media (prefers-reduced-motion: reduce) {
     .conversation-workspace[data-effective-tabs-layout="vertical"], .conversation-tray-toggle span { transition: none; }
-    .conversation-workspace[data-tray-peek="true"] .chat-session-tabs-row { animation: none; }
 }
 
 .chat-situation-toggle {

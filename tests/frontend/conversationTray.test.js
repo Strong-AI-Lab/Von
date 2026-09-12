@@ -141,3 +141,25 @@ test('keyboard resize works and horizontal fallback does not erase desktop colla
     controller.refresh(preferences({ collapsed: true }));
     expect(workspace.dataset.trayCollapsed).toBe('true');
 });
+
+test('Escape closes a docked tray from navigation and retains selection and unread state', () => {
+    tabs.firstChild.setAttribute('data-unread-count', '3');
+    tabs.firstChild.focus();
+    tabs.firstChild.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(workspace.dataset.trayCollapsed).toBe('true');
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle.getAttribute('aria-label')).toBe('Open conversation list');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    toggle.click();
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(tabs.firstChild.getAttribute('aria-selected')).toBe('true');
+    expect(tabs.firstChild.getAttribute('data-unread-count')).toBe('3');
+});
+
+test('Escape in the conversation does not collapse a docked tray', () => {
+    const draft = document.getElementById('promptInput');
+    draft.focus();
+    draft.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(workspace.dataset.trayCollapsed).toBe('false');
+    expect(document.activeElement).toBe(draft);
+});

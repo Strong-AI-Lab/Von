@@ -49,7 +49,7 @@ export function createConversationTray(workspace) {
             tabs.scrollLeft = position.left;
         }
         if (toggle) {
-            const label = collapsed ? 'Keep conversation list open' : 'Collapse conversation list';
+            const label = collapsed ? (peek ? 'Keep conversation list open' : 'Open conversation list') : 'Collapse conversation list';
             toggle.setAttribute('aria-label', label);
             toggle.title = label;
             toggle.setAttribute('aria-expanded', String(!collapsed || peek));
@@ -104,10 +104,16 @@ export function createConversationTray(workspace) {
         }
     });
     listen(document, 'keydown', (event) => {
-        if (event.key === 'Escape' && peek && !isMenuOpen()) {
+        if (event.key === 'Escape' && isVertical() && !isMenuOpen()
+            && (peek || (!preferences.collapsed && navigation?.contains(event.target)))) {
+            event.preventDefault();
             clearTimers();
-            peek = false;
-            render();
+            if (peek) {
+                peek = false;
+                render();
+            } else {
+                setCollapsed(true);
+            }
             toggle?.focus({ preventScroll: true });
         }
     });

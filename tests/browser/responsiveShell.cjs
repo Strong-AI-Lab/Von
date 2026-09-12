@@ -1,4 +1,4 @@
-// Run: node tests/browser/responsiveShell.cjs [evidence-directory]
+// Run: node tests/browser/responsiveShell.cjs [evidence-directory] [--tray-only]
 // Production templates, CSS, layout and tray controller with synthetic content.
 // This checks rendering and draft retention, not authentication or live sending.
 const assert = require('node:assert/strict');
@@ -7,6 +7,7 @@ const http = require('node:http');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const baseline = process.env.VON_LAYOUT_BASELINE;
+const trayOnly = process.argv.includes('--tray-only');
 const { chromium, expect } = require('@playwright/test');
 const root = path.resolve(__dirname, '../../src/frontend/web/von_interface');
 const evidence = process.argv[2];
@@ -98,6 +99,47 @@ async function noOverflow(page) {
             assert(menu.x >= 0 && menu.x + menu.width <= profile.width + 1 && menu.y >= 0, 'organisation menu fits');
             await page.locator('.footer-org-menu-trigger').click();
             if (evidence) await page.screenshot({ animations: 'disabled', path: path.join(evidence, `${profile.name}.png`), fullPage: false });
+            if (profile.name === 'desktop') {
+                const toggle = page.locator('#conversationTrayToggle');
+                const selected = page.locator('#chatSessionTabs [role="tab"]').first();
+                await selected.evaluate(el => {
+                    el.setAttribute('aria-selected', 'true');
+                    el.classList.add('has-unread');
+                    el.dataset.unreadCount = '3';
+                });
+                const retained = await page.evaluateHandle(() => document.querySelector('#scrollableField').firstChild);
+                await toggle.focus();
+                await page.keyboard.press('Enter');
+                await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+                await expect(toggle).toHaveAccessibleName('Open conversation list');
+                await page.keyboard.press('Space');
+                await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+                await selected.focus();
+                await page.keyboard.press('Escape');
+                await expect(toggle).toBeFocused();
+                await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+                // Hover uses the same grid track, never an overlay on the transcript.
+                await toggle.hover();
+                await expect(page.locator('#conversationWorkspace')).toHaveAttribute('data-tray-peek', 'true');
+                await page.waitForTimeout(220);
+                const trayBox = await page.locator('.chat-session-tabs-row').boundingBox();
+                const mainBox = await page.locator('.chat-conversation-main').boundingBox();
+                assert(trayBox.x + trayBox.width <= mainBox.x, 'expanded tray does not cover conversation');
+                await page.keyboard.press('Escape');
+                await page.keyboard.press('Enter');
+                await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+                await expect(selected).toHaveAttribute('aria-selected', 'true');
+                await expect(selected).toHaveAttribute('data-unread-count', '3');
+                assert(await retained.evaluate(el => el === document.querySelector('#scrollableField').firstChild), 'transcript retained');
+                await expect(input).toHaveValue('Draft survives resizing and folding.');
+                await noOverflow(page);
+                if (evidence) await page.screenshot({ path: path.join(evidence, 'desktop-tray-reopened.png') });
+            }
+            if (trayOnly) {
+                console.log(JSON.stringify({ profile: profile.name, passed: true, scope: 'conversation tray', source: 'synthetic production-template fixture' }));
+                await page.close();
+                continue;
+            }
             if (profile.name === 'pixel-8') {
                 await page.setViewportSize({ width: 412, height: 430 });
                 await input.focus();
