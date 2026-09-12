@@ -51,12 +51,26 @@ def inspect_image(data: bytes) -> dict[str, Any]:
         raise ValueError("The image cannot be decoded safely.") from exc
 
 
+def inspect_attachment(data: bytes, content_type: str | None = None) -> dict[str, Any]:
+    # The existing conversation upload bound also applies to opaque files.
+    if not data or len(data) > MAX_IMAGE_BYTES:
+        raise ValueError("Attachments must be nonempty and at most 8 MiB.")
+    if not content_type or content_type.startswith("image/"):
+        return inspect_image(data)
+    return {
+        "content_type": content_type,
+        "size_bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
 def store_image(
     *,
     data: bytes,
     filename: str,
     user_concept_id: str,
     provenance: dict[str, Any] | None = None,
+    content_type: str | None = None,
 ) -> dict[str, Any]:
     from .blob_uploads import put_bytes_durable
     from .computer_file_copy_service import create_computer_file_copy_instance
@@ -64,7 +78,7 @@ def store_image(
 
     if not user_concept_id:
         raise PermissionError("Authenticated image access is required.")
-    info = inspect_image(data)
+    info = inspect_attachment(data, content_type)
     from ..db.repositories.concepts_repository import ConceptsRepository
 
     existing = ConceptsRepository.find_one(
@@ -73,6 +87,7 @@ def store_image(
             "attributes.sha256": info["sha256"],
             "attributes.user_concept_id": user_concept_id,
             "attributes.original_filename": filename,
+            "attributes.content_type": info["content_type"],
             "attributes.image_provenance": dict(provenance or {"kind": "user_upload"}),
         },
         {"concept_id": 1},
@@ -102,8 +117,8 @@ def store_image(
         metadata_in_attributes=True,
         metadata={
             "conversation_image": True,
-            "width": info["width"],
-            "height": info["height"],
+            "width": info.get("width"),
+            "height": info.get("height"),
             "image_provenance": dict(provenance or {"kind": "user_upload"}),
         },
     )
@@ -156,7 +171,7 @@ def load_image(concept_id: str, user_concept_id: str) -> tuple[dict[str, Any], b
             "Original image bytes are unavailable; upload or retrieve the source again."
         )
     data = result["data"]
-    info = inspect_image(data)
+    info = inspect_attachment(data, attrs.get("content_type"))
     if info["sha256"] != attrs.get("sha256"):
         raise ValueError(
             "Original image checksum does not match its stored provenance."
@@ -212,7 +227,14 @@ def provider_image_messages(
         images = []
         references = []
         for attachment in attachments:
-            info, data = load_image(attachment["concept_id"], actor)
+            from .message_attachment_service import load_attachment_reference
+
+            info, data = load_attachment_reference(attachment, actor)
+            if not info["content_type"].startswith("image/"):
+                from .message_attachment_service import attachment_text
+
+                content += "\n" + attachment_text(info, data)
+                continue
             references.append(
                 {
                     "concept_id": attachment["concept_id"],
@@ -283,6 +305,8 @@ def crop_image(
 ) -> dict[str, Any]:
     """Create a labelled detail view without changing the original or its audience."""
     info, data = load_image(concept_id, user_concept_id)
+    if not info["content_type"].startswith("image/"):
+        raise ValueError("Image cropping requires an image attachment.")
     if any(type(v) is not int for v in (x, y, width, height, scale)):
         raise ValueError("Crop coordinates and scale must be integers.")
     if (

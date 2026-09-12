@@ -48,3 +48,19 @@ test('removing an in-flight image cannot resurrect it or move it to another conv
     restoreImages('removed', ['#V#removed']);
     expect(imageItems('removed')).toEqual([]);
 });
+
+test('plain text paste stays native and a send acknowledgement preserves newer files', async () => {
+    const { bindAttachmentComposer, removeSentAttachments } = await import('../../src/frontend/web/von_interface/static/js/utils/conversationImages.js');
+    const root = document.createElement('div');
+    const input = document.createElement('textarea'); root.appendChild(input);
+    bindAttachmentComposer(root, input, () => 'acknowledgement', () => ({}), () => {});
+    const paste = new Event('paste', { bubbles:true, cancelable:true });
+    Object.defineProperty(paste, 'clipboardData', {value:{files:[],getData:()=> 'ordinary text'}});
+    input.dispatchEvent(paste);
+    expect(paste.defaultPrevented).toBe(false);
+    global.fetch = jest.fn().mockResolvedValueOnce(response('#V#sent')).mockResolvedValueOnce(response('#V#newer'));
+    await uploadConversationImage(new File(['a'], 'one.txt', {type:'text/plain'}), 'acknowledgement', {}, () => {});
+    await uploadConversationImage(new File(['b'], 'two.txt', {type:'text/plain'}), 'acknowledgement', {}, () => {});
+    removeSentAttachments('acknowledgement', ['#V#sent']);
+    expect(imageItems('acknowledgement').map(i=>i.descriptor.concept_id)).toEqual(['#V#newer']);
+});

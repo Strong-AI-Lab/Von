@@ -5574,6 +5574,11 @@ def upload_file_to_blob_store_and_vontology():
       - storage: { backend, key, uri, content_type, size_bytes, metadata }
     """
 
+    if request.form.get("conversation_attachment") == "1":
+        # Compose a pending attachment without creating an unrelated chat turn
+        # or launching interpretation before the user sends it.
+        return current_app.view_functions["von.upload_conversation_image"]()
+
     from werkzeug.utils import secure_filename
 
     try:
@@ -12107,7 +12112,7 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
     else:
         request_id = str(uuid.uuid4())
 
-    if not prompt_text and not assistant_opening:
+    if not prompt_text and not assistant_opening and not data.get("image_attachment_ids"):
         return jsonify({"error": "No prompt provided."}), 400
 
     # JVNAUTOSCI-1038: Background execution mode

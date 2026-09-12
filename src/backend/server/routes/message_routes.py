@@ -366,16 +366,19 @@ def send_message() -> ResponseReturnValue:
 
     if not recipient_ids:
         return jsonify({"error": "At least one recipient is required"}), 400
-    if not content:
-        return jsonify({"error": "Message content is required"}), 400
+    if not content and not data.get("attachment_ids"):
+        return jsonify({"error": "Message content or attachments are required"}), 400
     if not isinstance(org_id, str) or not org_id:
-        return jsonify(
-            error="Choose a shared organisation for this message",
-            error_code="message_organisation_required",
-            common_organisation_options=_build_common_organisation_options(
-                sender_id=sender_id, recipient_ids=recipient_ids
+        return (
+            jsonify(
+                error="Choose a shared organisation for this message",
+                error_code="message_organisation_required",
+                common_organisation_options=_build_common_organisation_options(
+                    sender_id=sender_id, recipient_ids=recipient_ids
+                ),
             ),
-        ), 409
+            409,
+        )
     if "idempotency_key" in data:
         return (
             jsonify(
@@ -464,6 +467,17 @@ def send_message() -> ResponseReturnValue:
         metadata_payload = sanitise_direct_message_delivery_metadata(
             data.get("metadata") if isinstance(data.get("metadata"), dict) else None
         )
+        from ...services.message_attachment_service import authorise_message_attachments
+
+        # Descriptors and audience are server-derived, never trusted metadata.
+        metadata_payload.pop("attachments", None)
+        if data.get("attachment_ids"):
+            try:
+                metadata_payload["attachments"] = authorise_message_attachments(
+                    data["attachment_ids"], sender_id
+                )
+            except (ValueError, PermissionError):
+                return jsonify(error="attachment_unavailable"), 400
         metadata_payload.setdefault("delivery_channel", "interuser_message")
         metadata_payload.setdefault("intent", "info")
         metadata_payload.setdefault(
@@ -660,7 +674,10 @@ def post_message_paper_recommendation_feedback(message_id: str) -> ResponseRetur
     if not assertion_id:
         return jsonify({"error": "assertion_concept_id is required"}), 400
     if assertion_id not in message_assertion_ids:
-        return jsonify({"error": "assertion_concept_id is not linked to this message"}), 400
+        return (
+            jsonify({"error": "assertion_concept_id is not linked to this message"}),
+            400,
+        )
 
     subject_id = _resolve_recommendation_subject_id(
         message_doc=message,
@@ -1002,9 +1019,12 @@ def message_catalogue():
         return jsonify(**result, current_user_id=actor)
     except Exception:
         _log.exception("Message catalogue unavailable")
-        return jsonify(
-            error="messages_unavailable", conversations=[], coverage_complete=False
-        ), 503
+        return (
+            jsonify(
+                error="messages_unavailable", conversations=[], coverage_complete=False
+            ),
+            503,
+        )
 
 
 @message_bp.route("/exchange", methods=["POST"])
@@ -1070,3 +1090,32 @@ def message_exchange_preference():
         return jsonify(success=True, preference=result)
     except PermissionError:
         return jsonify(error="conversation_unavailable"), 403
+
+
+@message_bp.route("/<message_id>/attachments/<path:concept_id>", methods=["GET"])
+def read_message_attachment(message_id, concept_id):
+    import io
+    from flask import send_file
+    from ...services.message_attachment_service import load_attachment_reference
+
+    actor = _get_current_user_concept_id()
+    if not actor:
+        return jsonify(error="authentication_required"), 401
+    try:
+        info, data = load_attachment_reference(
+            {"message_id": message_id, "concept_id": concept_id}, actor
+        )
+    except PermissionError:
+        return jsonify(error="not_found"), 404
+    except ValueError:
+        return jsonify(error="attachment_unavailable"), 409
+    response = send_file(
+        io.BytesIO(data),
+        mimetype=info["content_type"],
+        as_attachment=not info["content_type"].startswith("image/"),
+        download_name=info["filename"],
+        max_age=0,
+    )
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response

@@ -32,6 +32,7 @@ def register_image_routes(blueprint):
                 data=uploaded.read(MAX_IMAGE_BYTES + 1),
                 filename=uploaded.filename or "image.png",
                 user_concept_id=actor,
+                content_type=uploaded.mimetype or "application/octet-stream",
             )
             return (
                 jsonify(success=True, uploaded=descriptor, image_attachment=descriptor),
@@ -54,7 +55,10 @@ def register_image_routes(blueprint):
         response = send_file(
             io.BytesIO(data),
             mimetype=info["content_type"],
-            as_attachment=request.args.get("download") == "1",
+            as_attachment=(
+                not info["content_type"].startswith("image/")
+                or request.args.get("download") == "1"
+            ),
             download_name=info["filename"],
             max_age=0,
         )
