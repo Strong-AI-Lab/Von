@@ -3536,6 +3536,7 @@ button.unified-search-conversation-main {
     min-height: 40px;
     padding: 6px 12px;
     background: #fff;
+    color: #0f172a;
     border: 1px solid #cbd5e1;
     border-radius: 10px;
     cursor: pointer;
@@ -3606,6 +3607,9 @@ button.unified-search-conversation-main {
 
 .global-task-main {
     min-width: 0;
+    align-self: stretch;
+    display: flex;
+    flex-direction: column;
 }
 
 .task-board-scroll-hint {
@@ -3625,7 +3629,10 @@ button.unified-search-conversation-main {
 
 .task-list[data-view-mode="board"] {
     max-width: 100%;
-    max-height: clamp(420px, 68dvh, 760px);
+    /* Fill the space beside the inspector without sizing to every loaded card. */
+    flex: 1 1 0;
+    min-height: max(420px, 68dvh);
+    height: 0;
     overflow: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
@@ -3647,6 +3654,8 @@ button.unified-search-conversation-main {
 
 .task-pagination-control {
     display: flex;
+    flex-wrap: wrap;
+    flex-shrink: 0;
     align-items: center;
     justify-content: center;
     gap: 12px;
