@@ -57,8 +57,9 @@ task completion. It uses the new message, recent participant conversation and
 accessible canonical task records to identify the task, even when the Messages
 UI omits a thread identifier. Status questions preserve the completed state and
 record the question and answer as a task comment. A coding follow-up can reopen
-the identified task; an ambiguous reference prompts a clarification. General
-inbox messages do not create new coding assignments in this pilot.
+the identified task; an ambiguous reference prompts a clarification. Authorised
+new coding requests can create a standalone native execution assignment through
+the controller.
 
 Publishing uses an operator-configured GitHub account and follows each task's
 publication authority. Missing authentication leaves changes retained and the
@@ -284,13 +285,55 @@ Inbox pickup is opt-in with `inbox_enabled: true` and an explicit ISO timestamp
 in `inbox_since`. Select the cutoff after inspecting outstanding messages; do
 not replay old setup messages unintentionally. Reply runs use a fresh read-only
 Codex process under the same controller lock. They return an answer and a
-semantic choice to reply or resume an identified task; the controller rechecks
+semantic choice to reply, resume an identified task, or create a new native
+assignment from the exact current source message; the controller rechecks
 authority, records the Q/A note, and delivers an idempotent reply. The process
 does not execute coding or deployment work. Resumed coding starts on a later
 poll and uses the current follow-up as its instructions. An old deployment
 instruction does not authorise deployment of newly requested work.
 Several follow-ups queued before a coding run retain all their instructions
 and source-message identities, rather than replacing one another.
+
+The reply prompt permits relevant read-only host/repository inspection. Missing
+supplied facts do not establish that inspection is unavailable. Conditional
+coding requests are interpreted after that inspection; the inbox has no
+hardware-specific policy. `deployment_requested` is false for a reply. For new
+or resumed work it records only explicit current-source deployment authority;
+it never deploys directly. Model-supplied task details cannot choose the actor,
+organisation, report recipient, project or credentials. Creation uses the
+existing canonical task fingerprint keyed by source message and configured
+participants, followed by assignment/text read-back and a provenance comment.
+A retry reuses that assignment without resetting an already progressed task.
+
+Recent direct-message context selects the newest 30 messages in the configured
+organisation at or before the source timestamp, then presents them chronologically.
+The context records its time boundary and whether older messages were omitted.
+Other conversation readers retain their existing pagination. Coding context now
+includes canonical notes, checkpoints, progress, evidence, priority, task links,
+project/collection provenance and up to 50 attachment metadata records. Attachment
+bytes are not supplied by those references. Other authors' comments remain
+explicitly omitted; the existing delegator-comment and follow-up continuity is
+preserved. Runtime capabilities distinguish configured launch arguments and
+controller revision evidence from unobserved public revision or device access.
+
+Recovery retains the original process/result artefacts and records process,
+JSON, validation and effect stages separately. A useful answer survives a
+rejected action with an explicit warning and no coding/deployment effects.
+Missing usable output gets one automatic retry from the durable original request.
+Canonical effect failures retain the same intent for the next poll and report
+pending recovery where participant authority and message delivery permit it.
+Backend exception classes and operation stages are safe diagnostics; arbitrary
+connection exception text is not copied into messages. Historical replies already
+marked delivered are not automatically replayed or sent again.
+
+Acceptance for this repair is in `test_codex_von_inbox.py` and
+`test_codex_von_inbox_canonical_replay.py`. The latter runs the actual adapter and
+canonical task/message services against isolated in-memory storage with a
+scripted model response. It establishes effect/read-back/retry behaviour, not
+live model interpretation or delivery to Michael. Activation still requires the
+coherent release route, next scheduled invocation evidence and a bounded live
+replay under the operator's authority. See
+[JVNAUTOSCI-2748](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2748).
 
 For publication, authenticate GitHub CLI in a dedicated `GH_CONFIG_DIR` outside
 the repository, and set that directory in both the controller and Codex launcher.

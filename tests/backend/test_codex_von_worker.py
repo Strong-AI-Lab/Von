@@ -268,6 +268,7 @@ def test_report_retry_has_same_message_intent_after_task_completed(config):
     api.config = config
     current = task(config, status="in_progress")
     api.task = lambda _: current
+    api.inputs = lambda _: {"description": "unchanged request"}
     sent = []
     api.send = lambda t, key, content: sent.append((key, content)) or "#V#message"
     api.tasks = SimpleNamespace(
@@ -595,3 +596,115 @@ def test_old_backend_read_cannot_silently_launch_worker_defaults(
         worker.tick(config, api, 0)
     with pytest.raises(RuntimeError, match="execution-preference fields"):
         api.task(row["task_concept_id"])
+
+
+def test_task_context_includes_operator_note_provenance_and_attachment_limits(
+    config, monkeypatch
+):
+    api = worker.Von(config)
+    operator_note = (
+        "Subsequent poll-von launches now use "
+        "/home/mjw/.codex-von-worker/releases/task-models-9661e0fce7ec, reviewed revision "
+        "9661e0fce7ecf552e69ed621559246f102f96179, including all four worker/inbox "
+        "script/prompt files. Original root files are deliberately retained for the "
+        "still-running UI controller. Launcher backup is in the versioned directory. "
+        "Per-task model resolution verified gpt-6-astra/xhigh with both sources=task."
+    )
+    row = task(
+        config,
+        requested_model="gpt-6-astra",
+        requested_reasoning_effort="xhigh",
+        notes=operator_note,
+        next_checkpoint="Activate reviewed release",
+        evidence="Prior receipt",
+        progress_signal="Ready for repair",
+        priority="high",
+        project_concept_id="#V#project",
+        collection_concept_ids=["#V#collection"],
+        task_links=[{"target": "#V#dependency"}],
+        attachments_count=51,
+        external_references={"jira": {"key": "JVNAUTOSCI-2748"}},
+        updated_at="2026-09-12T20:45:42Z",
+    )
+    monkeypatch.setattr(
+        api.tasks, "list_task_comments", lambda *a, **kw: {"comments": [], "total": 0}
+    )
+    monkeypatch.setattr(api.messages, "get_messages_for_user", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        api.tasks,
+        "list_task_attachments",
+        lambda *a, **kw: {
+            "attachments": [{"attachment_id": f"a{i}"} for i in range(50)],
+            "total": 51,
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "followup_context",
+        lambda _: {"followup": {"content": "Continue with this change"}},
+    )
+    inputs = api.inputs(row)
+    for key in (
+        "notes",
+        "next_checkpoint",
+        "evidence",
+        "progress_signal",
+        "priority",
+        "task_links",
+        "project_concept_id",
+        "collection_concept_ids",
+        "external_references",
+    ):
+        assert inputs[key] == row[key]
+    assert inputs["context_provenance"]["task_id"] == row["task_concept_id"]
+    assert inputs["attachments"]["omitted"] == 1
+    assert inputs["attachments"]["content_available"] is False
+    assert inputs["followup"]["content"] == "Continue with this change"
+    assert (
+        worker.resolve_execution_settings(config, inputs)["reasoning_effort"] == "xhigh"
+    )
+    changed = {
+        **inputs,
+        "status": "in_progress",
+        "context_provenance": {"updated_at": "later"},
+    }
+    assert worker.input_fingerprint(inputs) == worker.input_fingerprint(changed)
+    assert worker.input_fingerprint(inputs) != worker.input_fingerprint(
+        {**inputs, "notes": "New operator instructions"}
+    )
+
+
+def test_worker_report_does_not_retrigger_or_absorb_new_user_notes(config):
+    api = object.__new__(worker.Von)
+    api.config = config
+    original = {
+        "description": "Fix inbox",
+        "notes": "Original instruction",
+        "evidence": "",
+        "progress_signal": None,
+        "next_checkpoint": None,
+    }
+    current = task(config, status="in_progress", **original)
+    current["notes"] = "New user instruction while coding"
+    api.task = lambda _: current
+    api.send = lambda *a: "#V#result"
+    api.tasks = SimpleNamespace(
+        update_task_fields=lambda tid, fields, **kw: current.update(fields),
+        update_task_status=lambda tid, status, **kw: current.update(status=status),
+    )
+    state = {
+        "task_id": current["task_concept_id"],
+        "attempt": "fixture",
+        "input_snapshot": original,
+        "result": {
+            "status": "blocked",
+            "summary": "Partial work",
+            "evidence": "Observed outcome",
+            "question": "Need a material fact",
+        },
+    }
+    api.finish(state)
+    own_report = {key: current[key] for key in original}
+    assert state["input_hash"] != worker.input_fingerprint(own_report)
+    own_report["notes"] = original["notes"]
+    assert state["input_hash"] == worker.input_fingerprint(own_report)
