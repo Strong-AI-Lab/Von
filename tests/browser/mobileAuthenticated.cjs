@@ -22,6 +22,8 @@ fs.mkdirSync(evidence, { recursive: true });
         const auth = await page.evaluate(async () => (await fetch('/von/api/auth/status')).json());
         assert.equal(auth.authenticated, true);
         assert.equal(auth.auth_provider, 'browser_test_fixture');
+        // Initial health/model refresh replaces the footer once after login.
+        await page.waitForTimeout(3000);
         await page.locator('.footer-org-menu-trigger').click();
         await page.locator('.footer-org-option').filter({ hasText: 'University' }).click();
         const reviewer = () => page.locator('.message-conversation-row').filter({ hasText: 'Workflow Reviewer' });
@@ -55,7 +57,8 @@ fs.mkdirSync(evidence, { recursive: true });
         await page.locator('.footer-org-menu-trigger').click();
         await expect(page.locator('.footer-org-option').filter({ hasText: 'Personal' })).toBeVisible();
         await page.locator('.footer-org-menu-trigger').click();
-        await page.getByRole('button', { name: 'Settings', exact: true }).click();
+        await page.locator('[data-tab="settingsTab"]').click();
+        await expect(page.frameLocator('#settingsFrame').locator('#preferredLanguageSelect')).toBeVisible();
         await page.screenshot({ path: path.join(evidence, 'settings.png'), animations: 'disabled' });
         const result = { commit, authenticated: true, authProvider: auth.auth_provider, fixtureRecipient: 'Workflow Reviewer', sentAndReadBack: true, profiles: 6, generationBlocked: true };
         fs.writeFileSync(path.join(evidence, 'result.json'), JSON.stringify(result, null, 2));
