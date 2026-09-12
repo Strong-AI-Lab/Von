@@ -9,6 +9,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import logging
+import math
 from urllib.parse import quote
 
 from PIL import Image, ImageOps
@@ -137,13 +139,17 @@ def get_profiles(concept_ids: list[str]) -> list[dict]:
                 or cid.removeprefix("#V#").replace("_", " "),
                 "can_edit": actor == cid and _can_edit_profile(actor),
                 "avatar_scope": avatar.get("avatar_scope"),
-                "avatar_url": f"/von/api/participants/{quote(cid, safe='')}/avatar?v={avatar['sha256']}"
-                if avatar.get("sha256")
-                else None,
+                "avatar_url": (
+                    f"/von/api/participants/{quote(cid, safe='')}/avatar?v={avatar['sha256']}"
+                    if avatar.get("sha256")
+                    else None
+                ),
                 "avatar_version": avatar.get("sha256"),
-                "available_scopes": list(SCOPES)
-                if get_effective_organisation_concept_id()
-                else ["user_only_default", "global_general"],
+                "available_scopes": (
+                    list(SCOPES)
+                    if get_effective_organisation_concept_id()
+                    else ["user_only_default", "global_general"]
+                ),
             }
         )
     return result
@@ -164,6 +170,7 @@ def set_avatar(
     data: bytes | None = None,
     remove: bool = False,
     scope: str = "global_general",
+    crop: dict | None = None,
 ) -> dict:
     actor, concept_id, _ = _participant(concept_id, edit=True)
     from .concept_service import update_concept
@@ -193,6 +200,8 @@ def set_avatar(
     inspect_image(data)
     with Image.open(io.BytesIO(data)) as original:
         oriented = ImageOps.exif_transpose(original)
+        if crop is not None:
+            oriented = oriented.crop(_crop_box(crop, *oriented.size))
         # Reconstruct pixels so EXIF, comments and private source metadata cannot
         # be carried into the published derivative.
         resized = ImageOps.fit(
@@ -254,25 +263,91 @@ def load_avatar(concept_id: str) -> bytes:
     return data
 
 
-def generate_avatar(*, prompt: str, concept_id: str | None = None) -> dict:
+def _crop_box(crop: dict, width: int, height: int) -> tuple:
+    if not isinstance(crop, dict) or set(crop) != {"x", "y", "size"}:
+        raise ValueError("Supply a square crop with x, y and size.")
+    x, y, size = (crop[k] for k in ("x", "y", "size"))
+    if any(type(v) not in (int, float) or not math.isfinite(v) for v in (x, y, size)):
+        raise ValueError("Crop coordinates must be finite numbers.")
+    if x < 0 or y < 0 or size < 1 or x + size > width or y + size > height:
+        raise ValueError("Crop must lie within the oriented source image.")
+    return (x, y, x + size, y + size)
+
+
+def prepare_avatar(
+    *, data: bytes, filename: str, concept_id: str | None = None
+) -> dict:
+    """Preserve the private original and suggest framing without identifying anyone."""
+    actor, _, _ = _participant(concept_id, edit=True)
+    inspect_image(data)
+    with Image.open(io.BytesIO(data)) as original:
+        oriented = ImageOps.exif_transpose(original).convert("RGB")
+    width, height = oriented.size
+    from .avatar_framing import find_faces
+
+    detection_available = True
+    try:
+        faces = find_faces(oriented)
+    # A detector failure must not prevent ordinary uploads and manual cropping.
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("Avatar face detection unavailable")
+        detection_available, faces = False, []
+    size = min(width, height)
+    x, y = (width - size) / 2, (height - size) / 2
+    if len(faces) == 1:
+        face = faces[0]
+        size = min(size, max(face["width"], face["height"]) * 2)
+        x = min(width - size, max(0, face["x"] + face["width"] / 2 - size / 2))
+        y = min(height - size, max(0, face["y"] + face["height"] / 2 - size * 0.45))
+    image = store_image(data=data, filename=filename, user_concept_id=actor)
+    return {
+        "image": image,
+        "width": width,
+        "height": height,
+        "face_count": len(faces),
+        "face_detection_available": detection_available,
+        "crop": {"x": x, "y": y, "size": size},
+    }
+
+
+def generate_avatar(
+    *,
+    prompt: str,
+    concept_id: str | None = None,
+    source_image_concept_id: str | None = None,
+) -> dict:
     """Generate a private candidate; publishing is a separate, reusable action."""
     actor, _, _ = _participant(concept_id, edit=True)
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 4000:
         raise ValueError("Describe the image in 1–4000 characters.")
     from ..languagemodels.openai_client import OpenAIClient
 
+    source = None
+    if source_image_concept_id:
+        source, original_data = load_image(source_image_concept_id, actor)
+        # Send oriented pixels, without private EXIF, to the configured provider.
+        with Image.open(io.BytesIO(original_data)) as original:
+            oriented = ImageOps.exif_transpose(original).convert("RGB")
+            clean = Image.new("RGB", oriented.size)
+            clean.paste(oriented)
+            image_input = io.BytesIO()
+            clean.save(image_input, format="PNG")
+        image_input.name = "avatar-source.png"
+        image_input.seek(0)
     # Bounded single image; no automatic retry that could duplicate provider cost.
+    images = OpenAIClient().client.with_options(max_retries=0).images
+    options = {
+        "model": "gpt-image-1.5",
+        "prompt": prompt.strip(),
+        "n": 1,
+        "size": "1024x1024",
+        "quality": "low",
+        "output_format": "png",
+    }
     result = (
-        OpenAIClient()
-        .client.with_options(max_retries=0)
-        .images.generate(
-            model="gpt-image-1.5",
-            prompt=prompt.strip(),
-            n=1,
-            size="1024x1024",
-            quality="low",
-            output_format="png",
-        )
+        images.edit(image=image_input, **options)
+        if source
+        else images.generate(**options)
     )
     if not result.data or not result.data[0].b64_json:
         raise ValueError("The image provider returned no image.")
@@ -285,5 +360,13 @@ def generate_avatar(*, prompt: str, concept_id: str | None = None) -> dict:
             "kind": "generated",
             "model": "gpt-image-1.5",
             "prompt": prompt.strip(),
+            **(
+                {
+                    "parent_concept_id": source_image_concept_id,
+                    "parent_sha256": source["sha256"],
+                }
+                if source
+                else {}
+            ),
         },
     )
