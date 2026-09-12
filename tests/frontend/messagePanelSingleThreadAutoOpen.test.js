@@ -33,6 +33,7 @@ describe('message panel single-thread auto-open', () => {
         jest.resetModules();
         jest.clearAllMocks();
         delete global.fetch;
+        delete global.IntersectionObserver;
     });
 
     test('automatically opens the only available conversation', async () => {
@@ -145,6 +146,11 @@ describe('message panel single-thread auto-open', () => {
     });
 
     test('shows a self-addressed subject and marks the message read as the current user', async () => {
+        let observeVisible;
+        global.IntersectionObserver = jest.fn(function (callback) {
+            observeVisible = callback;
+            this.observe = jest.fn(); this.unobserve = jest.fn(); this.disconnect = jest.fn();
+        });
         const { getJson, postJson } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const { initializeMessagePanel, showMessagesTab } = require(modulePath);
 
@@ -202,6 +208,10 @@ describe('message panel single-thread auto-open', () => {
         expect(document.querySelector('.message-subject')?.textContent).toBe('Messaging test');
         expect(document.querySelector('.message-content')?.textContent).toContain('Please confirm that this arrived.');
         expect(document.querySelector('.message-bubble')?.classList.contains('sent')).toBe(true);
+        expect(postJson).not.toHaveBeenCalledWith('/api/messages/read/bulk', expect.anything());
+        document.getElementById('messageViewContent').getClientRects = () => [{}];
+        observeVisible([{ target: document.querySelector('.message-bubble'), isIntersecting: true, intersectionRatio: 1 }]);
+        await flushUi();
         expect(postJson).toHaveBeenCalledWith('/api/messages/read/bulk', {
             message_ids: ['#V#message_self_1'],
         });

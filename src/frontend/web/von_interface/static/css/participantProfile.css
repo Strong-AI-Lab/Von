@@ -15,7 +15,13 @@
 .unified-message-content .messages-sidebar { display: none; }
 .unified-message-content .messages-main { flex: 1; min-width: 0; min-height: 0; }
 .unified-message-content .message-list { max-width: 900px; width: 100%; margin-inline: auto; }
-.unified-message-content .message-bubble { max-width: 100%; width: auto; align-self: stretch; border-radius: 10px; }
+.unified-message-content .message-bubble { max-width: min(88%, 760px); width: fit-content; border-radius: 10px; }
+.unified-message-content .message-bubble.sent { align-self: flex-end; }
+.unified-message-content .message-bubble.received { align-self: flex-start; }
+.message-bubble.is-unread { outline: 2px solid #2563eb; outline-offset: 2px; }
+.message-unread-label { display: block; width: fit-content; margin-bottom: 6px; padding: 2px 6px; border-radius: 4px; background: #dbeafe; color: #1e40af; font-size: 12px; font-weight: 600; }
+.message-read-status { position: sticky; top: 0; z-index: 1; padding: 8px; background: #eff6ff; color: #1e40af; }
+@media (max-width: 600px) { .unified-message-content .message-bubble { max-width: 94%; } }
 .unified-message-content .message-content { white-space: normal; overflow-wrap: anywhere; }
 .unified-message-content .message-content pre { overflow: auto; white-space: pre; max-width: 100%; }
 .unified-message-content .message-author { font-weight: 600; margin-bottom: 8px; }

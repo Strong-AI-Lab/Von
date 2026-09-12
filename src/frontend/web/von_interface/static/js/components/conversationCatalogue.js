@@ -125,6 +125,7 @@ export function renderMessageConversationRow(row, { selected = false, pinned = f
         badge.className = 'chat-session-tab-unread';
         badge.textContent = String(row.shared_unread_count);
         badge.setAttribute('aria-label', `${row.shared_unread_count} unread messages`);
+        badge.title = 'Messages addressed to you that have not been marked read, including earlier pages. Scroll to an Unread label or load earlier messages to read them.';
         header.append(badge);
     }
     const meta = document.createElement('span');
