@@ -26454,6 +26454,7 @@ def _conversation_read_output_schema(*, list_result: bool) -> Schema:
             "next_cursor": (str, type(None)),
             "coverage_complete": (bool, type(None)),
             "coverage": (dict, type(None)),
+            "ordering": (dict, type(None)),
             "warnings": (list, type(None)),
             "session_id": (str, type(None)),
             "chat_session_id": (str, type(None)),

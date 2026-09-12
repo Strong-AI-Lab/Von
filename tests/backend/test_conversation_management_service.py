@@ -532,6 +532,10 @@ def test_list_final_coverage_preserves_prior_page_source_failure(monkeypatch):
     final = service.list_actor_conversations(
         actor_user_id="#V#alice", limit=1, cursor=first["next_cursor"]
     )
+    assert final["next_cursor"] is not None
+    final = service.list_actor_conversations(
+        actor_user_id="#V#alice", limit=1, cursor=final["next_cursor"]
+    )
 
     assert calls == {"owned": 2, "invite_lookup": 2}
     assert final["next_cursor"] is None
