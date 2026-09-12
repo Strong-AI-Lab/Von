@@ -62,8 +62,8 @@ body {
     color: #333;
     padding-top: 0;
     /* Dynamic layout offsets the fixed header and tab container. */
-    padding-bottom: 60px;
-    /* ADDED: Space for the fixed footer */
+    padding-bottom: var(--von-fixed-footer-clearance, 64px);
+    /* Reserve the measured fixed footer height as its contents reflow. */
 }
 
 body.von-auth-pending,
@@ -6580,6 +6580,8 @@ footer {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 16px;
     padding: 8px 16px;
     background-color: rgba(255, 255, 255, 0.95);
     border-top: 1px solid #e5e7eb;
@@ -6946,6 +6948,8 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 }
 
 .language-indicator {
+    flex-shrink: 0;
+    white-space: nowrap;
     margin: 0;
     font-size: 0.75rem;
     color: #6b7280;
@@ -7258,7 +7262,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     overflow-y: visible;
     /* Allow body scrolling so content is never clipped */
     padding: 0 20px;
-    padding-bottom: 64px;
+    padding-bottom: var(--von-fixed-footer-clearance, 64px);
     /* Reserve space so content isn't hidden behind footer */
     box-sizing: border-box;
     width: 100% !important;
@@ -11623,7 +11627,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 
 .chat-composer {
     position: sticky;
-    bottom: 42px;
+    bottom: calc(var(--von-fixed-footer-clearance, 64px) + 8px);
     z-index: 30;
     display: grid;
     gap: 8px;
@@ -12019,12 +12023,6 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 .chat-task-queue-delete:hover,
 .chat-task-queue-dismiss:hover {
     background: #ffe4e6;
-}
-
-@media (max-height: 700px) {
-    .chat-composer {
-        bottom: 36px;
-    }
 }
 
 /* When inside the tab-content-area, make the tab content flex to propagate height */
