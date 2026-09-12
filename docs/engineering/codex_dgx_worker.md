@@ -167,16 +167,70 @@ that omits them fails visibly before pickup instead of silently choosing default
 Installing only a newer worker script cannot repair an older canonical reader.
 Do not change global model defaults to compensate for a mismatched installation.
 
-For an authorised upgrade, install the reviewed backend and worker bundle as one
-compatible release, retain the previous backend/bundle selection for rollback,
-and update the scheduled wrapper to pass the chosen backend explicitly. Preserve
-the existing worker lock, state directory, identities, memberships and task
-selectors. Let active work finish before switching the scheduled process; do not
-launch a second controller to test pickup. Before re-enabling the schedule, check
-a labelled isolated task through that adapter's point/list reads, `inputs` and
-`resolve_execution_settings`, including exact task-sourced model/reasoning values.
-This installation change is separate from repository publication and public web
-deployment and requires its own activation authority.
+For an authorised upgrade, use the coherent installation below. Preserve the
+existing worker lock, state directory, identities, memberships, task selectors
+and five-minute schedule. A selected release is not evidence of actual pickup.
+Local installation and public deployment remain distinct effects; both need
+applicable task or standing authority.
+
+### Coherent worker/backend releases
+
+`scripts/codex_von_release.py` prepares a complete detached checkout of one
+reviewed revision with independent Git objects. It copies only tracked source,
+including backend, worker, inbox, prompts and deployment helpers. It does not
+copy credentials, environment files or private configuration. Installations
+reside in an operator-owned `worker_release_root/<full SHA>`; `current` is an
+atomically replaced symlink. Never modify or remove a release used by an active
+process. The existing PDM environment remains operator-owned; a changed
+dependency lock still requires recoverable environment preparation.
+
+One-time operator bootstrap (outside a coding sandbox):
+
+1. Retain the existing poll/deployment wrappers and their backend/bundle
+   bindings for rollback. Let the active controller finish. The installer
+   refuses to overlap its existing `state_root/worker.lock`.
+2. Add `worker_release_root` to the existing private deployment configuration;
+   keep its other bindings unchanged. Using the existing PDM Python, run the
+   reviewed `scripts/codex_von_release.py --config <deployment-config> --commit
+   <full-origin-main-SHA> --receipt <private-installation-receipt>`. This selects
+   source only; it does not start a worker, restart the web server or touch Von
+   records. The receipt retains the previous pointer if one exists. At the
+   first bootstrap, rollback also requires the retained pre-bootstrap wrappers.
+3. Retarget the existing `poll-von` wrapper to resolve `current` **once per
+   invocation, before importing any backend modules**. Use that resolved
+   directory for both `scripts/codex_von_worker.py` and `--backend-root`.
+   Retain the wrapper's database-target binding, event suppression, configured
+   identity, subscription launcher, model defaults and state. Retarget the
+   existing fixed deployment launcher to the same selected release's
+   `scripts/codex_von_deploy.py`. It must forward the controller's
+   `--worker-lock-fd`, `--commit`, `--receipt` and optional `--recover-only`;
+   preserve that descriptor through `exec` or explicit `pass_fds` if the wrapper
+   starts a subprocess. The configuration path remains operator-bound. Install
+   this pair together.
+4. Through the same prepared poll wrapper, run the worker with
+   `--check-task <assigned-native-task-id>` under its normal actor context.
+   Permit that diagnostic option explicitly in the wrapper. This checks
+   canonical point/list reads, `inputs` and exact resolved task preferences;
+   it prints only provenance/settings, does not accept conversation invitations,
+   send messages, change task state or invoke a model. A completed task is
+   reported as ineligible, not picked up. Check an isolated native assignment
+   with task-sourced Astra/high and no project/collection requirement.
+5. Retain the diagnostic output and inspect the next existing scheduled
+   invocation's `state_root/runtime.json`: observed time, PID, backend revision,
+   worker path and actual task-service module path must match the selection.
+   The runtime receipt proves controller startup, not task pickup or completion.
+
+With this bootstrap and `worker_release_root` enabled, each authorised public
+deployment prepares the complete worker release before stopping the server,
+verifies local/public health, then selects the worker release for the next
+invocation. The controller passes its existing lock descriptor to deployment;
+standalone operator deployment acquires that same lock. Loaded files remain
+intact. The deployment receipt retains both predecessor code revisions and
+worker selection. Interrupted activation reconciles the pointer; failed
+deployment attempts restore the prior worker selection and web service,
+reporting failures separately. Pointer selection is recorded as
+`selected_for_next_invocation`; verify actual startup and task settings as
+above before claiming local capability activation. No new poller is installed.
 
 Ordinary conversation `task_create` permits explicit assignment to a represented
 same-organisation coding agent using the continuation route's live membership
@@ -259,9 +313,10 @@ shortcut. See [Codex permissions](https://learn.chatgpt.com/docs/permissions).
 
 ## Explicit deployment
 
-Install `codex_von_deploy.py` and its `deploy_local_main.py` dependency in the
-operator-owned directory. A fixed launcher binds a separate JSON configuration
-and accepts only `--commit` and `--receipt` from the controller. Set its path as
+Install `codex_von_deploy.py`, `codex_von_release.py` and `deploy_local_main.py`
+from the same revision, preferably through the coherent release selection above.
+A fixed launcher binds a separate JSON configuration and accepts `--commit`,
+`--receipt`, `--worker-lock-fd` and optional `--recover-only` from the controller. Set its path as
 `deployment_command` in worker config. The deployment configuration contains:
 
 ```json
@@ -269,6 +324,7 @@ and accepts only `--commit` and `--receipt` from the controller. Set its path as
   "primary_root": "/home/mjw/Von",
   "runtime_root": "/home/mjw/Von-runtime-main",
   "state_root": "/home/mjw/.codex-von-worker/worker-state",
+  "worker_release_root": "/home/mjw/.codex-von-worker/releases",
   "health_url": "http://127.0.0.1:5000/health",
   "public_health_url": "https://von.curiouscat.cc/health",
   "public_headers_file": "/home/mjw/.codex-von-worker/cloudflare-health.json",

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import uuid
 from contextlib import ExitStack
+from datetime import datetime, timezone
 from pathlib import Path
 
 ACTIVE = {"pending", "in_progress", "blocked"}
@@ -121,6 +122,57 @@ def authorised_task(task, config):
         and task.get("created_by_concept_id") == config["delegator_id"]
         and task.get("report_to_concept_id") in (None, config["delegator_id"])
     )
+
+
+def runtime_evidence(backend_root, api):
+    root = Path(backend_root).resolve()
+    return {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "pid": os.getpid(),
+        "commit": subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+        ).strip(),
+        "backend_root": str(root),
+        "worker_script": str(Path(__file__).resolve()),
+        "task_service_module": str(Path(api.tasks.__file__).resolve()),
+    }
+
+
+def check_task(config, api, task_id):
+    """Read assignment/settings through the scheduled adapter without pickup."""
+    task = api.task(task_id)
+    if not task or not authorised_task(task, config) or not api.native_writer(task):
+        raise PermissionError("Task is outside this worker's native assignment scope")
+    # Do not call pending(): that path can report external-writer assignments.
+    offset = 0
+    while True:
+        page = api.tasks.search_tasks(
+            assignee_concept_id=config["agent_id"],
+            created_by_concept_id=config["delegator_id"],
+            organisation_concept_id=config["organisation_id"],
+            statuses=[task["status"]],
+            limit=200,
+            offset=offset,
+        )
+        match = next(
+            (row for row in page["tasks"] if row["task_concept_id"] == task_id), None
+        )
+        if match is not None:
+            require_task_execution_preferences(match)
+            for key in ("requested_model", "requested_reasoning_effort"):
+                if match[key] != task[key]:
+                    raise RuntimeError("Task point/list execution preferences disagree")
+            break
+        offset += len(page["tasks"])
+        if not page["tasks"] or offset >= page["total"]:
+            raise RuntimeError("Assigned task is missing from canonical list read")
+    return {
+        "task_id": task_id,
+        "status": task["status"],
+        "eligible": task["status"] in ACTIVE,
+        "execution_settings": resolve_execution_settings(config, api.inputs(task)),
+        "pickup_performed": False,
+    }
 
 
 def validate_result(value):
@@ -651,6 +703,8 @@ def apply_deployment(config, api, state, state_path, lock_fd):
                 commit,
                 "--receipt",
                 str(receipt_path),
+                "--worker-lock-fd",
+                str(lock_fd),
                 *(["--recover-only"] if recover_only else []),
             ],
             check=False,
@@ -673,9 +727,9 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         receipt
     )
     if success:
-        result["summary"] += (
-            f" Deployed and verified the public server at {commit[:12]}."
-        )
+        result[
+            "summary"
+        ] += f" Deployed and verified the public server at {commit[:12]}."
     else:
         result["status"] = "blocked"
         result["summary"] += (
@@ -686,9 +740,9 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         )
     if recover_only:
         result["status"] = "blocked"
-        result["summary"] += (
-            " The task changed; only the interrupted deployment was reconciled."
-        )
+        result[
+            "summary"
+        ] += " The task changed; only the interrupted deployment was reconciled."
     write_json(state_path, state)
 
 
@@ -790,6 +844,9 @@ def main():
         help="Reviewed canonical backend checkout; "
         "required when running a copied worker script bundle",
     )
+    parser.add_argument(
+        "--check-task", help="Read back one assigned task without running work"
+    )
     options = parser.parse_args()
     os.umask(0o077)
     config = json.loads(Path(options.config).read_text())
@@ -802,7 +859,7 @@ def main():
         except BlockingIOError:
             print('{"outcome":"already_running"}')
             return
-        bind_backend_root(options.backend_root)
+        backend_root = bind_backend_root(options.backend_root)
         from src.backend.integrations.internal_mcp.gateway import (
             INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE,
             bind_internal_mcp_actor_context_source,
@@ -835,7 +892,14 @@ def main():
                 raise PermissionError(
                     "The configured worker has no organisation membership"
                 )
-            tick(config, Von(config), lock.fileno())
+            api = Von(config)
+            evidence = runtime_evidence(backend_root, api)
+            if options.check_task:
+                evidence["task_check"] = check_task(config, api, options.check_task)
+                print(json.dumps(evidence), flush=True)
+                return
+            write_json(state_root / "runtime.json", evidence)
+            tick(config, api, lock.fileno())
 
 
 if __name__ == "__main__":

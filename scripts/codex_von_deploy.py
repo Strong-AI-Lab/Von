@@ -12,13 +12,42 @@ import fcntl
 import json
 import os
 import re
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
 try:
     from . import deploy_local_main as runtime
+    from . import codex_von_release as releases
 except ImportError:
     import deploy_local_main as runtime
+    import codex_von_release as releases
+
+
+@contextmanager
+def worker_lock(config, inherited_fd=None):
+    """Serialise host activation with the existing controller, including its child."""
+    path = Path(config["state_root"]) / "worker.lock"
+    with path.open("a") as lock:
+        fd = lock.fileno() if inherited_fd is None else inherited_fd
+        if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != (
+            path.stat().st_dev,
+            path.stat().st_ino,
+        ):
+            raise ValueError("Inherited descriptor is not the configured worker lock")
+        # A passed descriptor shares the controller's lock; never unlock it here.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+def select_worker(config, receipt):
+    if not config.get("worker_release_root"):
+        return
+    root = config["worker_release_root"]
+    if not receipt.get("previous_worker_release"):
+        raise runtime.DeploymentError("Worker activation lacks its rollback selection")
+    target = releases.prepare(config["primary_root"], root, receipt["requested_commit"])
+    receipt["worker_activation"] = releases.activate(root, target)
 
 
 def save(path, value):
@@ -132,6 +161,15 @@ def execute(config, commit, receipt_path, *, recover_only=False):
                 "requested_commit": commit,
                 "previous_commit": previous_commit,
             }
+            if config.get("worker_release_root"):
+                previous_worker = releases.current(config["worker_release_root"])
+                releases.verify(
+                    previous_worker, runtime._git(previous_worker, "rev-parse", "HEAD")
+                )
+                # Persist rollback before the pointer can change. Preparing a new
+                # immutable checkout cannot affect the loaded controller/backend.
+                receipt["previous_worker_release"] = str(previous_worker)
+                releases.prepare(primary, config["worker_release_root"], commit)
             save(receipt_path, receipt)
             try:
                 runtime.deploy(
@@ -141,7 +179,9 @@ def execute(config, commit, receipt_path, *, recover_only=False):
                     health_timeout_seconds=config.get("health_timeout_seconds", 960),
                     expected_commit=commit,
                 )
-                receipt.update(status="deployed", verification=verify(config, commit))
+                verification = verify(config, commit)
+                select_worker(config, receipt)
+                receipt.update(status="deployed", verification=verification)
                 save(receipt_path, receipt)
                 return receipt
             except (runtime.DeploymentError, OSError, ValueError, KeyError) as exc:
@@ -152,11 +192,26 @@ def execute(config, commit, receipt_path, *, recover_only=False):
         try:
             current = runtime._read_health(config["health_url"])
             if not runtime._health_error(current, commit):
-                receipt.update(status="deployed", verification=verify(config, commit))
+                verification = verify(config, commit)
+                if recover_only and config.get("worker_release_root"):
+                    selected = releases.current(config["worker_release_root"])
+                    if runtime._git(selected, "rev-parse", "HEAD") != commit:
+                        raise runtime.DeploymentError(
+                            "Revoked deployment cannot start a new worker activation"
+                        )
+                select_worker(config, receipt)
+                receipt.update(status="deployed", verification=verification)
                 save(receipt_path, receipt)
                 return receipt
         except (runtime.DeploymentError, OSError, ValueError, KeyError) as exc:
             receipt["reconciliation_failure_type"] = type(exc).__name__
+        if receipt.get("previous_worker_release"):
+            try:
+                receipt["worker_activation"] = releases.activate(
+                    config["worker_release_root"], receipt["previous_worker_release"]
+                )
+            except (runtime.DeploymentError, OSError, ValueError, KeyError) as exc:
+                receipt["worker_recovery_failure_type"] = type(exc).__name__
         try:
             receipt.update(
                 status="rolled_back",
@@ -166,6 +221,8 @@ def execute(config, commit, receipt_path, *, recover_only=False):
             receipt.update(
                 status="recovery_failed", recovery_failure_type=type(exc).__name__
             )
+        if receipt.get("worker_recovery_failure_type"):
+            receipt["status"] = "recovery_failed"
         save(receipt_path, receipt)
         return receipt
 
@@ -176,6 +233,7 @@ def main():
     parser.add_argument("--commit", required=True)
     parser.add_argument("--receipt", required=True)
     parser.add_argument("--recover-only", action="store_true")
+    parser.add_argument("--worker-lock-fd", type=int)
     args = parser.parse_args()
     os.umask(0o077)
     config = json.loads(Path(args.config).read_text())
@@ -188,9 +246,10 @@ def main():
         "VON_DURABLE_WORKFLOWS_ENABLE",
     ):
         os.environ.pop(key, None)
-    result = execute(
-        config, args.commit, Path(args.receipt), recover_only=args.recover_only
-    )
+    with worker_lock(config, args.worker_lock_fd):
+        result = execute(
+            config, args.commit, Path(args.receipt), recover_only=args.recover_only
+        )
     print(json.dumps(result), flush=True)
     return 0 if result["status"] == "deployed" else 1
 
