@@ -18592,6 +18592,17 @@ body.settings-body {
     .unified-message-content .message-reply-destination { margin: 0 0 4px; font-size: 12px; }
 }
 
+/* Keep attachment-only sending available and large drafts scrollable. */
+.conversation-attachment-composer {
+    max-height: min(35vh, 240px);
+    overflow: auto;
+    min-width: 0;
+    flex-shrink: 0;
+}
+#messageComposeArea[data-has-attachments="true"] .send-message-btn {
+    display: inline-flex;
+}
+
 .task-deployment {
     border: 1px solid var(--border-color, #ccc);
     border-radius: 6px;
