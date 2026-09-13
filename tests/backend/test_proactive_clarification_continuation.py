@@ -451,6 +451,28 @@ def test_unterminated_runtime_claim_cannot_poison_a_later_projection(carrier):
     assert state() == {}
 
 
+def test_stale_terminal_sidecar_cannot_overwrite_a_conflicted_checkpoint(
+    carrier, gateway
+):
+    def concurrent_update(_):
+        checkpoint().save("A1 cancelled by user.", expected_revision=0)
+        return call(
+            "turn_checkpoint_conversation", text="A1 ready.", expected_revision=0
+        )
+
+    result = run(
+        gateway,
+        ScriptedClient(
+            concurrent_update,
+            LLMResponse(
+                text_response="The request remains pending.\n"
+                "<von_conversation_situation>A1 ready.</von_conversation_situation>"
+            ),
+        ),
+    )
+    assert result.conversation_situation == "A1 cancelled by user."
+
+
 def test_role_source_admission_later_read_and_correction_stay_scoped(
     carrier, gateway, monkeypatch
 ):

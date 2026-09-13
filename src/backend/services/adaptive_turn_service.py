@@ -9227,10 +9227,14 @@ def execute_adaptive_turn(
                 current_situation=conversation_situation,
             )
         )
-        if status != "completed":
+        if status != "completed" or (
+            checkpoint is not None and checkpoint.needs_reconciliation
+        ):
             # A sidecar emitted beside a capability request is only an interim
             # theory. If later synthesis fails, retain the prior shared
-            # situation while still suppressing the private protocol text.
+            # situation while still suppressing the private protocol text. A
+            # conflicted checkpoint likewise needs explicit reconciliation;
+            # terminal prose cannot silently overwrite the newer carrier.
             updated_conversation_situation = conversation_situation
         return AdaptiveTurnResult(
             response_text=visible_text,
