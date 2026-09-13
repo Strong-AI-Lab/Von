@@ -65,7 +65,7 @@ describe('settingsPage OpenAI model change handling', () => {
         `;
     });
 
-    test('editing GPT reasoning while Gemma is active neither probes, saves, enrols, nor switches provider', async () => {
+    test.each(['ollama', 'openai'])('editing an allowed model while %s is active preserves browser choice without enrolment', async (activeSource) => {
         const { getJsonDetailed, postJson } = await import(apiServicePath);
         const savePayloads = [];
         const testPayloads = [];
@@ -174,7 +174,7 @@ describe('settingsPage OpenAI model change handling', () => {
 
         localStorage.setItem('von:localModelPreference', JSON.stringify({
             schemaVersion: 'localModelPreference.v1',
-            activeSource: 'ollama',
+            activeSource,
             openaiModel: 'gpt-5.6-luna',
             openaiModelParameters: { reasoning_effort: 'low' },
             ollamaSelection: {
@@ -211,7 +211,7 @@ describe('settingsPage OpenAI model change handling', () => {
 
         expect(localStorage.getItem('von:openaiSelectedModel')).toBe('gpt-5.6-luna');
         expect(JSON.parse(localStorage.getItem('von:localModelPreference'))).toMatchObject({
-            activeSource: 'ollama',
+            activeSource,
             openaiModel: 'gpt-5.6-luna',
             openaiModelParameters: { reasoning_effort: 'high' },
             ollamaSelection: {
@@ -219,8 +219,8 @@ describe('settingsPage OpenAI model change handling', () => {
                 host: 'http://127.0.0.1:11434'
             }
         });
-        expect(document.getElementById('enableOpenAiPremiumToggle').checked).toBe(false);
-        expect(document.getElementById('browserChatModelSummary').textContent).toContain('gemma4:latest');
+        expect(document.getElementById('enableOpenAiPremiumToggle').checked).toBe(activeSource === 'openai');
+        expect(document.getElementById('browserChatModelSummary').textContent).toContain(activeSource === 'openai' ? 'gpt-5.6-luna' : 'gemma4:latest');
         expect(document.getElementById('workflowModelPoolList').textContent).toContain('low effort');
         expect(document.getElementById('addOpenAiToWorkflowPoolButton').textContent).toBe(
             'Update allowed model entry'
@@ -238,5 +238,46 @@ describe('settingsPage OpenAI model change handling', () => {
             model_parameters: { reasoning_effort: 'high' }
         });
         expect(savePayloads).toEqual([]);
+
+        if (activeSource === 'openai') {
+            const settings = await import(settingsPagePath);
+            const before = localStorage.getItem('von:localModelPreference');
+            settings.__testOnly_setModelScopeState({ ready: false });
+            settings.__testOnly_renderModelScopeOverview();
+            expect(localStorage.getItem('von:localModelPreference')).toBe(before);
+            expect(document.getElementById('browserChatModelSummary').textContent).toContain('checking allowed models');
+            const enabledLlms = [
+                { provider: 'openai', model: 'gpt-5.6-luna' },
+                { provider: 'openai', model: 'gpt-6-astra' },
+            ];
+            settings.__testOnly_setModelScopeState({ enabledLlms });
+            select.add(new Option('Unallowed draft', 'draft-model'));
+            select.value = 'draft-model';
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            await waitUntil(() => document.getElementById('openaiModelEligibilityStatus').textContent.includes('draft-model'));
+            expect(localStorage.getItem('von:localModelPreference')).toBe(before);
+            expect(document.getElementById('enableOpenAiPremiumToggle').checked).toBe(false);
+            expect(document.getElementById('browserChatModelSummary').textContent).toContain('gpt-5.6-luna');
+
+            // Saving an allowance makes the draft eligible, but testing it is
+            // still a probe, not an explicit browser replacement.
+            settings.__testOnly_setModelScopeState({ enabledLlms: [...enabledLlms, { provider: 'openai', model: 'draft-model' }] });
+            await settings.__testOnly_testSelectedPremiumModel('openai');
+            expect(localStorage.getItem('von:localModelPreference')).toBe(before);
+
+            select.add(new Option('gpt-6-astra', 'gpt-6-astra'));
+            select.value = 'gpt-6-astra';
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            await waitUntil(() => document.getElementById('enableOpenAiPremiumToggle').checked);
+            expect(JSON.parse(localStorage.getItem('von:localModelPreference'))).toMatchObject({ activeSource: 'openai', openaiModel: 'gpt-6-astra' });
+            expect(savePayloads).toEqual([]);
+
+            // A canonical scope read removing the active model preserves the
+            // request and explains replacement; it must never select Ollama.
+            settings.__testOnly_setModelScopeState({ enabledLlms: [] });
+            settings.__testOnly_renderModelScopeOverview();
+            expect(document.getElementById('browserChatModelSummary').textContent).toContain('select an allowed replacement explicitly');
+            expect(JSON.parse(localStorage.getItem('von:localModelPreference'))).toMatchObject({ activeSource: 'openai', openaiModel: 'gpt-6-astra' });
+        }
     });
 });

@@ -548,12 +548,11 @@ function selectedPremiumModelName(provider = selectedPremiumProvider()) {
 
 function getSettingsConcernModelSnapshot() {
   const localModelPreference = getEffectiveLocalModelPreference();
-  const premiumToggle = document.getElementById('enableOpenAiPremiumToggle');
-  const premiumEnabled = premiumToggle
-    ? !!premiumToggle.checked
-    : ['openai', 'openrouter', 'gemini', 'meta'].includes(localModelPreference.activeSource);
-  const premiumProvider = selectedPremiumProvider();
-  const premiumModel = selectedPremiumModelName(premiumProvider);
+  const premiumEnabled = Boolean(normalisePremiumProvider(localModelPreference.activeSource));
+  const premiumProvider = premiumEnabled ? localModelPreference.activeSource : selectedPremiumProvider();
+  const premiumModel = premiumEnabled
+    ? localModelPreference.requestedLlm?.model
+    : selectedPremiumModelName(premiumProvider);
   const ollamaSelection = resolveOllamaSelection(false) || localModelPreference.ollamaSelection || null;
   const ollamaModel = String(ollamaSelection?.model || ollamaSelection?.value || '').trim();
 
@@ -637,6 +636,18 @@ function buildTemporarySettingsConcernRecommendation(concernId) {
         ollamaModel,
       } = getSettingsConcernModelSnapshot();
       const providerLabel = PREMIUM_PROVIDER_CONFIG[premiumProvider]?.label || 'premium';
+      const browserPrimary = browserChatPrimaryEntry();
+      if (scopedModelStateReady && browserPrimary && !isPersistedEffectiveModelAllowed(browserPrimary)) {
+        return {
+          kicker: 'Browser model needs attention',
+          title: 'Choose an allowed browser model or restore its allowance',
+          description: `${formatLlmEntry(browserPrimary)} is no longer allowed for the current scope. Your browser choice is retained; choose a replacement explicitly or restore its scoped allowance.`,
+          actionLabel: 'Review browser model',
+          actionTarget: 'premium-model-settings',
+          focusSelector: '#premiumProviderSelect, #globalModelSelect',
+          source: 'temporary-placeholder',
+        };
+      }
 
       if (premiumEnabled && !premiumModel) {
         return {
@@ -1310,6 +1321,9 @@ function getStoredPremiumModelParameters(provider) {
 }
 
 function setStoredPremiumModelParameters(provider, parameters) {
+  // An uncommitted model in the editor must not change the active model's parameters.
+  if (getEffectiveLocalModelPreference().activeSource === provider
+    && selectedPremiumModelName(provider) !== getStoredPremiumSelectedModel(provider)) return;
   if (provider === 'gemini') {
     setStoredGeminiModelParameters(parameters);
   } else if (provider === 'openrouter') {
@@ -1403,6 +1417,8 @@ async function refreshPremiumReasoningEffortControls(provider = selectedPremiumP
       { cache: 'no-store' },
     );
     const capability = await response.json();
+    if (selectedPremiumModelName(provider) !== selectedModel
+      || selectedPremiumProvider() !== provider) return null;
     if (response.ok && capability?.success !== false) {
       setLatestPremiumModelParameterCapability(provider, capability);
       applyPremiumReasoningEffortControls(provider, capability);
@@ -1411,6 +1427,8 @@ async function refreshPremiumReasoningEffortControls(provider = selectedPremiumP
   } catch (error) {
     console.warn(`Failed to refresh ${config.label} model parameter controls`, error);
   }
+  if (selectedPremiumModelName(provider) !== selectedModel
+    || selectedPremiumProvider() !== provider) return null;
   setLatestPremiumModelParameterCapability(provider, null);
   applyPremiumReasoningEffortControls(
     provider,
@@ -1470,8 +1488,10 @@ function updatePremiumModelStatusMessageForProvider(provider) {
   if (!allowed) {
     setInlineStatusMessage(
       statusEl,
-      `Testing and browser use remain unavailable until ${config.label} ${selectedModel} is allowed for this scope and saved.`,
-      'error',
+      scopedModelStateReady
+        ? `Testing and browser use remain unavailable until ${config.label} ${selectedModel} is allowed for this scope and saved. The browser choice is retained; select an allowed replacement explicitly if needed.`
+        : 'Checking persisted allowed models. The browser choice is retained.',
+      scopedModelStateReady ? 'error' : null,
     );
     return;
   }
@@ -1498,7 +1518,7 @@ function updatePremiumModelStatusMessageForProvider(provider) {
       : `${config.label} ${selectedModel} failed its last test.`;
     setInlineStatusMessage(
       statusEl,
-      probe.reason ? `${failurePrefix} ${probe.reason}` : failurePrefix,
+      `${probe.reason ? `${failurePrefix} ${probe.reason}` : failurePrefix} Restore provider/model availability or select an allowed replacement explicitly.`,
       'error',
     );
     return;
@@ -1604,7 +1624,12 @@ async function handlePremiumModelSelectionChange(provider) {
   const model = normaliseLocalModelName(
     document.getElementById(config?.modelSelectId)?.value,
   ) || '';
-  setStoredPremiumSelectedModel(provider, model);
+  // Keep an ineligible draft in the form. Only an allowed selection may replace
+  // the active browser model; editing must never select an Ollama fallback.
+  if (getEffectiveLocalModelPreference().activeSource !== provider
+    || isPersistedEffectiveModelAllowed({ provider, model })) {
+    setStoredPremiumSelectedModel(provider, model);
+  }
   invalidateSelectedOpenAiCostSummary();
   if (selectedPremiumProvider() === provider) {
     await refreshPremiumReasoningEffortControls(provider);
@@ -1621,16 +1646,12 @@ async function handlePremiumProviderSelectionChange(value) {
   const provider = normalisePremiumProvider(value) || selectedPremiumProvider();
   const select = document.getElementById('premiumProviderSelect');
   if (select) select.value = provider;
-  setStoredPremiumModelProvider(provider);
+  const wasPremiumActive = Boolean(normalisePremiumProvider(getEffectiveLocalModelPreference().activeSource));
+  const allowed = isPersistedEffectiveModelAllowed(selectedPremiumPoolEntry(provider));
+  if (!wasPremiumActive || allowed) setStoredPremiumModelProvider(provider);
   syncPremiumProviderPanels();
   await refreshPremiumReasoningEffortControls(provider);
 
-  const toggle = document.getElementById('enableOpenAiPremiumToggle');
-  if (toggle?.checked) {
-    const allowed = isPersistedEffectiveModelAllowed(selectedPremiumPoolEntry(provider));
-    toggle.checked = allowed;
-    setLocalPremiumModelUseEnabled(allowed, provider);
-  }
   updatePremiumModelStatusMessages();
   updateOllamaModelStatusMessage();
   invalidateSelectedOpenAiCostSummary();
@@ -1670,8 +1691,6 @@ async function testSelectedPremiumModel(provider) {
     };
   }
 
-  setStoredPremiumSelectedModel(provider, selectedModel);
-  setStoredPremiumModelParameters(provider, modelParameters);
   setInlineStatusMessage(statusEl, `Testing ${config.label} ${selectedModel}...`, null);
 
   try {
@@ -2278,13 +2297,9 @@ function updateSelectedPremiumEligibilityControls() {
     }
   }
   if (toggleEl) {
+    toggleEl.checked = sameLlmSlot(browserChatPrimaryEntry(), selected);
     toggleEl.disabled = !selectedAllowed;
     toggleEl.setAttribute('aria-disabled', String(!selectedAllowed));
-  }
-  if (!selectedAllowed && toggleEl?.checked) {
-    toggleEl.checked = false;
-    setLocalPremiumModelUseEnabled(false);
-    notifyLocalModelPreferenceChanged();
   }
   return selectedAllowed;
 }
@@ -2524,9 +2539,14 @@ function renderWorkflowModelPool() {
 
 function renderModelScopeOverview() {
   const browserPrimary = browserChatPrimaryEntry();
+  const browserStatus = !scopedModelStateReady
+    ? 'checking allowed models; browser preference retained'
+    : !isPersistedEffectiveModelAllowed(browserPrimary)
+      ? 'not allowed for the current scope; select an allowed replacement explicitly or restore its scoped allowance'
+      : 'browser preference';
   setModelScopeSummaryText(
     'browserChatModelSummary',
-    browserPrimary ? `${formatLlmEntry(browserPrimary)} (browser preference)` : 'No usable browser chat model selected',
+    browserPrimary ? `${formatLlmEntry(browserPrimary)} (${browserStatus})` : 'No usable browser chat model selected',
   );
   setModelScopeSummaryText(
     'effectiveScopedModelSummary',
@@ -5131,7 +5151,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const provider = selectedPremiumProvider();
     if (!isPersistedEffectiveModelAllowed(selectedPremiumPoolEntry(provider))) {
       premiumToggle.checked = false;
-      setLocalPremiumModelUseEnabled(false);
       updatePremiumModelStatusMessages();
       refreshActiveSettingsConcernGuidance();
       notifyLocalModelPreferenceChanged();
@@ -5139,6 +5158,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
+    setStoredPremiumSelectedModel(provider, selectedPremiumModelName(provider));
+    setStoredPremiumModelParameters(provider, readPremiumModelParametersFromUi(provider));
     setLocalPremiumModelUseEnabled(true, provider);
     updatePremiumModelStatusMessages();
     refreshActiveSettingsConcernGuidance();
@@ -5570,8 +5591,8 @@ async function loadAndDisplaySettings() {
       syncGmailOutboundRateLimitWriteAccess();
     }
 
-    // The selector should reflect the resolved active model for the provider in scope,
-    // not a stale enabled_llms entry from an older or broader context.
+    // Restore the browser choice independently of the server primary. Eligibility
+    // is checked against the current effective scope after loading.
     const {
       effectiveLlm: displayedEffectiveLlm,
       currentOpenAIModel,
@@ -5587,10 +5608,10 @@ async function loadAndDisplaySettings() {
     currentServerDefaultLlm = buildCanonicalLlmEntry(settings.server_default_llm);
     const localModelPreference = getEffectiveLocalModelPreference();
     const currentOllamaModel = resolveOllamaDropdownSelectionValue(localModelPreference);
-    const preferredOpenAiModel = currentOpenAIModel || localModelPreference.openaiModel || null;
-    const preferredOpenRouterModel = currentOpenRouterModel || localModelPreference.openrouterModel || null;
-    const preferredGeminiModel = currentGeminiModel || localModelPreference.geminiModel || null;
-    const preferredMetaModel = currentMetaModel || localModelPreference.metaModel || null;
+    const preferredOpenAiModel = localModelPreference.openaiModel || currentOpenAIModel || null;
+    const preferredOpenRouterModel = localModelPreference.openrouterModel || currentOpenRouterModel || null;
+    const preferredGeminiModel = localModelPreference.geminiModel || currentGeminiModel || null;
+    const preferredMetaModel = localModelPreference.metaModel || currentMetaModel || null;
     const premiumEnabled = ['openai', 'openrouter', 'gemini', 'meta'].includes(localModelPreference.activeSource);
     const preferredPremiumProvider = normalisePremiumProvider(
       localModelPreference.premiumProvider || localModelPreference.activeSource,
