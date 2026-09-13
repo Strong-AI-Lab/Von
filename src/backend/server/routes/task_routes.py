@@ -479,7 +479,7 @@ def update_task_route(task_concept_id: str) -> ResponseReturnValue:
     """Update a task.
 
     Request body (all fields optional):
-        status: str (pending, in_progress, completed, cancelled, blocked)
+        status: str (pending, in_progress, completed, deployed, cancelled, blocked)
         assignee_concept_id: str
         title: str
         description: str

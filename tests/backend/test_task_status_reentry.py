@@ -34,7 +34,7 @@ def test_reentering_status_replaces_old_value_and_emits_actual_transition(monkey
     monkeypatch.setattr(tasks, "_append_task_history_event", history)
     monkeypatch.setattr(tasks, "maybe_launch_task_status_workflow", launches)
 
-    for status in ("in_progress", "blocked", "in_progress"):
+    for status in ("in_progress", "deployed", "in_progress"):
         assert tasks.update_task_status(doc["concept_id"], status)["status"] == status
         assert values == [status]
     assert history.call_count == launches.call_count == 3
@@ -57,3 +57,17 @@ def test_failed_status_readback_does_not_emit_completion(monkeypatch):
         tasks.update_task_status(doc["concept_id"], "completed")
     repository.update_one.assert_not_called()
     completion.assert_not_called()
+
+
+def test_deployed_transition_and_reopening(monkeypatch):
+    current = {"task_concept_id": "#V#task_deploy", "status": "completed"}
+    monkeypatch.setattr(tasks, "get_task", lambda _: current)
+    update = MagicMock(return_value={**current, "status": "deployed"})
+    monkeypatch.setattr(tasks, "update_task_status", update)
+    monkeypatch.setattr(tasks, "_append_task_history_event", MagicMock())
+    tasks.transition_task(current["task_concept_id"], transition_id="deploy")
+    assert update.call_args.args[:2] == (current["task_concept_id"], "deployed")
+    current["status"] = "deployed"
+    destinations = {item["to_status"] for item in tasks.get_task_transitions(current["task_concept_id"])["transitions"]}
+    assert destinations == {"completed", "pending", "in_progress"}
+    assert "deployed" in tasks.VALID_TASK_STATUSES

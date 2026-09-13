@@ -30,6 +30,7 @@ let _filterTaskSourceId = 'all';
 let _isGlobalTabMode = false;  // True when rendering into global tasks tab
 let _taskDetailState = {};  // taskId -> detail panel state
 let _selectedTaskId = '';
+let _selectionCleared = false;
 let _panelTaskIds = null;
 let _panelLoadGeneration = 0;
 let _bulkTaskVisibility = 'exclude';
@@ -82,7 +83,8 @@ const TASK_EXTERNAL_RESOURCE_ACTION_HREF_PATTERN = /^\/api\/tasks\/[A-Za-z0-9%_-
 const TASK_STATUS_OPTIONS = [
     { value: 'pending', label: 'Pending', icon: '⏳' },
     { value: 'in_progress', label: 'In Progress', icon: '🔄' },
-    { value: 'completed', label: 'Completed', icon: '✅' },
+    { value: 'completed', label: 'Completed', icon: '✅', description: 'Work finished; not necessarily deployed' },
+    { value: 'deployed', label: 'Deployed', icon: '🚀', description: 'Work deployed to its target runtime' },
     { value: 'cancelled', label: 'Cancelled', icon: '❌' },
     { value: 'blocked', label: 'Blocked', icon: '🚫' },
 ];
@@ -988,6 +990,7 @@ function renderGlobalTasksTabContent() {
                     <option value="pending">Pending</option>
                     <option value="in_progress">In Progress</option>
                     <option value="completed">Completed</option>
+                    <option value="deployed">Deployed</option>
                     <option value="cancelled">Cancelled</option>
                     <option value="blocked">Blocked</option>
                 </select>
@@ -1256,7 +1259,7 @@ export async function setCurrentSession(sessionId) {
  * Get the current task count for badge display.
  */
 export function getTaskCount() {
-    return _tasks.filter(t => t.status !== 'completed' && t.status !== 'cancelled').length;
+    return _tasks.filter(t => !['completed', 'deployed', 'cancelled'].includes(t.status)).length;
 }
 
 /**
@@ -1538,6 +1541,7 @@ function getFilteredTasks() {
 }
 
 function ensureSelectedTaskStillValid(filteredTasks = null) {
+    if (_selectionCleared) return;
     const visibleTasks = Array.isArray(filteredTasks) ? filteredTasks : getFilteredTasks();
     if (visibleTasks.length === 0) {
         _selectedTaskId = '';
@@ -1553,7 +1557,7 @@ function renderGlobalTaskSummary(filteredTasks = getFilteredTasks()) {
     const summaryEl = _globalTasksContainer?.querySelector('#globalTaskSummary');
     if (!summaryEl) return;
 
-    const activeCount = filteredTasks.filter((task) => !['completed', 'cancelled'].includes(task.status)).length;
+    const activeCount = filteredTasks.filter((task) => !['completed', 'deployed', 'cancelled'].includes(task.status)).length;
     const sourcedCount = filteredTasks.filter((task) => task.task_source_id).length;
     const typedCount = filteredTasks.filter((task) => Array.isArray(task.task_type_ids) && task.task_type_ids.length > 0).length;
     const selectedTask = filteredTasks.find((task) => getTaskId(task) === _selectedTaskId) || null;
@@ -1879,7 +1883,7 @@ function renderTaskList() {
         html += '</div>';
     } else {
         const grouped = groupTasksByStatus(filteredTasks);
-        const boardStatuses = ['in_progress', 'pending', 'blocked', 'completed', 'cancelled'];
+        const boardStatuses = ['in_progress', 'pending', 'blocked', 'completed', 'deployed', 'cancelled'];
         html = '<div class="task-board-view">';
         boardStatuses.forEach((status) => {
             html += renderTaskGroup(status, grouped[status] || []);
@@ -1922,7 +1926,7 @@ function renderTaskGroup(status, tasks) {
         <div class="task-group" data-status="${status}">
             <div class="task-group-header">
                 <span class="task-group-icon">${statusInfo.icon}</span>
-                <span class="task-group-label">${statusInfo.label}</span>
+                <span class="task-group-label" title="${escapeHtml(statusInfo.description || statusInfo.label)}">${statusInfo.label}</span>
                 <span class="task-group-count">(${tasks.length})</span>
             </div>
             <div class="task-group-body">
@@ -2776,6 +2780,7 @@ function renderTaskDetailsPanel(task, detailState) {
 
     return `
         <div class="task-detail-panel" data-task-id="${escapeHtml(taskId)}">
+            ${renderTaskDelegation(detailTask)}
             ${renderTaskWorkProduct(detailTask, detailState)}
             <div class="task-detail-section">
                 <h4>Editable task context</h4>
@@ -3055,7 +3060,8 @@ function renderTaskInspector(task, detailState) {
                     <p>${escapeHtml(detailTask.description || 'No description yet.')}</p>
                 </div>
                 <div class="task-inspector-badges">
-                    <span class="task-status-badge">${escapeHtml(getStatusInfo(detailTask.status).label)}</span>
+                    ${renderTaskDelegation(detailTask)}
+                    <span class="task-status-badge" title="${escapeHtml(getStatusInfo(detailTask.status).description || getStatusInfo(detailTask.status).label)}">${escapeHtml(getStatusInfo(detailTask.status).label)}</span>
                     <span class="task-priority-chip">${escapeHtml(getPriorityInfo(detailTask.priority).label)}</span>
                     ${renderTaskExecuteWithVonButton(detailTask, 'task-inspector-execute-btn')}
                     ${renderTaskDiscussButton(detailTask, 'task-inspector-discuss-btn')}
@@ -3266,11 +3272,35 @@ function renderGlobalTaskInspector() {
     }
 
     const detailState = getTaskDetailState(_selectedTaskId);
-    inspectorEl.innerHTML = renderTaskInspector(selectedTask, detailState);
+    inspectorEl.innerHTML = `<button type="button" class="task-clear-selection-btn" aria-label="Close task details">Close task details ×</button>${renderTaskInspector(selectedTask, detailState)}`;
+    inspectorEl.querySelector('.task-clear-selection-btn').addEventListener('click', clearTaskSelection);
+    _globalTasksContainer.onkeydown = (event) => {
+        if (!_selectedTaskId || event.key !== 'Escape' || event.defaultPrevented
+            || event.target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
+        event.preventDefault();
+        clearTaskSelection();
+    };
+}
+
+function clearTaskSelection() {
+    const previousId = _selectedTaskId;
+    _selectionCleared = true;
+    _selectedTaskId = '';
+    renderTaskList();
+    const previousCard = [...(_taskListEl?.querySelectorAll('.task-item') || [])]
+        .find((item) => item.dataset.taskId === previousId);
+    (previousCard || _taskListEl)?.focus({ preventScroll: true });
+}
+
+function renderTaskDelegation(task) {
+    return task?.assignee_concept_id === '#V#codex_dgx'
+        ? '<span class="task-source-chip task-delegation-chip" title="Assigned to Codex DGX; execution has not necessarily started">Delegated to Codex DGX</span>'
+        : '';
 }
 
 async function selectTask(taskId, { loadDetails = true } = {}) {
     if (!taskId) return;
+    _selectionCleared = false;
     _selectedTaskId = taskId;
     renderTaskList();
     if (!loadDetails) return;
@@ -3325,7 +3355,7 @@ function renderTaskItem(task) {
     let dueDateHtml = '';
     if (task.due_date) {
         const dueDate = new Date(task.due_date);
-        const isOverdue = dueDate < new Date() && task.status !== 'completed' && task.status !== 'cancelled';
+        const isOverdue = dueDate < new Date() && !['completed', 'deployed', 'cancelled'].includes(task.status);
         dueDateHtml = `
             <span class="task-due-date ${isOverdue ? 'overdue' : ''}" title="Due date">
                 📅 ${dueDate.toLocaleDateString()}
@@ -3392,12 +3422,13 @@ function renderTaskItem(task) {
                 <span class="task-priority" title="Priority: ${priorityInfo.label}">${priorityInfo.icon}</span>
                 ${referenceCodeHtml}
                 ${titleHtml}
-                <span class="task-status-badge" title="Status">${statusInfo.icon} ${escapeHtml(statusInfo.label)}</span>
+                <span class="task-status-badge" title="${escapeHtml(statusInfo.description || statusInfo.label)}">${statusInfo.icon} ${escapeHtml(statusInfo.label)}</span>
             </div>
             <div class="task-item-body">
                 <p class="task-description">${truncatedDescription}</p>
                 ${typeChipsHtml}
                 ${organisationChipHtml}
+                ${renderTaskDelegation(task)}
                 ${bulkCollectionChipsHtml}
                 ${labelsHtml}
                 ${componentsHtml}
