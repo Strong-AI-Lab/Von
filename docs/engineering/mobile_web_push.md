@@ -124,7 +124,10 @@ was `granted`; the real `PushManager.subscribe` call returned
 `AbortError: Registration failed - permission denied`. No subscription, provider
 send, installed app, background/closed-app alert, or device display was verified.
 Evidence is retained in `.run/web-push-smoke/receipt.json` and `controls.png` in the
-task worktree. An isolated headed attempt failed because the retained Xvfb binary
+task worktree. The first fixture reported Git HEAD at request time rather than
+capturing loaded-source provenance at startup; its receipt is diagnostic evidence
+only, not acceptance bound to the final commit. The harness now captures startup
+provenance. An isolated headed attempt failed because the retained Xvfb binary
 crashed starting display `:97`; no other task's display/profiles were repurposed.
 
 **Merge decision: not ready.** The task requires an actual supported push path;
@@ -140,6 +143,10 @@ Bounded operator preparation needed under the existing task authority:
    profiles belong to other tasks. Place bridge requests/receipts under this
    worktree's `.run/notification-browser/`; allocate unused localhost ports and
    verify roots, SHA and actor scopes through health/auth read-back.
+   First stop the task-owned `tests/browser/webPushFixture.py` process listening
+   on 127.0.0.1:5077 after verifying its command and checkout root. The worker's
+   command session ended but the listener remained outside its visible PID
+   namespace; no unrelated process or port was killed.
 2. Supply an isolated working headed display and a browser/profile supporting
    actual Web Push. Keep test VAPID/encryption keys outside the coding checkout;
    permit its normal provider transport. Browser fixture login must preserve

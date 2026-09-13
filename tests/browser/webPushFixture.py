@@ -31,6 +31,16 @@ from src.backend.security import access_control
 
 
 def create_fixture():
+    source_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+    ).strip()
+    source_dirty = bool(
+        subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=ROOT,
+            text=True,
+        ).strip()
+    )
     key = ec.generate_private_key(ec.SECP256R1())
     os.environ["VON_WEB_PUSH_PRIVATE_KEY"] = base64.urlsafe_b64encode(
         key.private_bytes(
@@ -97,10 +107,8 @@ def create_fixture():
     def health():
         return jsonify(
             fixture="web-push-synthetic",
-            source_commit=subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-            ).strip(),
-            candidate_dirty=True,
+            source_commit=source_commit,
+            candidate_dirty=source_dirty,
             database="in-memory",
             models="disabled",
         )
