@@ -13,8 +13,9 @@ try:
         authorised_task,
         capability_context,
         fingerprint,
-        resolve_execution_settings,
         referenced_tasks,
+        resolve_execution_settings,
+        retry_policy,
         stage_file_copy_evidence,
         write_json,
     )
@@ -23,8 +24,9 @@ except ImportError:
         authorised_task,
         capability_context,
         fingerprint,
-        resolve_execution_settings,
         referenced_tasks,
+        resolve_execution_settings,
+        retry_policy,
         stage_file_copy_evidence,
         write_json,
     )
@@ -139,6 +141,20 @@ def context_for(config, api, message):
     tasks = [item["task"] for item in lookup["results"] if item["status"] == "found"]
     for item in lookup["results"]:
         if item["status"] == "found":
+            retained = retained_task_state(config, item["task_id"])
+            if retained:
+                item["retained_attempt"] = {
+                    key: retained.get(key)
+                    for key in (
+                        "attempt",
+                        "phase",
+                        "result",
+                        "blocker",
+                        "worktree",
+                        "finished_at",
+                        "execution_settings",
+                    )
+                }
             try:
                 item["assignment_context"] = api.inputs(item["task"])
             except Exception as exc:
@@ -161,6 +177,11 @@ def context_for(config, api, message):
             "task_selection": "Accessible native assignments referenced by these messages; proximity is not a request to resume them.",
         },
     }
+
+
+def retained_task_state(config, task_id):
+    path = Path(config["state_root"]) / "tasks" / (fingerprint(task_id)[:16] + ".json")
+    return json.loads(path.read_text()) if path.exists() else {}
 
 
 def validate_result(value, context):
@@ -323,7 +344,11 @@ def prepare_attachment_inputs(config, context, run):
         inputs.append(item)
     context["attachment_inputs"] = inputs
     if len(references) > 8:
-        inputs.append({"error": "Only the first eight attachments were prepared in this run; remaining references have not been inspected."})
+        inputs.append(
+            {
+                "error": "Only the first eight attachments were prepared in this run; remaining references have not been inspected."
+            }
+        )
 
 
 def launch(config, state, lock_fd):
@@ -496,11 +521,29 @@ def finish(config, api, state, path):
     if task_id:
         if result["action"] == "resume_task":
             state["effect_stage"] = "task_resume"
+            retained = retained_task_state(config, task_id)
+            blocker = (
+                retry_policy.retain_blocker(config, retained) if retained else None
+            )
+            # Freeze before reopen/delivery; a lost acknowledgement must never
+            # bind the old request to a newer failed attempt on the next poll.
+            if "retry_intent" not in state:
+                state["retry_intent"] = (
+                    {
+                        "attempt": blocker["attempt"],
+                        "binding": blocker["binding"],
+                        "reason": result["answer"],
+                    }
+                    if blocker
+                    else None
+                )
+                write_json(path, state)
             # This exact follow-up is the new coding/deployment authority carrier.
             followup = {
                 "message_id": message["message_id"],
                 "content": message["content"],
                 "deployment_requested": result["deployment_requested"],
+                **({"retry": state["retry_intent"]} if state["retry_intent"] else {}),
                 **(
                     {"attachments": message["attachments"]}
                     if message.get("attachments")
@@ -508,6 +551,10 @@ def finish(config, api, state, path):
                 ),
             }
             prior = task_followup(config, task_id)
+            if "message:" + message["message_id"] in retained.get(
+                "consumed_retry_tokens", []
+            ):
+                state["resume_applied"] = True
             if not state.get("resume_applied"):
                 if (
                     prior
@@ -694,7 +741,9 @@ def tick(config, api, lock_fd):
             write_json(path, state)
         if state["phase"] == "reporting":
             finish_or_retain(config, api, state, path)
-            return True
+            # A retained delivery failure uses no model and must not prevent
+            # independent coding tasks from making progress on this poll.
+            return state["phase"] == "done"
     pending = new_messages(config, api)
     if not pending:
         return False
