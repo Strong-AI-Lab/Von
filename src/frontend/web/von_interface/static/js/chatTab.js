@@ -3,7 +3,7 @@ import { initialiseCompactChatComposer, isCompactComposer, resizeCompactDraft, s
 import { updateExecutionCost } from './components/executionCost.js';
 import { canUseWorkflowStudio } from './workflowStudioAccess.js';
 import { createChatSteeringControls } from './components/chatSteeringControls.js';
-import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows } from './components/conversationCatalogue.js';
+import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows, catalogueSearchActive, rankCatalogueSearchRows } from './components/conversationCatalogue.js';
 import { catalogueHasMore } from './components/conversationCatalogue.js';
 import { profileButton, participantAvatar, participantIdentityAvatar } from './components/participantProfile.js';
 import { setButtonLabel } from './utils/buttonLabel.js';
@@ -27357,7 +27357,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     const unreadBadge = document.getElementById('conversationUnreadBadge');
     const unreadCount = [...canonicalSessions, ...directConversationRows()].filter(row => !isConversationHidden(row.session_id) && row.shared_unread_count > 0).length;
     if (unreadBadge) { unreadBadge.hidden = !unreadCount; unreadBadge.textContent = `${unreadCount}${catalogueHasMore() ? '+' : ''}`; unreadBadge.setAttribute('aria-label', `${catalogueHasMore() ? 'At least ' : ''}${unreadCount} unread conversations`); }
-    if (canonicalSessions.length === 0 && directConversationRows().length === 0) {
+    if (canonicalSessions.length === 0 && directConversationRows().length === 0 && !catalogueSearchActive()) {
         renderChatSessionTabsPlaceholder('empty');
         mountCatalogueControls(container);
         lastRenderedSessionCount = 0;
@@ -27417,7 +27417,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         recentWindowDays: conversationHistorySettings.recentWindowDays,
         showAll: false
     });
-    let visibleSessions = Array.isArray(filteredResult.sessionsToRender)
+    let visibleSessions = catalogueSearchActive() ? sessionsAfterHiddenFilter : Array.isArray(filteredResult.sessionsToRender)
         ? filteredResult.sessionsToRender
         : [];
     const newestAgentSessionId = agentCreatedSessionVisibilityState.newestVisibleSessionId;
@@ -27502,7 +27502,9 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             return !pinnedSessionIdsInFilteredOrder.has(sid);
         })
     ];
-    const orderedVisibleSessions = [...pinnedSessions, ...unpinnedSessions];
+    const orderedVisibleSessions = catalogueSearchActive()
+        ? rankCatalogueSearchRows(visibleSessions)
+        : [...pinnedSessions, ...unpinnedSessions];
 
     container.hidden = false;
     const focusedId = container.contains(document.activeElement) ? document.activeElement?.closest('[data-session-id]')?.dataset.sessionId : null;
