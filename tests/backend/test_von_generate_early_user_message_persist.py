@@ -146,6 +146,9 @@ def test_generate_retains_native_image_only_and_mixed_output(app, recorder, monk
         def text(ident, value):
             return {"type": "message", "id": ident, "content": [{"type": "output_text", "text": value}]}
         provider_items = [text("before", "Before."), *provider_items, text("after", "After.")]
+    provider_items.append({"type": "message", "id": "empty-final", "content": [
+        {"type": "output_text", "text": ""},
+    ]})
     parts = openai_visible_parts({"id": "resp-route", "model": "fixture", "output": provider_items})
     monkeypatch.setattr(images, "store_image", lambda **kw: {
         "concept_id": "#V#route-image", **images.inspect_image(data), "provenance": kw["provenance"]})
@@ -167,6 +170,8 @@ def test_generate_retains_native_image_only_and_mixed_output(app, recorder, monk
     expected = ["text_block", "image", "text_block"] if mixed else ["image"]
     visible = [e for e in body["display_elements"]["elements"] if e["channel"] == "screen"]
     assert [e["element_type"] for e in visible] == expected
+    assert not any(issue["category"] == "display_elements"
+                   for issue in body["turn_output_health"]["issues"])
     saved = recorder.assistant_message_calls[-1]["message"]
     assert saved["content_parts"] == body["content_parts"]
     assert saved["image_attachments"][0]["sha256"] == images.inspect_image(data)["sha256"]

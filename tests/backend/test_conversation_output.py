@@ -103,6 +103,31 @@ def test_mixed_output_retains_order_pixels_identity_and_private_provenance(
     )
 
 
+@pytest.mark.parametrize("mixed", [False, True])
+def test_empty_provider_text_does_not_invalidate_retained_image_display(
+    retained_store, mixed
+):
+    parts = output.retain_parts(
+        output.openai_visible_parts(response(mixed=mixed)),
+        actor="#V#owner", turn_id="with-empty-text",
+    )
+    parts.extend([
+        {"kind": "text", "part_id": "empty", "version": 1, "text": ""},
+        {"kind": "text", "part_id": "whitespace", "version": 1, "text": " \n"},
+    ])
+    contract = build_turn_display_elements(
+        response_text="BeforeAfter" if mixed else "",
+        presenter_channels=None, content_parts=parts,
+    )
+
+    assert validate_turn_display_elements(contract) == (True, [])
+    visible = [e for e in contract["elements"] if e["channel"] == "screen"]
+    assert [e["element_type"] for e in visible] == (
+        ["text_block", "image", "text_block"] if mixed else ["image"]
+    )
+    assert len(parts) == (5 if mixed else 3)  # Canonical source is unchanged.
+
+
 @pytest.mark.parametrize(
     "item",
     [

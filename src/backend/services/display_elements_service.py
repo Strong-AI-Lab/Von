@@ -3625,6 +3625,10 @@ def build_turn_display_elements(
             seen.add(part_id)
             kind = part.get("kind")
             payload = {"text": str(part.get("text") or "")}
+            if kind == "text" and part.get("version") == 1 and not payload["text"].strip():
+                # Completed image calls may be followed by an empty message.
+                # Preserve that source part without creating an invalid block.
+                continue
             element_type = "text_block"
             if kind == "image" and part.get("version") == 1:
                 from .conversation_output_service import public_asset
