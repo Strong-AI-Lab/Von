@@ -5,6 +5,10 @@
 - Task: `#V#task_agent_67fc1049d5f662f4bf9035ce34ac6819`
 - Parent: `#V#task_agent_5e35622e9d063ef435abd262bbbc81c2`
 
+The initial observations below are retained as historical evidence. The later
+verification at the end of this record resolves the context/image handoff;
+the earlier access failures do not describe that later run.
+
 ## Observed context failure
 
 The supplied run context contains the repair task description but no parent task
@@ -103,3 +107,81 @@ read the owner's storage or change memberships. Supply the scoped badge/message
 observations above through an authorised context path. No public DGX deployment
 was requested by this task. Worker activation is separate from source publication
 and must not be inferred from a merged commit.
+
+## Later verification: resolved context and bounded unread diagnosis
+
+Run `53fa5fbcf91e49f4aa0340826323ece2`, 13 September 2026, received a successful
+canonical parent-task lookup with its title, unchanged `#V#codex_dgx` assignee,
+completed status and both evidence comments. Its native attachment enumeration
+succeeded with zero attachments. The source conversation remains unavailable;
+that does not invalidate these successful task and file reads. The controller
+reported its worker script and backend task-service module in the same versioned
+release, `b4106c690d910ac028c231577ac9c26c8d11475c`.
+
+The actual screenshot was viewed through the task-scoped source-image delegation.
+Its 103,687 bytes hash to the original SHA-256 above, and its dimensions are
+963×433. It shows the old Codex DGX missing-context reply, including text referring
+to 17/54; it does **not** show the badge elements or their endpoints. This is a
+referenced file copy, not a native attachment on the parent task. This launch
+therefore verifies the previously blocked task/image acceptance path.
+
+The separately staged message-state snapshot is file copy
+`#V#computer_file_copy_66bb182609c045b6af2f5a9e12be1669`, SHA-256
+`5a83ebbfaae8e307b7d687a2679926d034cc2203fce2764411cbf86dc3e9c3d7`
+(199,846 bytes, independently verified). It was observed at
+2026-09-13T18:56:48.071490Z for Michael and the selected SAIL organisation.
+Applying the exchange unread predicate to the supplied records gives:
+
+| Exchange | Unique messages | Incoming read | Incoming unread | Outgoing |
+| --- | ---: | ---: | ---: | ---: |
+| Codex VS Code | 186 | 144 | 0 | 42 |
+| Codex DGX | 240 | 224 | 2 | 14 |
+
+Every supplied record has the expected exact two-party participant set and
+organisation. The two unread DGX messages were sent at 18:53:26 and 18:55:02 UTC;
+they are the newest two records. Exact contributing IDs and the read/outgoing
+partitions are retained in the private run evidence
+`.run/evidence/context-resolution-20260913/reconciliation.json`, rather than
+publishing the message inventory. These are snapshot-derived counts, not an
+observed catalogue response or badge DOM. The snapshot has no historical read
+receipts, deletion flags or `created_at` cursor fields. It cannot reconstruct
+which messages contributed to the earlier 17/54, prove historical pagination
+positions, or establish a live stale-count defect. No read flags were changed.
+
+Source inspection at `fac8dcb072ce32d8e98b7343a2075a96667fa059` must be understood
+as repository behaviour, not a public served-revision claim:
+
+- `message_catalogue_service` counts recipient-addressed messages whose
+  `read_by` excludes the viewer, grouped by exact participants and organisation,
+  after its access/deletion query. It does not count outgoing messages merely
+  because their `read_by` is empty.
+- `get_exchange` initially returns 50 messages. `messagePanel` labels incoming
+  unread contributions and acknowledges visible IDs only. Opening a conversation
+  therefore need not clear its count: offscreen and unloaded contributions remain
+  unread. Receipt failure/partial success keeps recoverable indicators, and a
+  confirmed read dispatches the catalogue refresh event.
+- PR #675 already supplies most-recent-unread navigation across older pages.
+  Its implementation must not be duplicated in a follow-up.
+- The catalogue's Unread filter selects conversation rows. The message pane has
+  no unread-only contribution filter. This is a concrete remaining gap against
+  Michael's request for filterable individual unread messages, independent of
+  any claim about the historical counts.
+
+Validation on that source revision: 88 tests passed across
+`test_codex_von_worker.py`, `test_message_exchange_catalogue.py` and
+`test_message_routes.py`; 24 tests passed across `messageExchangeView.test.js`
+and `unifiedConversationCatalogue.test.js`. These include omitted-reference,
+delegated-image, scope, paging, refresh and read-transition cases. The existing
+`messageUnreadNavigation.cjs` browser fixture passed at 390px and 1280px,
+traversing two earlier-page cursors and focusing the most recent unread message.
+It disables the read observer to isolate navigation; it does not prove live read
+persistence. Screenshots and results are in the private run evidence directory.
+
+Handoff decision changes — actual parent/image acceptance is now verified and
+the supplied snapshot has a concrete read-state reconciliation. The historical
+17/54 identity set remains unknown; it is not a reason to repeat the resolved
+image-access repair. The controller handoff contains a bounded contribution-filter
+task proposal with scope, refresh, paging, read-transition and browser acceptance
+cases, and asks the controller to check for equivalent work before creation.
+This coding run did not create a native task or change live message state.
+This update changes evidence only; no public deployment is requested or claimed.
