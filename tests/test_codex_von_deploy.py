@@ -401,3 +401,42 @@ Server(('127.0.0.1',int(sys.argv[1])),Handler).serve_forever()
         subprocess.run(
             ["bash", "run.sh", "stop", "-Port", str(port)], cwd=checkout, check=True
         )
+
+
+@pytest.mark.parametrize('outcome', ['deployed', 'rolled_back', 'recovery_failed'])
+def test_maintenance_is_published_before_stop_and_cleared_only_after_readiness(
+    deployment, monkeypatch, outcome
+):
+    import json
+    config, previous, target, events, receipt_path = deployment
+    config.update(public_status_root=str(receipt_path.parent),
+                  maintenance_agent='Codex DGX', maintenance_estimate_seconds=180)
+    status_path = receipt_path.parent / 'maintenance.json'
+
+    def stop_and_deploy(**kwargs):
+        record = json.loads(status_path.read_text())
+        assert record['state'] == 'planned'
+        assert record['agent'] == 'Codex DGX'
+        assert record['estimated_ready_at'] is not None
+        events.append('planned-before-stop')
+        if outcome != 'deployed':
+            raise deployer.runtime.DeploymentError('fixture failure')
+
+    def verified(*args):
+        assert json.loads(status_path.read_text())['state'] == 'planned'
+        events.append('verified-ready')
+        return {'commit': target}
+
+    monkeypatch.setattr(deployer.runtime, 'deploy', stop_and_deploy)
+    monkeypatch.setattr(deployer, 'verify', verified)
+    if outcome == 'recovery_failed':
+        def recovery_fails(*args):
+            raise deployer.runtime.DeploymentError('fixture recovery failure')
+        monkeypatch.setattr(deployer, 'recover', recovery_fails)
+    result = deployer.execute(config, target, receipt_path)
+    assert result['status'] == outcome
+    record = json.loads(status_path.read_text())
+    assert record['state'] == ('failed' if outcome == 'recovery_failed' else 'ready')
+    assert record['estimated_ready_at'] is None
+    if outcome == 'deployed':
+        assert events == ['planned-before-stop', 'verified-ready']
