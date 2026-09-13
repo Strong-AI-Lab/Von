@@ -1,7 +1,10 @@
 /** Message-source adapter for the existing conversation tray. */
+import { copyTextWithClipboardFallback } from '../utils/copyJsonButtonState.js';
+import { buildMessageStreamReference } from '../utils/messageStreamReference.js';
+import { showToast } from '../utils/toast.js';
 import { getJson, postJson } from '../apiService.js';
 import { getSessionScopedOrgId } from '../utils/sessionScopedStorage.js';
-import { participantAvatar, profileButton } from './participantProfile.js';
+import { participantAvatar, openParticipantProfile } from './participantProfile.js';
 import { openMessageExchange, refreshOpenMessageExchange, showMessageComposer, resetMessagePanelContext } from './messagePanel.js';
 
 let rows = [];
@@ -104,9 +107,9 @@ export async function selectMessageConversation(row) {
     await openMessageExchange(row);
 }
 
-export function renderMessageConversationRow(row, { selected = false, pinned = false, togglePin, hide } = {}) {
-    const el = document.createElement('button');
-    el.type = 'button';
+export function renderMessageConversationRow(row, { selected = false, pinned = false, togglePin, hide, hidden = false, openMenu } = {}) {
+    const el = document.createElement('div');
+    el.tabIndex = 0;
     el.className = `chat-session-tab message-conversation-row${selected ? ' is-active' : ''}${row.shared_unread_count ? ' has-unread' : ''}`;
     el.dataset.sessionId = row.session_id;
     el.dataset.trayInitial = Array.from(row.session_name || 'V')[0];
@@ -139,21 +142,66 @@ export function renderMessageConversationRow(row, { selected = false, pinned = f
     el.setAttribute('aria-label', el.title);
     el.append(header, meta, preview);
     el.addEventListener('click', () => void selectMessageConversation(row));
-    el.addEventListener('contextmenu', event => {
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'conversation-menu-trigger';
+    trigger.textContent = '⋯';
+    trigger.setAttribute('aria-label', `Conversation actions for ${row.session_name}`);
+    trigger.setAttribute('aria-haspopup', 'menu');
+    header.append(trigger);
+    const open = async event => {
         event.preventDefault();
-        const menu = document.createElement('dialog');
-        menu.className = 'participant-profile-dialog';
-        const action = (label, fn) => {
-            const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
-            b.onclick = () => { menu.close(); fn(); }; menu.append(b);
-        };
-        action(pinned ? 'Unpin conversation' : 'Pin conversation', togglePin);
-        action('Hide conversation', hide);
-        row.participant_ids.forEach(id => menu.append(profileButton(id, profiles.get(id)?.display_name || id)));
-        action('Close', () => {});
-        document.body.append(menu); menu.addEventListener('close', () => menu.remove()); menu.showModal();
+        event.stopPropagation();
+        const showMenu = openMenu || (await import('../chatTab.js')).openChatSessionMenu;
+        if (!el.isConnected) return;
+        const rect = trigger.getBoundingClientRect();
+        showMenu(event.type === 'contextmenu' ? event.clientX : rect.left,
+            event.type === 'contextmenu' ? event.clientY : rect.bottom,
+            buildMessageConversationMenuItems(row, { pinned, togglePin, hide, hidden }),
+            { returnFocus: trigger, focusFirst: true });
+    };
+    trigger.addEventListener('click', open);
+    el.addEventListener('contextmenu', open);
+    el.addEventListener('keydown', event => {
+        if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) void open(event);
+        else if (event.target === el && (event.key === 'Enter' || event.key === ' ')) {
+            event.preventDefault(); void selectMessageConversation(row);
+        }
     });
     return el;
+}
+
+export function buildMessageConversationMenuItems(row, { pinned, togglePin, hide, hidden } = {}) {
+    const items = [
+        { label: 'Open conversation', onClick: () => void selectMessageConversation(row) },
+        { label: 'Copy Concept ID', onClick: async () => {
+            try {
+                const result = await postJson('/api/messages/exchange/reference', {
+                    participant_ids: row.participant_ids,
+                    organisation_concept_id: row.organisation_concept_id ?? null,
+                });
+                if (!result?.success || !result.concept_id?.startsWith('#V#')) throw new Error('Unavailable');
+                const copied = await copyTextWithClipboardFallback(result.concept_id);
+                showToast(copied ? 'Copied conversation Concept ID.' : 'Failed to copy Concept ID.', copied ? 'success' : 'error');
+            } catch (_) { showToast('Conversation Concept ID is unavailable. Try again.', 'error'); }
+        } },
+        { label: 'Copy conversation reference', onClick: async () => {
+            const reference = buildMessageStreamReference({
+                currentUserId: row.viewer_id, otherUserId: row.other_participant_ids[0] || row.viewer_id,
+                participantIds: row.participant_ids, organisationConceptId: row.organisation_concept_id,
+                displayName: row.session_name,
+            });
+            const copied = reference && await copyTextWithClipboardFallback(JSON.stringify(reference, null, 2));
+            showToast(copied ? 'Copied conversation reference.' : 'Failed to copy conversation reference.', copied ? 'success' : 'error');
+        } },
+    ];
+    if (togglePin) items.push({ label: pinned ? 'Unpin conversation' : 'Pin conversation', onClick: togglePin });
+    if (hide) items.push({ label: hidden ? 'Unhide conversation' : 'Hide conversation', onClick: hide });
+    row.participant_ids.forEach(id => items.push({
+        label: `Profile: ${profiles.get(id)?.display_name || id}`,
+        onClick: () => void openParticipantProfile(id),
+    }));
+    return items;
 }
 
 export function mountCatalogueControls(container) {
