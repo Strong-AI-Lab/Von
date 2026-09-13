@@ -15,7 +15,7 @@ const assert = require('node:assert/strict');
         '/js/tabNavigation.js': 'export const activateTab=()=>{};',
         '/js/utils/toast.js': 'export const showToast=()=>{};',
         '/js/markdownUtils.js': 'export const renderMarkdownViaServer=async()=>"";',
-        '/js/utils/nameSelection.js': 'export const selectBestNameForContext=()=>null;',
+        '/js/utils/nameSelection.js': 'export const selectBestNameForContext=()=>null;export const selectShortestNameForContext=()=>null;',
         '/js/components/taskRunActivity.js': 'export const openTaskRunActivity=()=>{};',
     };
     const server = http.createServer((req, res) => {
