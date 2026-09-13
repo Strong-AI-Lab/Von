@@ -1,4 +1,19 @@
 import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './conversationNavigation.js';
+import { bindAttachmentComposer, imageItems, imagesBlocked, renderImageAttachments, removeSentAttachments } from '../utils/conversationImages.js';
+import { getWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
+let refreshReplyAttachments = () => {};
+let refreshNewAttachments = () => {};
+const attachmentSignatures = new Map();
+function attachmentDraftChanged(scope) {
+    const key = attachmentScope(scope);
+    const signature = JSON.stringify(imageItems(key).map(item => item.descriptor?.concept_id || item.name));
+    if (attachmentSignatures.has(key) && attachmentSignatures.get(key) !== signature) setDeliveryAttempt(scope, null);
+    attachmentSignatures.set(key, signature);
+    renderComposePendingUi(scope);
+}
+function attachmentScope(scope) {
+    return `messages:${scope}:${scope === 'reply' ? (exchangeScope() || _currentConversationUserId) : readSessionActorConceptId()}`;
+}
 import { resizeCompactDraft, shouldSubmitComposerKey } from './compactComposer.js';
 import { initializeConceptAutocomplete } from './conceptAutocomplete.js';
 import { simpleMarkdownToHtml } from '../markdownUtils.js';
@@ -92,6 +107,7 @@ export async function openMessageExchange(row) {
         resizeCompactDraft(input);
         input.placeholder = `Reply to ${row.session_name}`;
     }
+    refreshReplyAttachments();
     const compose = _messagesContainer?.querySelector('#messageComposeArea');
     let destination = compose?.querySelector('.message-reply-destination');
     if (compose && !destination) { destination = document.createElement('p'); destination.className = 'message-reply-destination'; compose.prepend(destination); }
@@ -453,6 +469,14 @@ function renderMessagesTabContent() {
         </div>
     `;
 
+    refreshReplyAttachments = bindAttachmentComposer(
+        _messagesContainer.querySelector('#messageComposeArea'), _messagesContainer.querySelector('#messageInput'),
+        () => attachmentScope(COMPOSE_SCOPE_REPLY), () => ({[WINDOW_SESSION_HEADER]: getWindowSessionId()}),
+        () => attachmentDraftChanged(COMPOSE_SCOPE_REPLY));
+    refreshNewAttachments = bindAttachmentComposer(
+        _messagesContainer.querySelector('.message-modal-body'), _messagesContainer.querySelector('#newMessageContent'),
+        () => attachmentScope(COMPOSE_SCOPE_NEW_MESSAGE), () => ({[WINDOW_SESSION_HEADER]: getWindowSessionId()}),
+        () => attachmentDraftChanged(COMPOSE_SCOPE_NEW_MESSAGE));
     _replySendFailureState = null;
     _newMessageSendFailureState = null;
 
@@ -1140,6 +1164,11 @@ async function renderMessages() {
         author.prepend(participantAvatar(profile));
     });
 
+    contentEl.querySelectorAll('.message-bubble').forEach(bubble => {
+        const msg = _currentMessages.find(m => m.concept_id === bubble.dataset.contributionId);
+        const attachments = msg?.concept_data?.metadata?.attachments || [];
+        renderImageAttachments(bubble.querySelector('.message-content'), attachments.map(a => ({...a, message_id:msg.concept_id})));
+    });
     const messageContentEls = Array.from(contentEl.querySelectorAll('.message-list .message-content'));
     messageContentEls.forEach((messageContentEl) => {
         // Preserve Markdown structure while decorating text nodes.
@@ -1197,7 +1226,11 @@ function renderComposePendingUi(scope) {
     if (!button) return;
 
     const pending = isComposePending(scope);
-    button.disabled = pending || (scope === COMPOSE_SCOPE_REPLY && _exchange?.other_participant_ids?.length > 1);
+    if (scope === COMPOSE_SCOPE_REPLY) {
+        const composer = _messagesContainer.querySelector('#messageComposeArea');
+        if (composer) composer.dataset.hasAttachments = String(imageItems(attachmentScope(scope)).length > 0);
+    }
+    button.disabled = pending || imagesBlocked(attachmentScope(scope)) || (scope === COMPOSE_SCOPE_REPLY && _exchange?.other_participant_ids?.length > 1);
     button.textContent = pending ? 'Sending…' : 'Send';
     button.setAttribute('aria-busy', pending ? 'true' : 'false');
 
@@ -1646,7 +1679,7 @@ function syncVisibleReplyDeliveryAttempt() {
         return;
     }
 
-    if (!draft.trim()) {
+    if (!draft.trim() && !imageItems(attachmentScope(COMPOSE_SCOPE_REPLY)).length) {
         setDeliveryAttempt(COMPOSE_SCOPE_REPLY, null);
         return;
     }
@@ -2130,7 +2163,7 @@ function buildSendPayload({
         ? failureState.organisationOptions
         : [];
     const selectedOrganisationConceptId = String(
-        failureState?.selectedOrganisationConceptId || (scope === COMPOSE_SCOPE_REPLY ? _exchange?.organisation_concept_id : '') || '',
+        failureState?.selectedOrganisationConceptId || (scope === COMPOSE_SCOPE_REPLY ? _exchange?.organisation_concept_id : '') || getSessionScopedOrgId() || '',
     ).trim();
 
     if (organisationOptions.length > 0 && !selectedOrganisationConceptId) {
@@ -2142,6 +2175,8 @@ function buildSendPayload({
         return null;
     }
 
+    const attachmentIds = imageItems(attachmentScope(scope)).map(item => item.descriptor?.concept_id).filter(Boolean);
+    if (imagesBlocked(attachmentScope(scope))) return null;
     const deliveryIdempotencyKey = getOrCreateDeliveryIdempotencyKey({
         scope,
         recipientIds,
@@ -2155,6 +2190,7 @@ function buildSendPayload({
     return {
         recipient_ids: recipientIds,
         content,
+        ...(attachmentIds.length ? {attachment_ids: attachmentIds} : {}),
         delivery_idempotency_key: deliveryIdempotencyKey,
         ...(selectedOrganisationConceptId
             ? { organisation_concept_id: selectedOrganisationConceptId }
@@ -2181,7 +2217,7 @@ async function handleSendReply() {
 
     const visibleDraft = msgInput.value;
     const content = visibleDraft.trim();
-    if (!content) {
+    if (!content && !imageItems(attachmentScope(COMPOSE_SCOPE_REPLY)).length) {
         showToast('Please enter a message', 'warning');
         return;
     }
@@ -2199,9 +2235,12 @@ async function handleSendReply() {
 
     const submittedConversationUserId = _currentConversationUserId;
     const submittedGeneration = _exchangeGeneration;
+    const submittedAttachmentScope = attachmentScope(COMPOSE_SCOPE_REPLY);
     setComposePending(COMPOSE_SCOPE_REPLY, true);
     try {
         const result = await postJsonDetailed('/api/messages/', payload);
+        removeSentAttachments(submittedAttachmentScope, payload.attachment_ids || []);
+        refreshReplyAttachments(); refreshNewAttachments();
         if (submittedGeneration !== _exchangeGeneration) { document.dispatchEvent(new CustomEvent('von:conversation-contribution')); return; }
 
         resetComposeFailureUi(COMPOSE_SCOPE_REPLY);
@@ -2301,7 +2340,7 @@ async function handleSendNewMessage() {
         return;
     }
 
-    if (!content) {
+    if (!content && !imageItems(attachmentScope(COMPOSE_SCOPE_NEW_MESSAGE)).length) {
         showToast('Please enter a message', 'warning');
         contentInput.focus();
         return;
@@ -2321,9 +2360,12 @@ async function handleSendNewMessage() {
     }
 
     const submittedGeneration = _exchangeGeneration;
+    const submittedAttachmentScope = attachmentScope(COMPOSE_SCOPE_NEW_MESSAGE);
     setComposePending(COMPOSE_SCOPE_NEW_MESSAGE, true);
     try {
         const result = await postJsonDetailed('/api/messages/', payload);
+        removeSentAttachments(submittedAttachmentScope, payload.attachment_ids || []);
+        refreshReplyAttachments(); refreshNewAttachments();
         if (submittedGeneration !== _exchangeGeneration) { document.dispatchEvent(new CustomEvent('von:conversation-contribution')); return; }
 
         resetComposeFailureUi(COMPOSE_SCOPE_NEW_MESSAGE);

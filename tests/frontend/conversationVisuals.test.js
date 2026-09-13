@@ -64,3 +64,37 @@ test('an unavailable original has a local notice and duplicate events keep one i
     expect(holder.textContent).toContain('Image unavailable or access denied');
     expect(holder.querySelector('a').getAttribute('href')).toBe('/von/api/images/%23V%23expired-image/original');
 });
+
+test('message images keep the recipient route, caption and retained source reference', () => {
+    const { renderImageAttachments } = require('../../src/frontend/web/von_interface/static/js/utils/conversationImages.js');
+    const holder = document.createElement('div');
+    const image = {
+        concept_id: '#V#revised-image', message_id: '#V#shared-message',
+        content_type: 'image/png', caption: 'Revised architecture',
+        provenance: { kind: 'generated', parent_concept_ids: ['#V#original-image'] }
+    };
+    renderImageAttachments(holder, [image]);
+    renderImageAttachments(holder, [image]);
+    const link = holder.querySelector('figure > a');
+    expect(link.getAttribute('href')).toBe('/api/messages/%23V%23shared-message/attachments/%23V%23revised-image');
+    expect(link.getAttribute('aria-label')).toBe('Open original: Revised architecture');
+    expect(link.querySelector('img').getAttribute('src')).toBe(link.getAttribute('href'));
+    expect(holder.querySelector('figcaption').textContent).toContain('Revised architecture');
+    expect(holder.querySelector('figcaption a').getAttribute('href')).toBe('/von/api/images/%23V%23original-image/original');
+    expect(holder.querySelectorAll('img')).toHaveLength(1);
+});
+
+test('message files remain downloadable without being rendered as images on reload', () => {
+    const { renderImageAttachments } = require('../../src/frontend/web/von_interface/static/js/utils/conversationImages.js');
+    const holder = document.createElement('div');
+    const file = {
+        concept_id: '#V#notes', message_id: '#V#shared-message',
+        content_type: 'text/plain', filename: 'Research notes.txt', size_bytes: 42
+    };
+    renderImageAttachments(holder, [file]);
+    renderImageAttachments(holder, [file]);
+    expect(holder.querySelector('img')).toBeNull();
+    expect(holder.querySelectorAll('a')).toHaveLength(1);
+    expect(holder.querySelector('a').getAttribute('href')).toBe('/api/messages/%23V%23shared-message/attachments/%23V%23notes');
+    expect(holder.textContent).toBe('Research notes.txt · text/plain · 42 bytes');
+});

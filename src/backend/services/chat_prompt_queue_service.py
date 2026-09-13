@@ -2008,9 +2008,13 @@ def create_queue_record(
     prompt = _coerce_text(
         prompt_raw,
         field="prompt_raw",
-        required=True,
+        required=not (
+            dispatch_mode == DISPATCH_MODE_SERVER
+            and isinstance(execution_envelope, Mapping)
+            and execution_envelope.get("image_attachment_ids")
+        ),
         max_chars=MAX_PROMPT_RAW_CHARS,
-    )
+    ) or ""
     session_id_clean = _coerce_scope_value(
         session_id, field="session_id", required=False
     )
