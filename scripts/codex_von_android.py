@@ -224,7 +224,7 @@ def serve(spec, request):
             "ANDROID_ADB_SERVER_PORT": str(cfg["adb_port"]),
         }
         env.pop("ANDROID_SERIAL", None)
-        log = (run_root / "host.log").open("ab")
+        log = (root / (state["avd_name"] + "-host.log")).open("ab")
         adb = emulator = None
 
         def interrupted(*_):
@@ -236,8 +236,8 @@ def serve(spec, request):
             adb = subprocess.Popen(
                 [
                     str(Path(cfg["sdk_root"]) / "platform-tools/adb"),
-                    "-L",
-                    f"tcp:127.0.0.1:{cfg['adb_port']}",
+                    "-P",
+                    str(cfg["adb_port"]),
                     "nodaemon",
                     "server",
                 ],

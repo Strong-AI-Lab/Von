@@ -81,28 +81,52 @@ a second slot for an emulator on its own host while retaining the first. The
 intended DGX-to-Mac route uses separate host budgets. Same-host concurrent
 coding/emulation needs explicit shared reservation support before activation.
 
-## Current delivery decision and remaining acceptance
+## Current delivery decision and evidence
 
-Merge decision: **not ready**. This branch is based on unmerged PR #682.
-124 targeted tests pass, covering task/org/assignment denial, duplicate launch, command
-injection rejection, and the existing shared lock's real contention/inheritance.
-The normal canonical service path on DGX successfully discovered the real Mac
-SDK through a temporary private SSH socket forward. A subsequent launch was
-refused by capacity admission: 10.17 GiB estimated available at the final check, below
-8 GiB reserve plus 6 GiB launch headroom. No emulator was launched and the guard
-was not reduced to obtain a passing run.
+The bounded emulator/controller capability passed live acceptance on 13 September
+2026. **Publication to main still waits for core PR #682**, on which this separate
+follow-on is based. No production deployment is enabled, and this task must not
+become a gate for the core package.
 
-Still required before delivery:
+124 targeted tests pass, covering worker/inbox/provisioner regressions, task and
+organisation denial, duplicate requests, retained uncertain effects, shared
+capacity contention and symlink-safe controller mailboxes.
 
-- real launch, environment read-back, native interaction and canonical attachment
-  read-back through the supported controller route;
-- real interruption/stop and verified cleanup, including stale supervisor/socket
-  recovery (targeted coverage does not establish live emulator cleanup);
-- demonstrable callable access from the existing coding worker/controller,
-  rather than only an operator's canonical service invocation;
-- core package integration after its own acceptance, without inheriting this
-  follow-on as a gate for the core package.
+The first admission was correctly refused at 10.17 GiB estimated available
+versus the unchanged 14 GiB requirement (8 GiB reserve plus 6 GiB launch headroom).
+After Michael requested continuation and headroom reached 19.18 GiB, a fresh
+bridge attempt ran live acceptance. The ADB build rejected a hostname-qualified
+`-L` endpoint; the candidate now uses its supported `-P` private port with default
+loopback binding. Per-run host logs survive disposable AVD cleanup.
 
-Broader architectures, Chrome152 and physical devices remain disclosed coverage
-extensions. No production deployment or additional coding worker is authorised
-by this candidate's test setup.
+Verified route: this coding agent wrote task-bound requests to the existing
+controller handler on DGX, under Codex VS Code's canonical task authority; that
+handler invoked the enrolled service through a private SSH StreamLocal relay to
+the Mac. No second coding worker or model was started. The normal worker polling
+hook is covered by tests; it was not deployed to the production DGX worker.
+
+Live run `native-acceptance-03` verified:
+
+- Android17 / SDK37 / build CE2A.260420.019, Chrome145.0.7632.218,
+  Gboard17.2.2.895242737, 3 GiB guest RAM and two cores;
+- native Chrome navigation, text entry and a Gboard key tap; repeating the same
+  key-tap request returned the same receipt and inserted only one character;
+- repeating start retained the same emulator PID; competing admission was denied;
+- screenshot and report attachments through canonical task services; all three
+  downloaded byte hashes matched their canonical source hashes;
+- another organisation context was denied before access to the host;
+- supervisor interruption terminated emulator and ADB, removed mutable AVD data
+  and the control socket, and released capacity; repeating terminal start did
+  not relaunch; post-cleanup available memory was 17.43 GiB.
+
+Canonical task evidence:
+
+- `#V#computer_file_copy_8daf6dd0ef6c4a59a64db9eddb30819a` (initial screenshot)
+- `#V#computer_file_copy_98e796f288344301b52d685109593166` (native keyboard screenshot)
+- `#V#computer_file_copy_08b649de8635494fb152e7103190c67d` (environment/action report)
+
+The report records host operations, not browser DOM input-event telemetry or a
+claim that image pasting is fixed. Chrome152 and physical-device coverage remain
+outside this acceptance. For release, reconcile this follow-on against the
+accepted core package and run applicable CI. Do not repeat the completed native
+acceptance merely because a controller output/comment changed.
