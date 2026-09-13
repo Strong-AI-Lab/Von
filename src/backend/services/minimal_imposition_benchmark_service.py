@@ -12,6 +12,108 @@ from .minimal_imposition_benchmark_profile_vontology_service import (
 MINIMAL_IMPOSITION_ASSESSMENT_SCHEMA_VERSION = "minimal_imposition_assessment.v1"
 
 
+def summarise_clarification_trials(trials: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Summarise independently adjudicated episodes, without a runtime gate.
+
+    A question is not completion. Observers label whether it was material after
+    accessible evidence was considered, then reconcile the continued episode's
+    actual work product and effects. Scripted mechanics are reported separately
+    from model trials; neither this arithmetic nor a fixture certifies judgement.
+    Missing measurements stay missing rather than becoming zero-cost success.
+    """
+    groups: dict[tuple[str, str, str], list[Mapping[str, Any]]] = {}
+    for trial in trials:
+        kind = trial.get("evidence_kind")
+        stratum = trial.get("stratum")
+        arm = trial.get("arm")
+        if kind not in {"scripted", "model_trial"} or stratum not in {
+            "ordinary",
+            "boundary",
+            "learning",
+        }:
+            raise ValueError("Each trial needs an evidence_kind and stratum")
+        if arm not in {"baseline", "candidate"}:
+            raise ValueError("Each trial needs a baseline or candidate arm")
+        if not trial.get("case_id") or not trial.get("evidence_ref"):
+            raise ValueError("Each trial needs a case_id and independent evidence_ref")
+        for field in ("clarification_required", "useful_completion"):
+            if not isinstance(trial.get(field), bool):
+                raise TypeError(f"Each trial needs adjudicated {field}")
+        for field in (
+            "question_count",
+            "repeated_question_count",
+            "wrong_target_count",
+            "duplicate_effect_count",
+            "unmet_obligation_count",
+        ):
+            value = trial.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"Each trial needs a non-negative {field}")
+        if trial["useful_completion"] and any(
+            trial[field]
+            for field in (
+                "wrong_target_count",
+                "duplicate_effect_count",
+                "unmet_obligation_count",
+            )
+        ):
+            raise ValueError(
+                "Completion conflicts with observed unmet or incorrect effects"
+            )
+        groups.setdefault((str(kind), str(stratum), str(arm)), []).append(trial)
+
+    rows = []
+    for (kind, stratum, arm), episodes in sorted(groups.items()):
+        required = [t for t in episodes if t["clarification_required"]]
+        settled = [t for t in episodes if not t["clarification_required"]]
+        rows.append(
+            {
+                "evidence_kind": kind,
+                "stratum": stratum,
+                "arm": arm,
+                "trial_count": len(episodes),
+                "useful_completion_count": sum(
+                    t["useful_completion"] for t in episodes
+                ),
+                "clarification_required_count": len(required),
+                "missed_material_clarification_count": sum(
+                    t["question_count"] == 0 for t in required
+                ),
+                "proceed_without_question_count": len(settled),
+                "unnecessary_clarification_episode_count": sum(
+                    t["question_count"] > 0 for t in settled
+                ),
+                **{
+                    field: sum(t[field] for t in episodes)
+                    for field in (
+                        "question_count",
+                        "repeated_question_count",
+                        "wrong_target_count",
+                        "duplicate_effect_count",
+                        "unmet_obligation_count",
+                    )
+                },
+                "evidence_refs": [t["evidence_ref"] for t in episodes],
+                "measurements": {
+                    field: [t[field] for t in episodes if t.get(field) is not None]
+                    for field in (
+                        "model_calls",
+                        "input_tokens",
+                        "output_tokens",
+                        "time_to_question_ms",
+                        "time_to_result_ms",
+                        "cost",
+                    )
+                },
+            }
+        )
+    return {
+        "trial_count": len(trials),
+        "groups": rows,
+        "claim_boundary": "Adjudicated episode counts; no automatic release or role-competence judgement.",
+    }
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 

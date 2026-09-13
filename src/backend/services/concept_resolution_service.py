@@ -614,6 +614,29 @@ def resolve_concept_by_name(
                 "name_type": winner.name_type,
             },
             "candidates": [],
+            # Preserve accessible competing evidence even when lexical ranking
+            # has a single winner. In particular, a language preference or person
+            # signature must not hide another plausible operational referent.
+            "alternatives": [
+                {
+                    "concept_id": alternative.concept_id,
+                    "score": alternative.score,
+                    "stage": alternative.stage,
+                    "matched_name": alternative.matched_name,
+                    "language": alternative.language,
+                    "name_type": alternative.name_type,
+                }
+                for alternative in matches[1:max_results]
+            ],
+            "search_coverage": {
+                "exhaustive": False,
+                "candidate_limit": max_results,
+                "hydrated_visible_candidates": len(ordered_candidate_ids),
+                "name_limit_per_concept": 200,
+                "initial_name_query_truncated": bool(
+                    name_query_metadata.get("relation_query_truncated")
+                ),
+            },
             "audit": audit,
         }
 
