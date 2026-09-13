@@ -51,6 +51,9 @@ def test_batched_graph_loader_preserves_registry_semantics_with_bounded_reads(
         ("#V#test_registry_entry", mod.PRED_HAS_MODEL_ID): ["test-model"],
         ("#V#test_profile", mod.PRED_HAS_API_SURFACE): ["responses"],
         ("#V#test_profile", mod.PRED_HAS_STRUCTURED_TOOL_CALLING): ["required"],
+        ("#V#test_profile", mod.PRED_HAS_MODEL_CAPABILITIES_JSON): [
+            '{"image_generation":{"enabled":true,"model":"fixture-image-model"}}'
+        ],
         ("#V#test_constraint", mod.PRED_HAS_PARAMETER_ACTION): ["omit"],
     }
     concept_read_batches: list[tuple[str, ...]] = []
@@ -110,6 +113,7 @@ def test_batched_graph_loader_preserves_registry_semantics_with_bounded_reads(
                     "response_storage_policy": None,
                     "connection_id": None,
                     "deployment_id": None,
+                    "image_generation": {"enabled": True, "model": "fixture-image-model"},
                     "parameter_constraints": [
                         {
                             "constraint_concept_id": "#V#test_constraint",

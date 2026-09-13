@@ -1809,6 +1809,13 @@ def _split_history_into_segments_with_locations(
             copied["contribution_timestamp"] = precise_timestamp.isoformat()
         if isinstance(entry.get("image_attachments"), list):
             copied["image_attachments"] = list(entry["image_attachments"])
+        if isinstance(entry.get("content_parts"), list):
+            copied["content_parts"] = list(entry["content_parts"])
+            if copied["content_parts"]:
+                from .display_elements_service import build_turn_display_elements
+                copied["display_elements"] = build_turn_display_elements(
+                    response_text=entry.get("content"), presenter_channels=None,
+                    content_parts=copied["content_parts"])
         turn_id = entry.get("turn_id")
         if isinstance(turn_id, str) and turn_id.strip():
             copied["turn_id"] = turn_id.strip()

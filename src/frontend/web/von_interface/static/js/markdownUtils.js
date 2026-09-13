@@ -1,3 +1,5 @@
+import { protectMathSources } from './conversationVisuals.js';
+
 /**
  * Lightweight markdown detection utility
  * Detects clear markdown indicators to avoid false positives
@@ -20,6 +22,7 @@ function hasMarkdownTableAt(lines, index) {
 
 export function detectMarkdown(text) {
     if (!text || typeof text !== 'string') return false;
+    if (protectMathSources(text).text !== text) return true;
 
     // Detect clear markdown indicators (conservative patterns)
     const patterns = [
@@ -206,6 +209,7 @@ export function simpleMarkdownToHtml(markdown) {
 
         // Fenced code blocks
         if (/^```/.test(trimmed)) {
+            const language = /^```([A-Za-z0-9_-]+)\s*$/.exec(trimmed)?.[1];
             i += 1;
             const codeLines = [];
             while (i < lines.length && !/^```/.test(lines[i].trim())) {
@@ -215,7 +219,11 @@ export function simpleMarkdownToHtml(markdown) {
             if (i < lines.length && /^```/.test(lines[i].trim())) {
                 i += 1;
             }
-            blocks.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+            // The Mermaid label is executable only through the reviewed safe
+            // renderer. Keep normal fence markup compatible with old consumers.
+            const className = language === 'mermaid' ? ' class="language-mermaid"' : '';
+            const source = codeLines.join('\n') + (language === 'mermaid' && codeLines.length ? '\n' : '');
+            blocks.push(`<pre><code${className}>${escapeHtml(source)}</code></pre>`);
             continue;
         }
 
@@ -338,7 +346,8 @@ export function renderSmartText(text, escapeHtmlOutput = true) {
 }
 
 export async function renderMarkdownViaServer(markdown) {
-    const text = String(markdown ?? '');
+    const protectedMath = protectMathSources(String(markdown ?? ''));
+    const text = protectedMath.text;
     if (!text) {
         return '';
     }
@@ -356,13 +365,13 @@ export async function renderMarkdownViaServer(markdown) {
         }
 
         if (typeof data?.html === 'string') {
-            return linkifyRenderedHtml(data.html);
+            return protectedMath.restore(linkifyRenderedHtml(data.html));
         }
 
         throw new Error('render_markdown response missing html');
     } catch (err) {
         console.warn('[markdownUtils] renderMarkdownViaServer failed; falling back to client renderer', err);
-        return simpleMarkdownToHtml(text);
+        return protectedMath.restore(simpleMarkdownToHtml(text));
     }
 }
 

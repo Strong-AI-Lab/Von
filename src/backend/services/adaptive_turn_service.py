@@ -63,6 +63,9 @@ from src.backend.services.turn_evidence_store import (
     TrustedTurnScope,
     TurnEvidenceStore,
 )
+from src.backend.services.conversation_output_service import (
+    image_assets, retain_parts, retain_tool_images,
+)
 from src.backend.utils.concept_id_utils import canonicalise_vontology_concept_id
 from src.backend.workflows.conversation_turn_llm_timeout import (
     coerce_conversation_turn_llm_advisory_sec,
@@ -325,6 +328,7 @@ class AdaptiveTurnResult:
     conversation_situation_revision: int | None = None
     conversation_situation_checkpoint: str | None = None
     canonical_outcome_spoken_text: str | None = None
+    content_parts: Sequence[Mapping[str, Any]] = ()
 
 
 @dataclass(frozen=True)
@@ -7534,6 +7538,7 @@ def execute_adaptive_turn(
     tool_call_diagnostic_recovery_used = False
     tool_call_diagnostic_recovery_event: dict[str, Any] | None = None
     last_partial_text = ""
+    visible_content_parts: list[dict[str, Any]] = []
     final_synthesis = False
     answer_only = False
     pending_elapsed_time_advisories: list[str] = []
@@ -8910,7 +8915,7 @@ def execute_adaptive_turn(
                 text,
                 current_situation=conversation_situation,
             )
-            if not visible_probe.strip():
+            if not visible_probe.strip() and not visible_content_parts:
                 status = "model_non_answer"
                 text = (
                     "The model returned a conversation-situation update but no "
@@ -9236,8 +9241,30 @@ def execute_adaptive_turn(
             # conflicted checkpoint likewise needs explicit reconciliation;
             # terminal prose cannot silently overwrite the newer carrier.
             updated_conversation_situation = conversation_situation
+        public_content_parts = []
+        for part in visible_content_parts:
+            if part.get("kind") == "text":
+                clean_text, _ = _extract_conversation_situation_sidecar(
+                    str(part.get("text") or ""), current_situation=conversation_situation)
+                part = {**part, "text": clean_text}
+            public_content_parts.append(part)
+        if public_content_parts and response_authority == "canonical_outcome":
+            # Retained media must not resurrect claims superseded by the
+            # canonical effect report. Keep the artefacts beside that report.
+            public_content_parts = [
+                {"part_id": f"{turn_id}-outcome", "kind": "text", "version": 1,
+                 "text": visible_text},
+                *(part for part in public_content_parts if part.get("kind") == "image"),
+            ]
+        elif public_content_parts and status != "completed" and visible_text.strip():
+            visible_projection = "\n".join(str(part.get("text") or "")
+                                           for part in public_content_parts)
+            if visible_text.strip() not in visible_projection:
+                public_content_parts.append({"part_id": f"{turn_id}-outcome",
+                    "kind": "text", "version": 1, "text": visible_text})
         return AdaptiveTurnResult(
             response_text=visible_text,
+            content_parts=tuple(public_content_parts),
             extra_messages=tuple(extra_messages),
             tool_invocations=tuple(reconciled_invocations),
             aux_llm_calls=tuple(aux_calls),
@@ -9631,6 +9658,8 @@ def execute_adaptive_turn(
             authorised_resource_choices=authorised_resource_choices,
             learning_advice_projection=prepared_learning_advice,
         )
+        from .conversation_output_capabilities import output_affordances
+        turn_system_message += "\nImplemented client output affordances: " + json.dumps(output_affordances())
         learning_advice_rendered_for_call = bool(
             not final_synthesis
             and prepared_learning_advice is not None
@@ -9845,6 +9874,8 @@ def execute_adaptive_turn(
             if isinstance(exc, ModelExecutionEligibilityError):
                 terminal_status = exc.failure_kind
                 return finish(str(exc), status=terminal_status)
+            if getattr(exc, "failure_kind", None) == "image_generation_outcome_unknown":
+                return finish(str(exc), status="image_generation_outcome_unknown")
             if (
                 isinstance(exc, StructuredToolTransportError)
                 and answer_only
@@ -10097,6 +10128,24 @@ def execute_adaptive_turn(
             call_duration_seconds,
         )
         _usage_add(usage_totals, response.usage)
+        # Materialise successful output once, before any text-only completion
+        # test or telemetry. Native tools have already run at the provider.
+        if any(part.kind != "text" for part in response.content_parts):
+            known_parts = {part["part_id"] for part in visible_content_parts}
+            parent_ids = [asset["concept_id"] for message in current_context
+                          for asset in message.get("image_attachments", [])
+                          if isinstance(asset, Mapping) and asset.get("concept_id")]
+            retained = retain_parts([part for part in response.content_parts if part.part_id not in known_parts], actor=scope.user_concept_id,
+                                    turn_id=turn_id, parent_ids=parent_ids)
+            visible_content_parts.extend(retained)
+            assets = image_assets(retained)
+            if assets:
+                current_context.append({"role": "user", "content": "Images already produced during this turn; use the retained originals for any revision.", "image_attachments": assets})
+            _emit(progress_tracker, {"stage": "media_ready" if assets else "media_failed",
+                                     "result_summary": "Image output retained." if assets else "Image output could not be retained."})
+        elif visible_content_parts and response.text_response.strip():
+            visible_content_parts.append({"part_id": model_call_id, "kind": "text", "version": 1,
+                                          "text": response.text_response})
         provider_response_model = (
             response.model.strip()
             if isinstance(response.model, str) and response.model.strip()
@@ -10179,10 +10228,11 @@ def execute_adaptive_turn(
                 model_call_id
             )
         if not calls:
-            if response.text_response.strip():
+            if response.text_response.strip() or visible_content_parts:
                 if receive_steering(close_if_empty=True):
                     continue
-                return finish(response.text_response.strip())
+                media_failed = any(part["kind"] == "media_error" for part in visible_content_parts)
+                return finish(response.text_response.strip(), status="answer_partially_completed" if media_failed else "completed")
             if provider_tool_call_diagnostics:
                 available_tool_names = [tool.name for tool in request_tools]
                 if tool_call_diagnostic_recovery_used:
@@ -11252,7 +11302,10 @@ def execute_adaptive_turn(
                             arguments,
                             **invoke_kwargs,
                         )
-                raw_payload = transport_result.payload
+                raw_payload = retain_tool_images(
+                    transport_result.payload, actor=scope.user_concept_id,
+                    turn_id=turn_id, tool_name=canonical_name, call_id=call.call_id,
+                )
             except SchemaValidationError as exc:
                 output_invalid = exc.stage == "output_schema"
                 raw_payload = _error_payload(
@@ -11489,6 +11542,9 @@ def execute_adaptive_turn(
                 transport_result = contained_result.transport_result
                 arguments = contained_result.arguments
                 canonical_name = contained_result.capability_name
+                if isinstance(raw_payload, Mapping):
+                    visible_content_parts.extend(part for part in raw_payload.get("content_parts", [])
+                                                 if part.get("kind") in {"image", "media_error"})
                 is_effect = contained_result.is_effect
                 semantic_effect = contained_result.semantic_effect
                 if (
