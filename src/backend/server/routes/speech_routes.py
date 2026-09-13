@@ -49,7 +49,7 @@ def speech_capabilities():
     if not actor:
         return jsonify(error="authentication_required"), 401
     try:
-        data = transcription_capability(actor, organisation)
+        data = transcription_capability(actor, organisation, request.args.get("model", ""))
     except SpeechUnavailable as exc:
         data = {"available": False, "reason": str(exc)}
     except Exception:
@@ -95,6 +95,7 @@ def transcribe_speech():
             context=request.form.get("context", ""),
             vocabulary=vocabulary,
             language=request.form.get("language", ""),
+            model=request.form.get("model", ""),
         )
     except (ValueError, json.JSONDecodeError) as exc:
         return jsonify(error="invalid_audio_request", message=str(exc)), 400
@@ -108,7 +109,7 @@ def transcribe_speech():
         return (
             jsonify(
                 error="transcription_failed",
-                message="Transcription failed. Your recording is available to retry.",
+                message="OpenAI transcription failed. Check model access and the configured provider key in Settings. Your recording is available to retry.",
             ),
             502,
         )

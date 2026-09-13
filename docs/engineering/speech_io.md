@@ -231,3 +231,48 @@ handoff/reconciliation, actor denial and telemetry isolation/read-back.
 
 Streaming references: [OpenAI realtime transcription](https://developers.openai.com/api/docs/guides/realtime-transcription),
 [WebRTC transport](https://developers.openai.com/api/docs/guides/voice-webrtc?api=realtime).
+
+## Recorded-transcription metadata and model settings
+
+The Settings additional-model inventory projects each provider's existing
+catalogue (OpenAI, OpenRouter, Gemini, Meta and all scanned Ollama hosts). It
+labels catalogue availability separately from the selected target's persisted
+allow list and from assigned browser, primary, server-default, RAG and recorded
+transcription roles. An allowed alternative is not automatically assigned a
+role. Provider availability means discovery succeeded with the configured key
+or host; it does not establish quota or guarantee a later inference request.
+Remote Ollama hosts remain subject to the existing remote-scan setting. Meta
+retains its existing fixed catalogue. A disabled or unreachable provider gets
+a provider-specific status and can be rechecked with Refresh provider inventory.
+
+**Allow and save** checks discovery, retains the selected primary and existing
+alternatives, saves through the canonical scoped settings API, and checks the
+returned pool before enabling use. Failed saves retain the edit and a retry
+action. The 60-second browser observation bound releases a stuck Settings
+interaction; it is not proof the server did not save. An unknown outcome asks
+for **Reload saved model pool** before retrying. Reload discards local edits in
+favour of canonical state. Saving and reloading update the selectors immediately.
+
+The represented model registry's `capabilities.audio_transcription` boolean
+(on `#V#has_model_capabilities_json`) declares compatibility with recorded file
+transcription. Exact provider/model identity or a registry model alias matches
+the entry; model-name substrings are not evidence of support. Explicit false
+can disable compatibility. The compatibility defaults for the existing OpenAI
+file adapter are `gpt-transcribe`, `gpt-4o-transcribe` and
+`gpt-4o-mini-transcribe`. Discovery still determines availability; defaults
+absent from a provider catalogue are displayed as unavailable, not invented as
+accessible models. Additional registry entries can extend the eligible list.
+Only the implemented OpenAI file-transcription transport is currently supported;
+OpenRouter audio input, general chat, realtime transcription and speech synthesis
+do not establish compatibility with that transport.
+
+The recorded-transcription preference belongs to this browser and is distinct
+from the scoped allow list. Its selector uses the actor's effective pool even
+when an administrator is editing the organisation target. Disabled, unavailable
+and stale selections remain visible but cannot be newly selected. The server
+rechecks the requested model against metadata, the effective pool and the
+configured OpenAI key, then applies the existing execution authority check before
+sending audio. A stale explicit selection fails visibly rather than silently
+switching to another model. Automatic selection retains the existing environment
+preference and compatibility ordering, then considers metadata-backed models.
+Live dictation continues to use its separate realtime transport.

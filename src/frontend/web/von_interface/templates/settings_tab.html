@@ -233,6 +233,9 @@
 
                     <section class="speech-settings-section" aria-label="Dictation settings">
                         <h3 class="speech-settings-title">Dictation</h3>
+                        <label for="settingsTranscriptionModelSelect">Recorded transcription model (this browser)</label>
+                        <select id="settingsTranscriptionModelSelect" disabled></select>
+                        <p class="settings-note">Only enabled, available file-transcription models can be selected. A stale preference remains visible until you choose another model.</p>
                         <p class="speech-settings-note">Recorded audio uses conversation vocabulary. The browser controls below apply only to browser recognition.</p>
 
                         <div class="speech-settings-row">
@@ -314,11 +317,17 @@
                         The scoped primary is always allowed. Add or remove alternatives explicitly; configuring
                         or testing a model does not allow it.
                     </p>
+                    <details>
+                        <summary>Additional models — all providers and assigned roles</summary>
+                        <button id="refreshModelInventoryButton" type="button" class="btn-secondary">Refresh provider inventory</button>
+                        <div id="additionalModelInventory" role="region" aria-label="Additional model inventory"></div>
+                    </details>
                     <div id="workflowModelPoolList" class="settings-model-pool-list"></div>
                     <div class="inline-form inline-form-tight mt-2">
                         <button id="saveModelPoolButton" class="btn-azure" type="button" disabled>
                             Save scoped primary &amp; allowed models
                         </button>
+                        <button id="reloadModelPoolButton" class="btn-secondary" type="button">Reload saved model pool</button>
                     </div>
                     <div id="modelPoolStatusMessage" class="status-message" role="status"></div>
                 </div>

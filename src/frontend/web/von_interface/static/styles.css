@@ -15524,6 +15524,13 @@ body.settings-body {
     gap: 8px;
 }
 
+#additionalModelInventory {
+    display: grid;
+    gap: 8px;
+    max-height: 32rem;
+    overflow: auto;
+}
+
 .settings-model-pool-entry {
     display: flex;
     align-items: center;

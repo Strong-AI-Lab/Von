@@ -1,3 +1,4 @@
+import { modelSettingsRequest, renderModelInventory } from './modelInventory.js';
 import { profileButton } from './components/participantProfile.js';
 import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_TRAY_HOVER_KEY, loadConversationLayoutPreferences, normaliseConversationLayout, saveConversationLayoutPreference } from './utils/conversationLayoutPreferences.js';
 import { supportsAudioRecording } from './dictation.js';
@@ -177,6 +178,7 @@ let latestCapabilityIndexStatus = null;
 let capabilityIndexStatusUnsubscribe = null;
 let latestRagRuntimeConfiguration = null;
 let currentEnabledLlmAlternatives = [];
+let persistedTargetEnabledLlms = [];
 let currentServerDefaultLlm = null;
 let stagedScopedPrimaryLlm = null;
 let scopedModelStateReady = false;
@@ -2037,6 +2039,7 @@ function applyScopedModelSettings(settings, generation = scopedModelLoadGenerati
   currentEffectiveEnabledLlms = normaliseEnabledLlmEntries(
     settings?.effective_enabled_llms || settings?.enabled_llms,
   );
+  persistedTargetEnabledLlms = normaliseEnabledLlmEntries(settings?.enabled_llms);
   currentEnabledLlmAlternatives = normaliseEnabledLlmEntries(settings?.enabled_llms)
     .filter((entry) => !resolved || !sameLlmSlot(entry, resolved));
   explicitlyRemovedWorkflowPoolKeys = new Set();
@@ -2401,6 +2404,10 @@ function renderModelPoolTargetScopeNote() {
   note.textContent = 'Saving changes only the current user primary and pool.';
 }
 
+function isPersistedTargetModelAllowed(entry) {
+  return scopedModelStateReady && persistedTargetEnabledLlms.some((candidate) => sameLlmSlot(candidate, entry));
+}
+
 function updatePoolActionButton(buttonId, entry) {
   const button = document.getElementById(buttonId);
   if (!button) return;
@@ -2424,10 +2431,10 @@ function updatePoolActionButton(buttonId, entry) {
 
   const existing = currentEnabledLlmAlternatives.find((candidate) => sameLlmSlot(candidate, entry));
   if (existing && sameLlmEntry(existing, entry)) {
-    button.disabled = true;
-    button.textContent = isPersistedEffectiveModelAllowed(entry)
+    button.disabled = scopedModelSaveInFlight || isPersistedTargetModelAllowed(entry);
+    button.textContent = isPersistedTargetModelAllowed(entry)
       ? 'Already allowed for this scope'
-      : 'Pending allowed-model save';
+      : 'Save allowed model now';
     return;
   }
 
@@ -2522,7 +2529,82 @@ function renderWorkflowModelPool() {
   updateSelectedPremiumEligibilityControls();
 }
 
+let additionalModelInventories = [];
+let modelInventoryGeneration = 0;
+
+function renderAdditionalModelInventory() {
+  renderModelInventory({
+    inventories: additionalModelInventories,
+    enabled: persistedTargetEnabledLlms,
+    effectiveEnabled: currentEffectiveEnabledLlms,
+    roles: [
+      { entry: currentEffectiveLlm, label: 'Effective primary' },
+      { entry: currentResolvedLlm, label: 'Save target primary' },
+      { entry: browserChatPrimaryEntry(), label: 'Browser chat' },
+      { entry: currentServerDefaultLlm, label: 'Server default' },
+      { entry: latestRagRuntimeConfiguration?.llm_resolution?.effective, label: 'RAG language model' },
+      { entry: latestRagRuntimeConfiguration?.embedder_resolution?.effective, label: 'RAG embedder' },
+    ],
+    ready: scopedModelStateReady,
+    busy: scopedModelSaveInFlight,
+    allow: allowAndSaveWorkflowPoolEntry,
+  });
+}
+
+async function refreshAdditionalModelInventory() {
+  if (!document.getElementById('additionalModelInventory')) return;
+  const generation = ++modelInventoryGeneration;
+  additionalModelInventories = [];
+  renderAdditionalModelInventory();
+  await Promise.all(['openai', 'openrouter', 'gemini', 'meta', 'ollama'].map(async (provider) => {
+    let inventory;
+    try {
+      inventory = await modelSettingsRequest(`/api/settings/models/inventory/${provider}`, {
+        cache: 'no-store', headers: await buildSettingsFetchHeaders(),
+      });
+    } catch (_) {
+      inventory = { provider, models: [], error: `${provider}: model discovery unavailable. Check provider configuration and refresh the inventory.` };
+    }
+    if (generation !== modelInventoryGeneration) return;
+    additionalModelInventories.push(inventory);
+    renderAdditionalModelInventory();
+  }));
+}
+
+async function allowAndSaveWorkflowPoolEntry(entry) {
+  if (scopedModelSaveInFlight || !entry) return false;
+  const generation = scopedModelLoadGeneration;
+  scopedModelSaveInFlight = true;
+  renderModelScopeOverview();
+  setInlineStatusMessage(document.getElementById('modelPoolStatusMessage'), `Checking ${entry.provider}: ${entry.model} availability…`, null);
+  try {
+    const inventory = await modelSettingsRequest(`/api/settings/models/inventory/${entry.provider}`, {
+      cache: 'no-store', headers: await buildSettingsFetchHeaders(),
+    });
+    if (!inventory.available || !inventory.models?.some((candidate) => candidate.available && sameLlmSlot(candidate, entry))) {
+      throw new Error(inventory.error || `${entry.provider}: ${entry.model} is unavailable. Check the provider key or host and refresh its model list.`);
+    }
+    if (generation !== scopedModelLoadGeneration) return false;
+  } catch (error) {
+    if (generation === scopedModelLoadGeneration) {
+      setInlineStatusMessage(document.getElementById('modelPoolStatusMessage'), `${entry.provider}: ${error.message}`, 'error');
+    }
+    return false;
+  } finally {
+    scopedModelSaveInFlight = false;
+    renderModelScopeOverview();
+  }
+  addOrUpdateWorkflowPoolEntry(entry);
+  const saved = await persistModelScopeSettings();
+  if (!saved) {
+    const status = document.getElementById('modelPoolStatusMessage');
+    setInlineStatusMessage(status, `${entry.provider}: ${entry.model}: ${status?.textContent || 'Save failed; retry.'}`, 'error');
+  }
+  return saved;
+}
+
 function renderModelScopeOverview() {
+  renderAdditionalModelInventory();
   const browserPrimary = browserChatPrimaryEntry();
   setModelScopeSummaryText(
     'browserChatModelSummary',
@@ -2630,6 +2712,7 @@ function restoreScopedPrimary() {
 }
 
 async function persistModelScopeSettings() {
+  if (scopedModelSaveInFlight) return false;
   if (!scopedModelStateReady) {
     setInlineStatusMessage(
       document.getElementById('modelPoolStatusMessage'),
@@ -2641,6 +2724,7 @@ async function persistModelScopeSettings() {
   }
   scopedModelSaveInFlight = true;
   updateScopedModelSaveAvailability();
+  renderModelScopeOverview();
   setInlineStatusMessage(
     document.getElementById('modelPoolStatusMessage'),
     'Saving scoped primary and allowed models...',
@@ -2655,15 +2739,18 @@ async function persistModelScopeSettings() {
       'success',
     );
     void refreshSelectedOpenAiCostSummary();
+    return true;
   } catch (error) {
     setInlineStatusMessage(
       document.getElementById('modelPoolStatusMessage'),
       error?.message || 'Failed to save scoped primary and allowed models.',
       'error',
     );
+    return false;
   } finally {
     scopedModelSaveInFlight = false;
     updateScopedModelSaveAvailability();
+    renderModelScopeOverview();
   }
 }
 
@@ -3970,7 +4057,7 @@ function setupSpeechSettingsSection() {
   const sttSupported = isSpeechRecognitionSupported();
 
   if (supportNote) {
-    supportNote.textContent = `${supportsAudioRecording() ? 'Recorded dictation is supported; enable an OpenAI transcription model (gpt-transcribe, gpt-4o-transcribe or gpt-4o-mini-transcribe) in your model pool.' : 'Recorded dictation needs HTTPS and microphone recording support.'} Browser recognition: ${sttSupported ? 'available with limited context support' : 'unavailable'}. Spoken playback: ${ttsSupported ? 'available' : 'unavailable'}.`;
+    supportNote.textContent = `${supportsAudioRecording() ? 'Recorded dictation uses enabled models with file-transcription metadata and a supported provider transport. Allow a model in the inventory, then select it here. Live dictation uses a separate realtime transport.' : 'Recorded dictation needs HTTPS and microphone recording support.'} Browser recognition: ${sttSupported ? 'available with limited context support' : 'unavailable'}. Spoken playback: ${ttsSupported ? 'available' : 'unavailable'}.`;
   }
 
   if (!ttsSupported) {
@@ -4389,6 +4476,7 @@ export function __testOnly_setModelScopeState({
     );
   currentEffectiveEnabledLlms = normaliseEnabledLlmEntries(effectiveEnabledLlms);
   currentServerDefaultLlm = buildCanonicalLlmEntry(serverDefaultLlm);
+  persistedTargetEnabledLlms = normaliseEnabledLlmEntries(enabledLlms);
   currentEnabledLlmAlternatives = normaliseEnabledLlmEntries(enabledLlms)
     .filter((entry) => !currentResolvedLlm || !sameLlmSlot(entry, currentResolvedLlm));
   explicitlyRemovedWorkflowPoolKeys = new Set();
@@ -4408,6 +4496,14 @@ export function __testOnly_renderRuntimeModelSummaries(options = {}) {
 
 export function __testOnly_addOrUpdateWorkflowPoolEntry(entry) {
   return addOrUpdateWorkflowPoolEntry(entry);
+}
+
+export function __testOnly_allowAndSaveWorkflowPoolEntry(entry) {
+  return allowAndSaveWorkflowPoolEntry(entry);
+}
+
+export function __testOnly_refreshAdditionalModelInventory() {
+  return refreshAdditionalModelInventory();
 }
 
 export function __testOnly_useBrowserModelAsScopedPrimary() {
@@ -5028,6 +5124,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadAndDisplaySettings();
   setupConversationHistorySettingsSection();
   setupSpeechSettingsSection();
+  void refreshAdditionalModelInventory();
+  document.getElementById('refreshModelInventoryButton')?.addEventListener('click', refreshAdditionalModelInventory);
   setupConceptUiSettings();
   // Load DB info
   try { await loadAndDisplayDbInfo(); } catch { }
@@ -5244,19 +5342,19 @@ document.getElementById('testOpenRouterModelButton')?.addEventListener('click', 
 document.getElementById('testMetaModelButton')?.addEventListener('click', testSelectedMetaModel);
 document.getElementById('testOllamaModelButton')?.addEventListener('click', testSelectedOllamaModel);
 document.getElementById('addOpenAiToWorkflowPoolButton')?.addEventListener('click', () => {
-  addOrUpdateWorkflowPoolEntry(selectedOpenAiPoolEntry());
+  void allowAndSaveWorkflowPoolEntry(selectedOpenAiPoolEntry());
 });
 document.getElementById('addGeminiToWorkflowPoolButton')?.addEventListener('click', () => {
-  addOrUpdateWorkflowPoolEntry(selectedGeminiPoolEntry());
+  void allowAndSaveWorkflowPoolEntry(selectedGeminiPoolEntry());
 });
 document.getElementById('addOpenRouterToWorkflowPoolButton')?.addEventListener('click', () => {
-  addOrUpdateWorkflowPoolEntry(selectedOpenRouterPoolEntry());
+  void allowAndSaveWorkflowPoolEntry(selectedOpenRouterPoolEntry());
 });
 document.getElementById('addMetaToWorkflowPoolButton')?.addEventListener('click', () => {
-  addOrUpdateWorkflowPoolEntry(selectedMetaPoolEntry());
+  void allowAndSaveWorkflowPoolEntry(selectedMetaPoolEntry());
 });
 document.getElementById('addOllamaToWorkflowPoolButton')?.addEventListener('click', () => {
-  addOrUpdateWorkflowPoolEntry(selectedOllamaPoolEntry());
+  void allowAndSaveWorkflowPoolEntry(selectedOllamaPoolEntry());
 });
 document.getElementById('useBrowserModelAsScopedPrimaryButton')?.addEventListener(
   'click',
@@ -5267,6 +5365,9 @@ document.getElementById('restoreScopedPrimaryButton')?.addEventListener(
   restoreScopedPrimary,
 );
 document.getElementById('saveModelPoolButton')?.addEventListener('click', persistModelScopeSettings);
+document.getElementById('reloadModelPoolButton')?.addEventListener('click', () => {
+  if (!scopedModelSaveInFlight) void reloadScopedModelSettings();
+});
 document.getElementById('saveRuntimeModelSettingsButton')?.addEventListener('click', persistRuntimeModelSettings);
 document.getElementById('modelPoolTargetScopeSelect')?.addEventListener('change', (event) => {
   if (!actorSessionReady) {
@@ -6216,16 +6317,18 @@ async function saveAllSettings({
       settings.rag_llm = ragLlmSetting;
     }
 
-    const response = await fetch('/api/settings/', {
+    const requestOptions = {
       method: 'POST',
       headers: await buildSettingsFetchHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(settings),
-    });
-    const payload = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-      const message = payload?.message || `Failed to save settings (${response.status})`;
-      throw new Error(message);
+    };
+    let payload;
+    if (includeChatModels) {
+      payload = await modelSettingsRequest('/api/settings/', requestOptions);
+    } else {
+      const response = await fetch('/api/settings/', requestOptions);
+      payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.message || `Failed to save settings (${response.status})`);
     }
 
     if (includeChatModels && modelScopeGenerationAtSave !== scopedModelLoadGeneration) {
@@ -6248,10 +6351,16 @@ async function saveAllSettings({
     }
 
     if (includeChatModels && payload?.resolved_llm) {
+      if (!Array.isArray(payload.enabled_llms) || settings.enabled_llms.some(
+        (entry) => !payload.enabled_llms.some((saved) => sameLlmEntry(entry, saved)),
+      )) throw new Error('Saved pool did not contain all requested models. Reload the pool and retry.');
       currentResolvedLlm = payload.resolved_llm;
+      if (selectedModelPoolTargetScope === 'user' || effectiveModelScope(currentEffectiveLlm) === 'organisation') {
+        currentEffectiveLlm = payload.resolved_llm;
+      }
       stagedScopedPrimaryLlm = buildCanonicalLlmEntry(payload.resolved_llm);
       if (Array.isArray(payload?.enabled_llms)) {
-        const persistedTargetEnabledLlms = normaliseEnabledLlmEntries(payload.enabled_llms);
+        persistedTargetEnabledLlms = normaliseEnabledLlmEntries(payload.enabled_llms);
         currentEnabledLlmAlternatives = [...persistedTargetEnabledLlms]
           .filter((entry) => !currentResolvedLlm || !sameLlmSlot(entry, currentResolvedLlm));
         if (
@@ -6325,6 +6434,7 @@ async function saveAllSettings({
         true,
       );
     }
+    if (includeChatModels) throw error;
     return false;
   }
 }
