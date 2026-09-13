@@ -135,4 +135,4 @@ accessible fixture task, and reopen it after a new unverified/rollback receipt.
 Record the candidate SHA, receipt IDs, observed served revision and browser
 read-back. Keep deployment credentials outside the checkout. Public Cloudflare
 access redirects and browser profiles bound to other checkouts are not evidence
-for this candidate. No public deployment is requested by this task.
+for this candidate. Public deployment and scoped vocabulary activation require explicit task authority; passing this isolated check does not itself activate either.
