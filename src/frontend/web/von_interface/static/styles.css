@@ -11854,7 +11854,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     }
 
     .chat-composer-primary-actions {
-        width: 96px;
+        width: 148px;
     }
 
     .chat-composer-primary-actions>button:not(.composer-icon-button) {
@@ -18558,4 +18558,17 @@ body.settings-body {
     .unified-message-content .message-input[data-has-draft="false"] + .send-message-btn:not([aria-busy="true"]) { display: none; }
     .unified-message-content .send-message-btn { padding: 0 12px; font-size: 14px; }
     .unified-message-content .message-reply-destination { margin: 0 0 4px; font-size: 12px; }
+}
+
+/* Image drafts remain within the compact mobile/PWA composer. */
+#conversationImageComposer { flex-basis: 100%; min-width: 0; width: 100%; }
+#conversationImageComposer:empty { display: none; }
+.conversation-image-draft { display: inline-flex; vertical-align: top; flex-direction: column; gap: 4px; margin: 6px; max-width: min(180px, calc(100% - 12px)); overflow-wrap: anywhere; }
+.conversation-image-draft button { min-height: 44px; }
+.conversation-image-draft .conversation-image-gallery img { max-height: 140px !important; }
+@media (max-width: 800px), (max-width: 1024px) and (pointer: coarse) {
+    .chat-composer { grid-template-columns: 44px 44px minmax(0, 1fr) auto; }
+    .chat-composer #attachImageButton { grid-column: 2; grid-row: 1; width: 44px; min-width: 44px; }
+    .chat-composer > .prompt-input-wrapper, .chat-composer > #promptInput { grid-column: 3; }
+    .chat-composer #sendButton { grid-column: 4; }
 }

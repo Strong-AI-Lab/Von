@@ -75,6 +75,34 @@ describe('chat attachment workflow input binding', () => {
         delete global.fetch;
     });
 
+    test('phone image without MIME binds only to its next request, after preview and removal', async () => {
+        const { __testOnly_uploadFilesToVon, sendMessage } = require(chatTabModulePath);
+        const bodies = [];
+        let uploaded = 0;
+        global.fetch = jest.fn(async (url, options = {}) => {
+            if (url === '/von/api/images/upload') return {ok:true, json:async () => ({image_attachment:{concept_id:`#V#phone-${++uploaded}`, filename:'phone.png'}})};
+            if (String(url).startsWith('/von/generate')) {
+                bodies.push(JSON.parse(options.body));
+                return {ok:true, json:async () => ({response:'Image received.', llm_debug:{model:'test-model'}})};
+            }
+            if (String(url).startsWith('/von/history/length')) return {ok:true, json:async () => ({history_length:0, authenticated:true})};
+            if (String(url).startsWith('/von/api/render_markdown')) return {ok:true, json:async () => ({html:JSON.parse(options.body).text || ''})};
+            return {ok:true, json:async () => ({})};
+        });
+        await __testOnly_uploadFilesToVon([new File(['png'], 'phone.png')]);
+        expect(document.querySelector('#conversationImageComposer img')).not.toBeNull();
+        document.querySelector('#conversationImageComposer button[aria-label^=Remove]').click();
+        await __testOnly_uploadFilesToVon([new File(['png'], 'replacement.png')]);
+        document.querySelector('#promptInput').value = 'Describe this screenshot';
+        await sendMessage();
+        expect(bodies[0].image_attachment_ids).toEqual(['#V#phone-2']);
+        expect(bodies[0]).not.toHaveProperty('workflow_inputs');
+        document.querySelector('#promptInput').value = 'Now a text-only question';
+        await sendMessage();
+        expect(bodies[1]).not.toHaveProperty('image_attachment_ids');
+        expect(fetch.mock.calls.some(([url]) => url === '/von/api/files/upload')).toBe(false);
+    });
+
     test('normal upload binds its trusted file-copy id to the next generate request', async () => {
         const {
             __testOnly_uploadFilesToVon,
@@ -341,7 +369,7 @@ describe('chat attachment workflow input binding', () => {
         await Promise.resolve();
 
         expect(sendButton.disabled).toBe(false);
-        expect(sendButton.hasAttribute('title')).toBe(false);
+        expect(sendButton.title).toBe('Send Prompt');
 
         await sendMessage();
 
