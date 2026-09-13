@@ -204,3 +204,52 @@ handoff increments `event_handoff_failures`, leaves the meeting pending, and
 makes the run partial while retaining the successful preservation receipt. A
 retry reuses the event's durable instance when one already exists. A queued or
 reused workflow does not prove its later mail, deck or paper effects succeeded.
+
+## Mobile/PWA image picker (candidate evidence, 12 September 2026)
+
+The composer has an **Attach image** button beside the draft. Choose one or more
+photos/files, wait for previews, enter an instruction, then send. **More actions →
+Paste image** attempts the browser clipboard API; ordinary image paste into the
+conversation and the general **Upload File** control use the same image pipeline.
+Remove an image and choose another to replace it. Removal cancels an in-progress
+browser upload and excludes any late result from the request; an already stored
+source is not deleted. Failed uploads remain visible, block sending, and offer
+retry/removal. Closing the picker leaves the existing draft intact.
+
+The picker advertises PNG, JPEG and WebP. HEIC, animated and other unsupported
+images need conversion to a supported still format; the backend checks actual
+bytes, dimensions and size. Recognised image filenames with an empty browser MIME
+type still use that validator. Clipboard denial, cancellation, missing APIs and
+an empty clipboard provide the picker as a fallback. No clipboard permission is
+requested until **Paste image** is pressed. Native photo-library menus, clipboard
+availability and installed-PWA behaviour depend on the device/browser and have
+not been established by the local Chromium fixture below. No offline upload queue
+is supplied: retry when connectivity returns. Unsent image selections are not
+restored after a page reload.
+
+Candidate checks:
+
+- `tests/frontend/chatAttachmentWorkflowInput.test.js`,
+  `static/js/test/conversationImages.test.js` and `static/js/test/imagePicker.test.js`:
+  24 tests pass, including the actual chat request builder receiving only the
+  replacement image ID, and the next text request receiving none.
+- `tests/backend/test_conversation_images.py`: 15 tests pass, including the
+  authenticated upload route, byte validation, descriptor return, actor isolation,
+  original retrieval and provider-byte transport.
+- `tests/browser/imagePicker.cjs`: production template/CSS and image/compact-composer
+  modules in a localhost fixture, with stubbed upload/original endpoints. Chromium
+  passed at 360, 412 and 1440 pixels: native file chooser event, decoded preview,
+  removal/replacement, 44-pixel picker control and no composer overflow. Evidence:
+  task-worktree `.run/image-picker/results.json` and `*-preview.png`.
+- `tests/browser/composerControls.cjs`: all six desktop/touch/short-viewport
+  profiles pass with the added keyboard stop and unchanged one-row controls.
+
+These are bounded component/request-path checks, not authenticated PWA acceptance
+or a live vision-model trial. The DGX browser README's attachment profile on 5013
+was unreachable on this run and is documented as bound to another task. Before
+claiming the requested local PWA verification, the operator must prepare a separate
+localhost AgentTest profile bound to this task checkout/revision, with synthetic
+actors and disposable blob/data storage, browser-test login, and a working restart
+bridge. Keep real profiles and public port 5000 untouched. Then exercise the actual
+composer/upload/request/history path and PWA shell on that candidate. No deployment
+was requested by this task.

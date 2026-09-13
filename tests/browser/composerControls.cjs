@@ -82,6 +82,8 @@ async function bounds(page, selector) {
             await page.keyboard.press('Tab');
             await expect(send).toBeFocused();
             await page.keyboard.press('Tab');
+            await expect(page.getByRole('button', { name: 'Attach image', exact: true })).toBeFocused();
+            await page.keyboard.press('Tab');
             if (profile.desktop) {
                 await expect(mic).toBeFocused();
                 await page.keyboard.press('Tab');
