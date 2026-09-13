@@ -531,6 +531,11 @@ def test_read_only_installed_adapter_check_preserves_exact_task_settings(
     )
     monkeypatch.setattr(api.messages, "get_messages_for_user", lambda *a, **kw: [])
     monkeypatch.setattr(api, "pending", lambda: pytest.fail("pickup path entered"))
+    monkeypatch.setattr(
+        api.tasks,
+        "list_task_attachments",
+        lambda *a, **kw: {"attachments": [], "total": 0},
+    )
     result = worker.check_task(config, api, row["task_concept_id"])
     assert result == {
         "task_id": row["task_concept_id"],
@@ -598,8 +603,9 @@ def test_old_backend_read_cannot_silently_launch_worker_defaults(
         api.task(row["task_concept_id"])
 
 
+@pytest.mark.parametrize("cached_count", [0, 51])
 def test_task_context_includes_operator_note_provenance_and_attachment_limits(
-    config, monkeypatch
+    config, monkeypatch, cached_count
 ):
     api = worker.Von(config)
     operator_note = (
@@ -622,7 +628,7 @@ def test_task_context_includes_operator_note_provenance_and_attachment_limits(
         project_concept_id="#V#project",
         collection_concept_ids=["#V#collection"],
         task_links=[{"target": "#V#dependency"}],
-        attachments_count=51,
+        attachments_count=cached_count,
         external_references={"jira": {"key": "JVNAUTOSCI-2748"}},
         updated_at="2026-09-12T20:45:42Z",
     )
@@ -708,3 +714,98 @@ def test_worker_report_does_not_retrigger_or_absorb_new_user_notes(config):
     assert state["input_hash"] != worker.input_fingerprint(own_report)
     own_report["notes"] = original["notes"]
     assert state["input_hash"] == worker.input_fingerprint(own_report)
+
+
+PARENT_TASK = "#V#task_agent_5e35622e9d063ef435abd262bbbc81c2"
+FILE_COPY = "#V#computer_file_copy_b963805cc3584b7db11ee48bdb1cf032"
+
+
+def test_reference_lookup_distinguishes_projection_from_canonical_absence(config):
+    parent = task(config, task_concept_id=PARENT_TASK, evidence="Existing screenshot")
+    calls = []
+
+    def get(task_id):
+        calls.append(task_id)
+        if task_id.endswith("_missing"):
+            raise KeyError(task_id)
+        if task_id.endswith("_failed"):
+            raise RuntimeError("Do not expose connection details")
+        return parent
+
+    api = SimpleNamespace(
+        task=get,
+        native_writer=lambda _: True,
+        tasks=SimpleNamespace(TaskNotFoundError=KeyError),
+    )
+    result = worker.referenced_tasks(
+        config,
+        api,
+        {
+            "tasks": [],
+            "message": f"Investigate {PARENT_TASK}",
+            "other": "#V#task_agent_missing #V#task_agent_failed",
+        },
+    )
+    by_id = {row["task_id"]: row for row in result["results"]}
+    assert by_id[PARENT_TASK]["task"]["assignee_concept_id"] == config["agent_id"]
+    assert by_id[PARENT_TASK]["task"]["evidence"] == "Existing screenshot"
+    assert by_id["#V#task_agent_missing"]["status"] == "not_found_in_actor_scope"
+    assert by_id["#V#task_agent_failed"]["status"] == "lookup_failed"
+    assert "connection details" not in json.dumps(result)
+    assert calls.count(PARENT_TASK) == 1
+    parent["assignee_concept_id"] = "#V#other"
+    result = worker.referenced_tasks(config, api, PARENT_TASK)
+    assert result["results"][0]["status"] == "outside_assignment_scope"
+    assert "task" not in result["results"][0]
+
+
+@pytest.mark.parametrize("outcome", ["available", "denied", "mismatch"])
+def test_file_copy_staging_preserves_identity_and_verified_bytes(
+    config, tmp_path, monkeypatch, outcome
+):
+    from src.backend.services import computer_file_copy_service as files
+    import hashlib
+
+    data = b"controlled file-copy fixture"
+    digest = hashlib.sha256(data).hexdigest()
+    calls = []
+
+    def fetch(**kwargs):
+        calls.append(kwargs)
+        if outcome == "denied":
+            return {"success": False, "error": "not_found"}
+        return {
+            "success": True,
+            "data": data,
+            "info": SimpleNamespace(
+                original_filename="../../image.png", content_type="image/png"
+            ),
+        }
+
+    monkeypatch.setattr(files, "fetch_file_copy_bytes", fetch)
+    monkeypatch.setattr(
+        files,
+        "build_file_copy_artifact_record",
+        lambda **_: {
+            "sha256": "0" * 64 if outcome == "mismatch" else digest,
+        },
+    )
+    result = worker.stage_file_copy_evidence(
+        config, {"description": FILE_COPY}, tmp_path
+    )
+    item = result["results"][0]
+    assert item["file_copy_concept_id"] == FILE_COPY
+    assert item["native_attachment_asserted"] is False
+    assert calls[0]["user_concept_id"] == config["agent_id"]
+    assert calls[0]["organisation_concept_id"] == config["organisation_id"]
+    if outcome == "available":
+        assert item["checksum_verified"] is True
+        assert item["sha256"] == digest
+        assert Path(item["local_path"]).read_bytes() == data
+        assert Path(item["local_path"]).parent == tmp_path / "evidence"
+    else:
+        assert item["content_available"] is False
+        assert "local_path" not in item
+        assert item["status"] == (
+            "checksum_mismatch" if outcome == "mismatch" else "not_found_in_actor_scope"
+        )

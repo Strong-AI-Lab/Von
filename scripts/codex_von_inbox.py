@@ -14,6 +14,8 @@ try:
         capability_context,
         fingerprint,
         resolve_execution_settings,
+        referenced_tasks,
+        stage_file_copy_evidence,
         write_json,
     )
 except ImportError:
@@ -22,6 +24,8 @@ except ImportError:
         capability_context,
         fingerprint,
         resolve_execution_settings,
+        referenced_tasks,
+        stage_file_copy_evidence,
         write_json,
     )
 
@@ -131,18 +135,22 @@ def context_for(config, api, message):
     )
     task_ids = {row.get("thread_id") for row in conversation}
     task_ids.add(message.get("thread_id"))
-    tasks = []
-    for task_id in sorted(task_ids - {None, ""}):
-        try:
-            task = api.task(task_id)
-        except api.tasks.TaskNotFoundError:
-            continue
-        if authorised_task(task, config) and api.native_writer(task):
-            tasks.append(task)
+    lookup = referenced_tasks(config, api, [message, conversation], task_ids)
+    tasks = [item["task"] for item in lookup["results"] if item["status"] == "found"]
+    for item in lookup["results"]:
+        if item["status"] == "found":
+            try:
+                item["assignment_context"] = api.inputs(item["task"])
+            except Exception as exc:
+                item["evidence_lookup"] = {
+                    "status": "lookup_failed",
+                    "error_type": type(exc).__name__,
+                }
     return {
         "message": message,
         "recent_messages": conversation,
         "tasks": tasks,
+        "task_lookup": lookup,
         "history_context": {
             "source": "canonical direct-message service",
             "as_of": message["sent_at"],
@@ -261,6 +269,9 @@ def launch(config, state, lock_fd):
     state["execution_settings"] = settings
     state["context"]["execution_settings"] = settings
     state["context"]["capabilities"] = capability_context(config, read_only=True)
+    state["context"]["file_copy_evidence"] = stage_file_copy_evidence(
+        config, state["context"], run
+    )
     write_json(run / "schema.json", SCHEMA)
     write_json(run / "context.json", state["context"])
     prompt = Path(__file__).with_name("codex_von_inbox_prompt.md").read_text()
