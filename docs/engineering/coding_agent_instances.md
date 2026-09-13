@@ -155,3 +155,10 @@ account. Before calling the package ready, run the task's isolated canary throug
 the normal agent-callable path and retain task, attachment and recipient
 read-back. The implementation task's current delivery explicitly prohibits
 starting another worker, so that acceptance step remains outstanding.
+
+## Optional native Android testing
+
+The separate [Android test-host candidate](coding_agent_android_testing.md) reuses
+instance bindings and shared admission. It is optional and is not a release gate
+for this core package. Read its current evidence and remaining acceptance before
+claiming that a coding instance can use it autonomously.
