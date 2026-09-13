@@ -4,7 +4,7 @@
 - **Lifecycle:** Active
 - **Scope:** Ordinary adaptive chat turns; text steering and existing prompt queue
 - **Owner:** Von maintainers
-- **Last reviewed:** 11 September 2026
+- **Last reviewed:** 13 September 2026
 - **Review trigger:** Changes to turn admission, model continuation or composer submission
 
 “Q” means queueing here. The existing chat code provides a durable FIFO prompt
@@ -19,17 +19,32 @@ authority. No represented workflow or new prompt policy is needed.
 
 ## Interaction
 
-During a running turn, **Steer** sends composer text to that exact attempt.
-**Queue Prompt** (including the ordinary Enter/send action) continues to submit
-an independent FIFO request. Steering neither consumes nor reorders the queue.
-When idle, the ordinary Send Prompt action starts a turn.
+The icon-only submit arrow uses a saved **Queue / Steering** default while Von
+is working. Queue remains the initial default. The setting is in **More actions**
+and explicitly applies to this browser and signed-in user, with an in-memory
+fallback when storage is unavailable. The current user-preferences endpoint
+supports language settings, so this slice does not claim cross-device sync.
+Only an explicit settings choice changes the preference; Shift-click selects the
+opposite action once. Idle submit remains ordinary Send. Desktop Enter follows
+the default, Shift+Enter inserts a newline, and compact/touch Enter remains a
+newline with IME protection. More actions exposes named one-shot steering and
+queue buttons for keyboard and touch access.
 
-The composer shows pending steering and allows **Cancel steer** until the active
-turn has taken it. After delivery, withdrawal is rejected: another steer can
-correct it, or the existing Stop action can request turn cancellation. Neither
-steering nor Stop claims to undo completed tool effects. Steering waits for the
-next model boundary, including completion of a running tool batch; it does not
-interrupt an in-flight provider request or tool execution.
+The arrow has a curved variant for steering and a queue mark for queueing, with
+an accessible action name and explanatory tooltip/help. Unavailable steering
+retains the draft and explains the explicit Queue alternative. Steering never
+silently becomes queued work. Activation captures the exact current attempt;
+background queue dispatch keeps its existing path.
+
+Short, polite overlay notices announce steering transitions without consuming
+draft width. **More actions → Steering activity** retains receipt text and
+**Cancel steer** for pending guidance. A dot on More actions indicates pending
+work or an error. Unchanged polling does not repeat notices or replace focused
+receipt controls. Errors remain in Activity after the notice expires. After
+delivery, withdrawal is rejected: another steer can correct it, or the existing
+Stop action can request cancellation. Neither action undoes completed tools.
+Steering waits for the next model boundary, including completion of a running
+tool batch; it does not interrupt an in-flight provider request or tool execution.
 
 Text-only steering is disabled while attachments or unfinished dictation are
 present. The established queue/send path handles those inputs. Imported
@@ -95,3 +110,17 @@ The real Flask generation route is exercised with a test model and mock storage;
 no live model is required. A Chromium fixture uses the repository composer
 markup and styles at 375px to exercise submit, pending feedback and cancellation.
 This is fixture-backed acceptance, not authenticated public-server validation.
+
+Conversation headers use a native **Conversation actions** disclosure with
+ordinary Tab navigation, Escape dismissal and focus return. Chat context remains
+its existing disclosure; secondary situation, task, invitation, export and
+profile actions have named entries. Imports remain in conversation navigation's
+new-conversation menu. The message-exchange menu preserves Refresh, referenced
+tasks and the distinct participant/own profile destinations.
+
+`tests/browser/conversationActions.cjs` exercises production template/styles and
+chat steering, compact composer and message-panel modules at desktop, phone and
+landscape sizes with deterministic API fixtures. It checks long-receipt draft
+width, action reachability, preferences, one-shot alternatives, cancellation,
+keyboard dismissal and exchange menu bounds. This is local fixture-backed UI
+evidence, not public authentication, physical-device or deployment acceptance.

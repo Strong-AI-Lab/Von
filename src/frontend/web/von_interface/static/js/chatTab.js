@@ -1,3 +1,4 @@
+import { initialiseConversationActions } from './components/conversationActions.js';
 import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './components/conversationNavigation.js';
 import { initialiseCompactChatComposer, isCompactComposer, resizeCompactDraft, shouldSubmitComposerKey } from './components/compactComposer.js';
 import { updateExecutionCost } from './components/executionCost.js';
@@ -6694,6 +6695,7 @@ function updateSendButtonForCurrentChatState() {
         return;
     }
     updateSendButtonDraftReadiness();
+    sendButton.dataset.submitMode = 'send';
     const chatCreationInFlight = Boolean(newChatCreationInFlight);
     const uploadInFlight = !!getInFlightUploadStateForSession(activeChatSessionId);
     const imagePreparationBlocked = imagesBlocked(activeChatSessionId);
@@ -6739,7 +6741,9 @@ function updateSendButtonForCurrentChatState() {
                 const input = getPromptInputElement();
                 if (input?.value === submitted) setPromptComposerValue('', { promptInput: input });
             },
-            createId: createClientRequestId
+            createId: createClientRequestId,
+            onQueue: () => { setSelectedChatPromptQueueEntryId(null); return handleSendPrompt(); },
+            onModeChange: updateSendButtonForCurrentChatState
         });
     }
     const steeringRecord = queuedChatPrompts.find(entry =>
@@ -6749,7 +6753,10 @@ function updateSendButtonForCurrentChatState() {
     const steeringTarget = steeringRecord || (liveRequest?.promptQueueRecordId && liveRequest?.attemptId
         ? { queueId: liveRequest.promptQueueRecordId, attemptId: liveRequest.attemptId } : null);
     chatSteeringControls.update({
-        scopeKey: `${chatOrganisationGeneration}:${activeChatSessionId}`,
+        scopeKey: `${getCurrentUserConceptId()}:${chatOrganisationGeneration}:${activeChatSessionId}`,
+        actorKey: getCurrentUserConceptId(),
+        busy: sessionBusy && !readOnly && !conceptQaSession && !getSelectedChatPromptQueueEntryForSend(),
+        queueDisabled: sendButton.disabled || pendingChatOrganisationSwitchId !== null,
         target: readOnly || conceptQaSession ? null : steeringTarget,
         disabled: sendButton.disabled || pendingChatOrganisationSwitchId !== null
             || pendingFileCopyConceptIdsBySession.has(getPendingFileCopySessionKey(activeChatSessionId))
@@ -6801,6 +6808,7 @@ function updateSendButtonForCurrentChatState() {
             ? 'Queue a separate request after the current turn finishes. Use Steer to guide the active turn.'
             : 'Send Prompt';
     }
+    chatSteeringControls.present();
 }
 
 function syncActiveChatSessionThinkingState() {
@@ -33793,7 +33801,8 @@ export function initializeChatTab() {
         sessionTabsCache = normaliseConversationSessionViewModels([...new Map([...pinned, ...(selected ? [selected] : []), ...rows.map(row => ({ ...sessionTabsCache.find(previous => previous.session_id === row.session_id), ...row }))].map(row => [row.session_id, row])).values()]);
         reconcileServerConversationPreferences(sessionTabsCache);
     }, currentChat: () => sessionTabsCache.find(row => row.session_id === activeChatSessionId) });
-    document.querySelector('.chat-header-controls')?.append(profileButton());
+    document.querySelector('#conversationActions .conversation-actions-panel')?.append(profileButton());
+    initialiseConversationActions();
     console.log("Initializing chat tab...");
     bindFocusedConversationEvents();
 
@@ -33894,9 +33903,7 @@ export function initializeChatTab() {
     const inviteProjectFilter = document.getElementById('inviteProjectFilter');
     const incomingInvitesButton = document.getElementById('incomingInvitesBtn');
     const incomingInvitesCloseButton = document.getElementById('closeIncomingInvites');
-    const importExternalConversationButton = document.getElementById('importExternalConversationBtn');
     const importExternalConversationInput = document.getElementById('importExternalConversationInput');
-    const importAllExternalConversationsButton = document.getElementById('importAllExternalConversationsBtn');
     const continueImportedConversationButton = document.getElementById('continueImportedConversationBtn');
 
     if (!sendButton || !resetButton || !promptInput) {
@@ -33949,39 +33956,22 @@ export function initializeChatTab() {
     renderPendingAttachmentState();
     renderActiveUploadUi();
 
-    if (importExternalConversationButton && importExternalConversationInput) {
-        importExternalConversationButton.addEventListener('click', () => {
-            importExternalConversationInput.click();
-        });
+    if (importExternalConversationInput) {
         importExternalConversationInput.addEventListener('change', async () => {
             const file = importExternalConversationInput.files?.[0] || null;
             importExternalConversationInput.value = '';
             if (!file) {
                 return;
             }
-            importExternalConversationButton.disabled = true;
             try {
                 await handleExternalConversationFile(file);
             } catch (error) {
                 console.error('[chatTab] External conversation import failed:', error);
                 showToast(error?.message || 'Unable to import this conversation.', 'error');
-            } finally {
-                importExternalConversationButton.disabled = false;
             }
         });
     }
-    if (importAllExternalConversationsButton) {
-        importAllExternalConversationsButton.addEventListener('click', async () => {
-            importAllExternalConversationsButton.disabled = true;
-            try {
-                await startExternalConversationBulkImport();
-            } catch (error) {
-                console.error('[chatTab] Machine conversation import failed:', error);
-                showToast(error?.message || 'Unable to start the machine conversation import.', 'error');
-            } finally {
-                importAllExternalConversationsButton.disabled = false;
-            }
-        });
+    if (document.getElementById('externalConversationBulkImportPanel')) {
         document.getElementById('pauseExternalConversationBulkImportBtn')?.addEventListener('click', () => {
             void controlExternalConversationBulkImport('pause').catch((error) => showToast(error?.message || 'Unable to pause import.', 'error'));
         });
@@ -34293,7 +34283,11 @@ export function initializeChatTab() {
     initialiseCompactChatComposer(promptInput.closest('.chat-composer'), resizePromptComposer);
 
     // Add event listeners
-    sendButton.addEventListener('click', handleSendPrompt);
+    const submitComposer = (event) => {
+        updateSendButtonForCurrentChatState();
+        if (!chatSteeringControls?.activate(event)) void handleSendPrompt();
+    };
+    sendButton.addEventListener('click', submitComposer);
     resetButton.addEventListener('click', handleResetContext);
 
     ensureAbortButtonBound();
@@ -34315,7 +34309,7 @@ export function initializeChatTab() {
     promptInput.addEventListener('keypress', function (event) {
         if (shouldSubmitComposerKey(event)) {
             event.preventDefault();
-            handleSendPrompt();
+            submitComposer(event);
         }
     });
 
