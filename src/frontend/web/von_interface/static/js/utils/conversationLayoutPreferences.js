@@ -2,10 +2,12 @@
 export const CONVERSATION_LAYOUT_KEY = 'von:chatSessionTabsLayout';
 export const CONVERSATION_TRAY_WIDTH_KEY = 'von:conversationTrayWidth';
 export const CONVERSATION_TRAY_COLLAPSED_KEY = 'von:conversationTrayCollapsed';
+export const CONVERSATION_MOBILE_TRAY_COLLAPSED_KEY = 'von:conversationMobileTrayCollapsed';
 export const CONVERSATION_TRAY_HOVER_KEY = 'von:conversationTrayExpandOnHover';
 export const CONVERSATION_LAYOUT_KEYS = [
     CONVERSATION_LAYOUT_KEY, CONVERSATION_TRAY_WIDTH_KEY,
-    CONVERSATION_TRAY_COLLAPSED_KEY, CONVERSATION_TRAY_HOVER_KEY
+    CONVERSATION_TRAY_COLLAPSED_KEY, CONVERSATION_TRAY_HOVER_KEY,
+    CONVERSATION_MOBILE_TRAY_COLLAPSED_KEY
 ];
 export const CONVERSATION_NARROW_QUERY = '(max-width: 800px), (hover: none) and (pointer: coarse)';
 export const CONVERSATION_TRAY_MIN_WIDTH = 220;
@@ -31,6 +33,7 @@ export function loadConversationLayoutPreferences(reader = (key) =>
         layout: normaliseConversationLayout(read(CONVERSATION_LAYOUT_KEY)),
         width: clampConversationTrayWidth(read(CONVERSATION_TRAY_WIDTH_KEY)),
         collapsed: read(CONVERSATION_TRAY_COLLAPSED_KEY) === 'true',
+        mobileCollapsed: read(CONVERSATION_MOBILE_TRAY_COLLAPSED_KEY) === 'true',
         expandOnHover: read(CONVERSATION_TRAY_HOVER_KEY) !== 'false'
     };
 }

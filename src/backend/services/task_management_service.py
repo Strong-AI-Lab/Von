@@ -36,6 +36,7 @@ from ..services.text_value_service import (
 from ..utils.concept_id_utils import (
     ensure_v_concept_prefix,
 )
+from ..utils.task_execution_preferences import normalise_task_execution_preference
 from .effort_unit_ontology_service import (
     ensure_effort_unit_ontology,
     extract_effort_unit_type_ids,
@@ -450,6 +451,13 @@ def _relationship_id_list(value: Any) -> list[str]:
         seen.add(candidate)
         ordered.append(candidate)
     return ordered
+
+
+def _normalise_execution_preference(value: Any, *, field_name: str) -> str | None:
+    try:
+        return normalise_task_execution_preference(value, field_name=field_name)
+    except ValueError as exc:
+        raise InvalidTaskDataError(str(exc)) from exc
 
 
 def _normalise_optional_text(value: Any, *, field_name: str) -> str | None:
@@ -1423,10 +1431,10 @@ def create_task(
         reference_code,
         field_name="reference_code",
     )
-    requested_model = _normalise_optional_text(
+    requested_model = _normalise_execution_preference(
         requested_model, field_name="requested_model"
     )
-    requested_reasoning_effort = _normalise_optional_text(
+    requested_reasoning_effort = _normalise_execution_preference(
         requested_reasoning_effort, field_name="requested_reasoning_effort"
     )
     agent_creation_fingerprint = _normalise_optional_text(
@@ -4785,7 +4793,7 @@ def update_task_fields(
     existing_task = _build_task_response(task_doc)
     # Validate these settings before changing any of the requested task fields.
     execution_settings = {
-        key: _normalise_optional_text(fields[key], field_name=key)
+        key: _normalise_execution_preference(fields[key], field_name=key)
         for key in ("requested_model", "requested_reasoning_effort")
         if key in fields
     }

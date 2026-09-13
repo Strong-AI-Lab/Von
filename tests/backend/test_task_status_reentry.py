@@ -34,12 +34,12 @@ def test_reentering_status_replaces_old_value_and_emits_actual_transition(monkey
     monkeypatch.setattr(tasks, "_append_task_history_event", history)
     monkeypatch.setattr(tasks, "maybe_launch_task_status_workflow", launches)
 
-    for status in ("in_progress", "deployed", "in_progress"):
+    for status in ("in_progress", "blocked", "deployed", "in_progress"):
         assert tasks.update_task_status(doc["concept_id"], status)["status"] == status
         assert values == [status]
-    assert history.call_count == launches.call_count == 3
+    assert history.call_count == launches.call_count == 4
     tasks.update_task_status(doc["concept_id"], "in_progress")
-    assert history.call_count == launches.call_count == 3
+    assert history.call_count == launches.call_count == 4
 
 
 def test_failed_status_readback_does_not_emit_completion(monkeypatch):

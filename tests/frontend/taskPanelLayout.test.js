@@ -211,7 +211,8 @@ describe('global task board layout', () => {
         const mainRule = cssRule('.global-task-main');
 
         expect(boardViewportRule).toContain('overflow: auto');
-        expect(boardViewportRule).toContain('max-height: clamp(');
+        expect(boardViewportRule).toContain('flex: 1 1 0');
+        expect(boardViewportRule).toContain('min-height: max(420px, 68dvh)');
         expect(boardViewportRule).toContain('overscroll-behavior: contain');
         expect(listViewportRule).toContain('overflow: visible');
         expect(mainRule).not.toContain('overflow-x: auto');

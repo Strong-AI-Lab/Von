@@ -3,6 +3,7 @@ import { createConversationTray } from '../../src/frontend/web/von_interface/sta
 import {
     loadConversationLayoutPreferences, CONVERSATION_LAYOUT_KEY,
     CONVERSATION_TRAY_WIDTH_KEY, CONVERSATION_TRAY_COLLAPSED_KEY,
+    CONVERSATION_MOBILE_TRAY_COLLAPSED_KEY, saveConversationLayoutPreference,
 } from '../../src/frontend/web/von_interface/static/js/utils/conversationLayoutPreferences.js';
 
 const fs = require('fs');
@@ -18,6 +19,7 @@ const pointer = (element, type, props = {}) => {
 
 beforeEach(() => {
     localStorage.clear();
+    window.matchMedia = jest.fn().mockReturnValue({ matches: false, addEventListener() {}, removeEventListener() {} });
     jest.useFakeTimers();
     document.body.innerHTML = template;
     workspace = document.getElementById('conversationWorkspace');
@@ -39,7 +41,7 @@ afterEach(() => {
 });
 
 test('defaults to left, honours explicit horizontal, and bounds persisted geometry', () => {
-    expect(loadConversationLayoutPreferences()).toEqual({ layout: 'vertical', width: 260, collapsed: false, expandOnHover: true });
+    expect(loadConversationLayoutPreferences()).toEqual({ layout: 'vertical', width: 260, collapsed: false, mobileCollapsed: false, expandOnHover: true });
     localStorage.setItem(CONVERSATION_LAYOUT_KEY, 'horizontal');
     localStorage.setItem(CONVERSATION_TRAY_WIDTH_KEY, '9999');
     expect(loadConversationLayoutPreferences()).toMatchObject({ layout: 'horizontal', width: 400 });
@@ -162,4 +164,85 @@ test('Escape in the conversation does not collapse a docked tray', () => {
     draft.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     expect(workspace.dataset.trayCollapsed).toBe('false');
     expect(document.activeElement).toBe(draft);
+});
+
+function useMobile() {
+    controller.destroy();
+    workspace.dataset.effectiveTabsLayout = 'horizontal';
+    window.matchMedia.mockReturnValue({ matches: true, addEventListener() {}, removeEventListener() {} });
+    controller = createConversationTray(workspace);
+    controller.refresh(preferences());
+}
+
+test('mobile starts open independently of desktop and preserves context, order and focus on collapse', () => {
+    localStorage.setItem(CONVERSATION_TRAY_COLLAPSED_KEY, 'true');
+    useMobile();
+    const originalRows = Array.from(tabs.children);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(document.getElementById('conversationTrayContext').textContent).toBe('Current: One');
+    tabs.firstChild.focus();
+    tabs.firstChild.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect(document.activeElement).toBe(tabs.lastChild);
+    tabs.lastChild.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(localStorage.getItem(CONVERSATION_MOBILE_TRAY_COLLAPSED_KEY)).toBe('true');
+    controller.destroy();
+    controller = createConversationTray(workspace);
+    controller.refresh(preferences());
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    toggle.click();
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(localStorage.getItem(CONVERSATION_MOBILE_TRAY_COLLAPSED_KEY)).toBe('false');
+    expect(localStorage.getItem(CONVERSATION_TRAY_COLLAPSED_KEY)).toBe('true');
+    expect(Array.from(tabs.children)).toEqual(originalRows);
+    const draft = document.getElementById('promptInput');
+    draft.focus();
+    draft.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+});
+
+test('mobile context follows asynchronous selection and reveals only the list', async () => {
+    useMobile();
+    tabs.getBoundingClientRect = () => ({ left: 0, right: 300 });
+    tabs.lastChild.getBoundingClientRect = () => ({ left: 400, right: 550 });
+    tabs.firstChild.setAttribute('aria-selected', 'false');
+    tabs.lastChild.setAttribute('aria-selected', 'true');
+    await Promise.resolve();
+    expect(document.getElementById('conversationTrayContext').textContent).toBe('Current: Two');
+    expect(tabs.scrollLeft).toBe(250);
+    toggle.click();
+    tabs.lastChild.textContent = 'Updated current conversation';
+    await Promise.resolve();
+    expect(document.getElementById('conversationTrayContext').textContent).toBe('Current: Updated current conversation');
+    tabs.innerHTML = '';
+    await Promise.resolve();
+    expect(document.getElementById('conversationTrayContext').textContent).toBe('Conversations');
+});
+
+test('unavailable or invalid mobile storage defaults open and failed writes survive refresh in memory', () => {
+    localStorage.setItem(CONVERSATION_MOBILE_TRAY_COLLAPSED_KEY, 'invalid');
+    expect(loadConversationLayoutPreferences().mobileCollapsed).toBe(false);
+    expect(loadConversationLayoutPreferences(() => { throw new Error('Unavailable'); }).mobileCollapsed).toBe(false);
+    useMobile();
+    const write = jest.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('Unavailable'); });
+    toggle.click();
+    controller.refresh(preferences());
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    write.mockRestore();
+    saveConversationLayoutPreference(CONVERSATION_MOBILE_TRAY_COLLAPSED_KEY, false);
+});
+
+test('switching to a remembered closed mobile list restores focus and preserves desktop choice', () => {
+    useMobile();
+    workspace.dataset.effectiveTabsLayout = 'vertical';
+    controller.refresh(preferences({ mobileCollapsed: true, collapsed: false }));
+    tabs.firstChild.focus();
+    workspace.dataset.effectiveTabsLayout = 'horizontal';
+    controller.refresh(preferences({ mobileCollapsed: true, collapsed: false }));
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    workspace.dataset.effectiveTabsLayout = 'vertical';
+    controller.refresh(preferences({ mobileCollapsed: true, collapsed: false }));
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
 });

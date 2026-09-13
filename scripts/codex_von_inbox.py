@@ -11,6 +11,7 @@ from pathlib import Path
 try:
     from .codex_von_worker import (
         authorised_task,
+        capability_context,
         fingerprint,
         resolve_execution_settings,
         write_json,
@@ -18,6 +19,7 @@ try:
 except ImportError:
     from codex_von_worker import (
         authorised_task,
+        capability_context,
         fingerprint,
         resolve_execution_settings,
         write_json,
@@ -28,10 +30,20 @@ SCHEMA = {
     "properties": {
         "answer": {"type": "string"},
         "task_id": {"type": "string"},
-        "action": {"type": "string", "enum": ["reply", "resume_task"]},
+        "action": {"type": "string", "enum": ["reply", "resume_task", "create_task"]},
         "deployment_requested": {"type": "boolean"},
+        "new_task": {
+            "type": ["object", "null"],
+            "properties": {
+                "title": {"type": "string"},
+                "requested_model": {"type": ["string", "null"]},
+                "requested_reasoning_effort": {"type": ["string", "null"]},
+            },
+            "required": ["title", "requested_model", "requested_reasoning_effort"],
+            "additionalProperties": False,
+        },
     },
-    "required": ["answer", "task_id", "action", "deployment_requested"],
+    "required": ["answer", "task_id", "action", "deployment_requested", "new_task"],
     "additionalProperties": False,
 }
 
@@ -97,7 +109,12 @@ def new_messages(config, api):
 
 def context_for(config, api, message):
     rows = api.messages.get_conversation_between_users(
-        config["agent_id"], config["delegator_id"], limit=30
+        config["agent_id"],
+        config["delegator_id"],
+        limit=31,
+        organisation_concept_id=config["organisation_id"],
+        as_of=timestamp(message["sent_at"]),
+        newest_first=True,
     )
     conversation = [api.messages.project_direct_message(row) for row in rows]
     conversation = [
@@ -107,6 +124,11 @@ def context_for(config, api, message):
         and row.get("sent_at")
         and timestamp(row["sent_at"]) <= timestamp(message["sent_at"])
     ]
+    omitted = len(conversation) > 30
+    conversation = sorted(
+        conversation[:30],
+        key=lambda row: (timestamp(row["sent_at"]), row["message_id"]),
+    )
     task_ids = {row.get("thread_id") for row in conversation}
     task_ids.add(message.get("thread_id"))
     tasks = []
@@ -117,39 +139,114 @@ def context_for(config, api, message):
             continue
         if authorised_task(task, config) and api.native_writer(task):
             tasks.append(task)
-    return {"message": message, "recent_messages": conversation, "tasks": tasks}
+    return {
+        "message": message,
+        "recent_messages": conversation,
+        "tasks": tasks,
+        "history_context": {
+            "source": "canonical direct-message service",
+            "as_of": message["sent_at"],
+            "limit": 30,
+            "older_messages_omitted": omitted,
+            "oldest_supplied": conversation[0]["sent_at"] if conversation else None,
+            "newest_supplied": conversation[-1]["sent_at"] if conversation else None,
+            "task_selection": "Accessible native assignments referenced by these messages; proximity is not a request to resume them.",
+        },
+    }
 
 
 def validate_result(value, context):
-    if not isinstance(value, dict) or set(value) != set(SCHEMA["required"]):
+    fields = set(SCHEMA["required"])
+    # Retained pre-upgrade runs have four fields. Keep them recoverable.
+    if not isinstance(value, dict) or set(value) not in (fields, fields - {"new_task"}):
         raise ValueError("Missing inbox result fields")
     if not isinstance(value["answer"], str) or not value["answer"].strip():
         raise ValueError("Empty inbox answer")
-    if value["action"] not in ("reply", "resume_task") or not isinstance(
+    if value["action"] not in ("reply", "resume_task", "create_task") or not isinstance(
         value["deployment_requested"], bool
     ):
         raise ValueError("Invalid inbox action")
     ids = {task["task_concept_id"] for task in context["tasks"]}
-    if value["task_id"] not in ids | {""}:
+    if not isinstance(value["task_id"], str) or value["task_id"] not in ids | {""}:
         raise ValueError("Task was not in authorised context")
     if value["action"] == "resume_task" and not value["task_id"]:
         raise ValueError("Resuming requires an identified task")
     if value["action"] == "reply" and value["deployment_requested"]:
         raise ValueError("A reply cannot deploy")
+    new_task = value.get("new_task")
+    if value["action"] == "create_task":
+        if (
+            value["task_id"]
+            or not isinstance(new_task, dict)
+            or set(new_task)
+            != {"title", "requested_model", "requested_reasoning_effort"}
+        ):
+            raise ValueError("Creating requires new task details and an empty task_id")
+        if not isinstance(new_task["title"], str) or not new_task["title"].strip():
+            raise ValueError("New task title is empty")
+        settings = resolve_execution_settings({}, new_task)
+        value = {
+            **value,
+            "new_task": {
+                **new_task,
+                **{
+                    "requested_" + key: settings[key]
+                    for key in ("model", "reasoning_effort")
+                    if new_task["requested_" + key] is not None
+                },
+            },
+        }
+    elif new_task is not None:
+        raise ValueError("New task details require create_task")
     return value
 
 
 def recover(state):
     run = Path(state["run_dir"])
+    value = None
+    stage = "process_receipt"
     try:
-        if json.loads((run / "exit.json").read_text())["returncode"] != 0:
-            raise ValueError("Inbox process failed")
-        state["result"] = validate_result(
-            json.loads((run / "result.json").read_text()), state["context"]
+        receipt = json.loads((run / "exit.json").read_text())
+        if not isinstance(receipt, dict):
+            raise ValueError("Invalid inbox process receipt")
+        stage = "result_json"
+        value = json.loads((run / "result.json").read_text())
+        stage = "process_exit"
+        if type(receipt.get("returncode")) is not int or receipt["returncode"] != 0:
+            raise ValueError("Inbox process did not exit successfully")
+        stage = "result_validation"
+        state["result"] = validate_result(value, state["context"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        if value is None:
+            try:
+                value = json.loads((run / "result.json").read_text())
+            except (OSError, ValueError):
+                pass
+        detail = (
+            str(exc)
+            if stage in {"result_validation", "process_exit"}
+            else "Missing or unreadable " + stage
         )
-    except (OSError, ValueError, KeyError, TypeError):
+        failure = {"stage": stage, "error_type": type(exc).__name__, "detail": detail}
+        if stage == "process_exit":
+            failure["returncode"] = receipt.get("returncode")
+        state.setdefault("failures", []).append(failure)
+        answer = value.get("answer") if isinstance(value, dict) else None
+        if not isinstance(answer, str) or not answer.strip():
+            # One fresh attempt from the durable request, with the failure in
+            # context. This is bounded recovery, not a user resend requirement.
+            if not state.get("retry_count"):
+                state["retry_count"] = 1
+                state["context"]["recovery"] = failure
+                state["run_dir"] = str(run / "retry-1")
+                state["phase"] = "retrying"
+                return
+            answer = "I could not complete this reply. The original request and run evidence are retained for recovery; you do not need to resend it."
+        else:
+            answer = "Retained response (the action was not verified):\n\n" + answer
         state["result"] = {
-            "answer": "I could not complete this reply. The response run was interrupted or returned an invalid result; please resend your question to retry.",
+            "answer": answer
+            + f"\n\nReply recovery: {detail}. No coding or deployment action was applied from this result.",
             "task_id": "",
             "action": "reply",
             "deployment_requested": False,
@@ -160,11 +257,14 @@ def recover(state):
 def launch(config, state, lock_fd):
     run = Path(state["run_dir"])
     run.mkdir(parents=True, exist_ok=True)
+    settings = resolve_execution_settings(config, {})
+    state["execution_settings"] = settings
+    state["context"]["execution_settings"] = settings
+    state["context"]["capabilities"] = capability_context(config, read_only=True)
     write_json(run / "schema.json", SCHEMA)
     write_json(run / "context.json", state["context"])
     prompt = Path(__file__).with_name("codex_von_inbox_prompt.md").read_text()
     prompt += "\nContext for this reply:\n" + json.dumps(state["context"], default=str)
-    settings = resolve_execution_settings(config, {})
     args = [
         config["codex_command"],
         "exec",
@@ -210,8 +310,7 @@ def launch(config, state, lock_fd):
     recover(state)
 
 
-def finish(config, api, state, path):
-    message = state["context"]["message"]
+def authorise_source(config, api, message):
     # Re-read the actual inbound message and both participants' authority.
     current = api.messages.get_message_for_user(
         message["message_id"], config["agent_id"]
@@ -229,9 +328,78 @@ def finish(config, api, state, path):
     )
     if not allowed:
         raise PermissionError("Message participants are no longer authorised")
-    result = state["result"]
+
+
+def create_assignment(config, api, state, path):
+    """One source-bound native assignment; no model-selected actor or project."""
+    message = state["context"]["message"]
+    details = state["result"]["new_task"]
+    identity = fingerprint(
+        [
+            "codex-inbox-assignment-v1",
+            config["agent_id"],
+            config["delegator_id"],
+            config["organisation_id"],
+            message["message_id"],
+        ]
+    )
+    expected = {
+        "title": details["title"].strip(),
+        "description": message["content"],
+        "assignee_concept_id": config["agent_id"],
+        "created_by_concept_id": config["delegator_id"],
+        "organisation_concept_id": config["organisation_id"],
+        "report_to_concept_id": config["delegator_id"],
+        "requested_model": details["requested_model"],
+        "requested_reasoning_effort": details["requested_reasoning_effort"],
+    }
+    state["effect_stage"] = "assignment_lookup"
+    task = api.tasks.find_task_by_agent_creation_fingerprint(
+        created_by_concept_id=config["delegator_id"],
+        organisation_concept_id=config["organisation_id"],
+        creation_fingerprint=identity,
+    )
+    if task is None:
+        state["effect_stage"] = "assignment_create"
+        task = api.tasks.create_task(
+            **expected,
+            agent_creation_fingerprint=identity,
+            agent_creation_request_id=message["message_id"],
+            notes=f"Requested by {config['delegator_id']} in direct message {message['message_id']} at {message['sent_at']}. Created on their behalf by {config['agent_id']}.",
+        )
+    state["effect_stage"] = "assignment_readback"
+    task_id = task["task_concept_id"]
+    task = api.task(task_id)
+    if not authorised_task(task, config) or not api.native_writer(task):
+        raise PermissionError("Created assignment scope changed")
+    if any(task.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("Created assignment fields failed canonical read-back")
+    # Never reset an assignment already picked up or completed after a retry.
+    if not task.get("status"):
+        raise RuntimeError("Created assignment status failed canonical read-back")
+    followup = {
+        "message_id": message["message_id"],
+        "content": message["content"],
+        "deployment_requested": state["result"]["deployment_requested"],
+    }
+    if not task_followup(config, task_id):
+        write_json(followup_path(config, task_id), followup)
+    state["created_task_id"] = task_id
+    write_json(path, state)
+    return task_id
+
+
+def finish(config, api, state, path):
+    message = state["context"]["message"]
+    state["effect_stage"] = "source_authorisation"
+    authorise_source(config, api, message)
+    # Check again at the effect boundary, including recovered on-disk states.
+    result = state["result"] = validate_result(state["result"], state["context"])
     task_id = result["task_id"]
     content = result["answer"]
+    if result["action"] == "create_task":
+        task_id = create_assignment(config, api, state, path)
+        content += f"\n\nNative assignment created and verified: {task_id}."
     if task_id:
         try:
             task = api.task(task_id)
@@ -251,6 +419,7 @@ def finish(config, api, state, path):
             write_json(path, state)
     if task_id:
         if result["action"] == "resume_task":
+            state["effect_stage"] = "task_resume"
             # This exact follow-up is the new coding/deployment authority carrier.
             followup = {
                 "message_id": message["message_id"],
@@ -291,6 +460,7 @@ def finish(config, api, state, path):
                 write_json(path, state)
             content += "\n\nThe task is queued for the additional work."
         note = f"Question from {config['delegator_id']}:\n{message['content']}\n\nCodex DGX answer:\n{content}"
+        state["effect_stage"] = "task_note"
         comments = task_comments(api, task_id)
         existing = next(
             (
@@ -321,6 +491,7 @@ def finish(config, api, state, path):
         ):
             raise RuntimeError("Question/answer task note read-back failed")
     state.setdefault("report_content", content)
+    state["effect_stage"] = "reply_delivery"
     write_json(path, state)
     receipt = api.messages.create_message_idempotently(
         delivery_idempotency_key="codex-inbox:" + message["message_id"],
@@ -337,6 +508,7 @@ def finish(config, api, state, path):
         },
     )
     reply_id = receipt.message["concept_id"]
+    state["effect_stage"] = "reply_readback"
     readback = api.messages.get_message_for_user(reply_id, config["agent_id"])
     if (
         not readback
@@ -346,6 +518,63 @@ def finish(config, api, state, path):
         raise RuntimeError("Inbox reply canonical read-back failed")
     state.update(phase="done", reply_id=reply_id)
     write_json(path, state)
+
+
+def finish_or_retain(config, api, state, path):
+    try:
+        finish(config, api, state, path)
+    except Exception as exc:
+        # Backend exceptions can contain connection credentials. Retain the
+        # operation and exception class, never copy arbitrary exception text.
+        state["effect_error"] = {
+            "stage": state.get("effect_stage", "reporting"),
+            "error_type": type(exc).__name__,
+        }
+        state["phase"] = "reporting"
+        write_json(path, state)
+        print(
+            json.dumps({"outcome": "inbox_effect_pending", **state["effect_error"]}),
+            flush=True,
+        )
+        # If authority or delivery itself failed, do not try another send.
+        if state["effect_error"]["stage"] in {
+            "source_authorisation",
+            "reply_delivery",
+            "reply_readback",
+        }:
+            return
+        try:
+            message = state["context"]["message"]
+            authorise_source(config, api, message)
+            content = (
+                f"I could not verify the inbox action at {state['effect_error']['stage']} "
+                f"({type(exc).__name__}). The original request, answer and effect receipts "
+                "are retained. The controller will retry; you do not need to resend the request."
+            )
+            receipt = api.messages.create_message_idempotently(
+                delivery_idempotency_key="codex-inbox:"
+                + message["message_id"]
+                + ":effect-pending",
+                sender_id=config["agent_id"],
+                recipient_ids=[config["delegator_id"]],
+                organisation_concept_id=config["organisation_id"],
+                reply_to_id=message["message_id"],
+                subject="Codex DGX recovery pending",
+                content=state.setdefault("failure_report_content", content),
+            )
+            row = api.messages.get_message_for_user(
+                receipt.message["concept_id"], config["agent_id"]
+            )
+            if (
+                not row
+                or api.messages.project_direct_message(row)["content"]
+                != state["failure_report_content"]
+            ):
+                raise RuntimeError("Failure report read-back failed")
+            state["failure_reply_id"] = receipt.message["concept_id"]
+        except Exception as reporting_error:
+            state["failure_report_error_type"] = type(reporting_error).__name__
+        write_json(path, state)
 
 
 def task_comments(api, task_id):
@@ -368,8 +597,17 @@ def tick(config, api, lock_fd):
         if state["phase"] == "running":
             recover(state)
             write_json(path, state)
+        if state["phase"] == "retrying":
+            state["phase"] = "running"
+            write_json(path, state)
+            try:
+                authorise_source(config, api, state["context"]["message"])
+                launch(config, state, lock_fd)
+            except OSError:
+                recover(state)
+            write_json(path, state)
         if state["phase"] == "reporting":
-            finish(config, api, state, path)
+            finish_or_retain(config, api, state, path)
             return True
     pending = new_messages(config, api)
     if not pending:
@@ -387,13 +625,19 @@ def tick(config, api, lock_fd):
     except OSError:
         recover(state)
     write_json(path, state)
-    finish(config, api, state, path)
+    if state["phase"] != "reporting":
+        return True
+    finish_or_retain(config, api, state, path)
     print(
         json.dumps(
             {
-                "outcome": "message_answered",
+                "outcome": (
+                    "message_answered"
+                    if state["phase"] == "done"
+                    else "inbox_effect_pending"
+                ),
                 "message_id": message["message_id"],
-                "reply_id": state["reply_id"],
+                "reply_id": state.get("reply_id"),
             }
         ),
         flush=True,

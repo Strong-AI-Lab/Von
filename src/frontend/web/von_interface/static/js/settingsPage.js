@@ -1,3 +1,4 @@
+import { modelSettingsRequest, renderModelInventory } from './modelInventory.js';
 import { profileButton } from './components/participantProfile.js';
 import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_TRAY_HOVER_KEY, loadConversationLayoutPreferences, normaliseConversationLayout, saveConversationLayoutPreference } from './utils/conversationLayoutPreferences.js';
 import { supportsAudioRecording } from './dictation.js';
@@ -177,6 +178,7 @@ let latestCapabilityIndexStatus = null;
 let capabilityIndexStatusUnsubscribe = null;
 let latestRagRuntimeConfiguration = null;
 let currentEnabledLlmAlternatives = [];
+let persistedTargetEnabledLlms = [];
 let currentServerDefaultLlm = null;
 let stagedScopedPrimaryLlm = null;
 let scopedModelStateReady = false;
@@ -548,12 +550,11 @@ function selectedPremiumModelName(provider = selectedPremiumProvider()) {
 
 function getSettingsConcernModelSnapshot() {
   const localModelPreference = getEffectiveLocalModelPreference();
-  const premiumToggle = document.getElementById('enableOpenAiPremiumToggle');
-  const premiumEnabled = premiumToggle
-    ? !!premiumToggle.checked
-    : ['openai', 'openrouter', 'gemini', 'meta'].includes(localModelPreference.activeSource);
-  const premiumProvider = selectedPremiumProvider();
-  const premiumModel = selectedPremiumModelName(premiumProvider);
+  const premiumEnabled = Boolean(normalisePremiumProvider(localModelPreference.activeSource));
+  const premiumProvider = premiumEnabled ? localModelPreference.activeSource : selectedPremiumProvider();
+  const premiumModel = premiumEnabled
+    ? localModelPreference.requestedLlm?.model
+    : selectedPremiumModelName(premiumProvider);
   const ollamaSelection = resolveOllamaSelection(false) || localModelPreference.ollamaSelection || null;
   const ollamaModel = String(ollamaSelection?.model || ollamaSelection?.value || '').trim();
 
@@ -637,6 +638,18 @@ function buildTemporarySettingsConcernRecommendation(concernId) {
         ollamaModel,
       } = getSettingsConcernModelSnapshot();
       const providerLabel = PREMIUM_PROVIDER_CONFIG[premiumProvider]?.label || 'premium';
+      const browserPrimary = browserChatPrimaryEntry();
+      if (scopedModelStateReady && browserPrimary && !isPersistedEffectiveModelAllowed(browserPrimary)) {
+        return {
+          kicker: 'Browser model needs attention',
+          title: 'Choose an allowed browser model or restore its allowance',
+          description: `${formatLlmEntry(browserPrimary)} is no longer allowed for the current scope. Your browser choice is retained; choose a replacement explicitly or restore its scoped allowance.`,
+          actionLabel: 'Review browser model',
+          actionTarget: 'premium-model-settings',
+          focusSelector: '#premiumProviderSelect, #globalModelSelect',
+          source: 'temporary-placeholder',
+        };
+      }
 
       if (premiumEnabled && !premiumModel) {
         return {
@@ -1310,6 +1323,9 @@ function getStoredPremiumModelParameters(provider) {
 }
 
 function setStoredPremiumModelParameters(provider, parameters) {
+  // An uncommitted model in the editor must not change the active model's parameters.
+  if (getEffectiveLocalModelPreference().activeSource === provider
+    && selectedPremiumModelName(provider) !== getStoredPremiumSelectedModel(provider)) return;
   if (provider === 'gemini') {
     setStoredGeminiModelParameters(parameters);
   } else if (provider === 'openrouter') {
@@ -1403,6 +1419,8 @@ async function refreshPremiumReasoningEffortControls(provider = selectedPremiumP
       { cache: 'no-store' },
     );
     const capability = await response.json();
+    if (selectedPremiumModelName(provider) !== selectedModel
+      || selectedPremiumProvider() !== provider) return null;
     if (response.ok && capability?.success !== false) {
       setLatestPremiumModelParameterCapability(provider, capability);
       applyPremiumReasoningEffortControls(provider, capability);
@@ -1411,6 +1429,8 @@ async function refreshPremiumReasoningEffortControls(provider = selectedPremiumP
   } catch (error) {
     console.warn(`Failed to refresh ${config.label} model parameter controls`, error);
   }
+  if (selectedPremiumModelName(provider) !== selectedModel
+    || selectedPremiumProvider() !== provider) return null;
   setLatestPremiumModelParameterCapability(provider, null);
   applyPremiumReasoningEffortControls(
     provider,
@@ -1470,8 +1490,10 @@ function updatePremiumModelStatusMessageForProvider(provider) {
   if (!allowed) {
     setInlineStatusMessage(
       statusEl,
-      `Testing and browser use remain unavailable until ${config.label} ${selectedModel} is allowed for this scope and saved.`,
-      'error',
+      scopedModelStateReady
+        ? `Testing and browser use remain unavailable until ${config.label} ${selectedModel} is allowed for this scope and saved. The browser choice is retained; select an allowed replacement explicitly if needed.`
+        : 'Checking persisted allowed models. The browser choice is retained.',
+      scopedModelStateReady ? 'error' : null,
     );
     return;
   }
@@ -1498,7 +1520,7 @@ function updatePremiumModelStatusMessageForProvider(provider) {
       : `${config.label} ${selectedModel} failed its last test.`;
     setInlineStatusMessage(
       statusEl,
-      probe.reason ? `${failurePrefix} ${probe.reason}` : failurePrefix,
+      `${probe.reason ? `${failurePrefix} ${probe.reason}` : failurePrefix} Restore provider/model availability or select an allowed replacement explicitly.`,
       'error',
     );
     return;
@@ -1604,7 +1626,12 @@ async function handlePremiumModelSelectionChange(provider) {
   const model = normaliseLocalModelName(
     document.getElementById(config?.modelSelectId)?.value,
   ) || '';
-  setStoredPremiumSelectedModel(provider, model);
+  // Keep an ineligible draft in the form. Only an allowed selection may replace
+  // the active browser model; editing must never select an Ollama fallback.
+  if (getEffectiveLocalModelPreference().activeSource !== provider
+    || isPersistedEffectiveModelAllowed({ provider, model })) {
+    setStoredPremiumSelectedModel(provider, model);
+  }
   invalidateSelectedOpenAiCostSummary();
   if (selectedPremiumProvider() === provider) {
     await refreshPremiumReasoningEffortControls(provider);
@@ -1621,16 +1648,12 @@ async function handlePremiumProviderSelectionChange(value) {
   const provider = normalisePremiumProvider(value) || selectedPremiumProvider();
   const select = document.getElementById('premiumProviderSelect');
   if (select) select.value = provider;
-  setStoredPremiumModelProvider(provider);
+  const wasPremiumActive = Boolean(normalisePremiumProvider(getEffectiveLocalModelPreference().activeSource));
+  const allowed = isPersistedEffectiveModelAllowed(selectedPremiumPoolEntry(provider));
+  if (!wasPremiumActive || allowed) setStoredPremiumModelProvider(provider);
   syncPremiumProviderPanels();
   await refreshPremiumReasoningEffortControls(provider);
 
-  const toggle = document.getElementById('enableOpenAiPremiumToggle');
-  if (toggle?.checked) {
-    const allowed = isPersistedEffectiveModelAllowed(selectedPremiumPoolEntry(provider));
-    toggle.checked = allowed;
-    setLocalPremiumModelUseEnabled(allowed, provider);
-  }
   updatePremiumModelStatusMessages();
   updateOllamaModelStatusMessage();
   invalidateSelectedOpenAiCostSummary();
@@ -1670,8 +1693,6 @@ async function testSelectedPremiumModel(provider) {
     };
   }
 
-  setStoredPremiumSelectedModel(provider, selectedModel);
-  setStoredPremiumModelParameters(provider, modelParameters);
   setInlineStatusMessage(statusEl, `Testing ${config.label} ${selectedModel}...`, null);
 
   try {
@@ -2037,6 +2058,7 @@ function applyScopedModelSettings(settings, generation = scopedModelLoadGenerati
   currentEffectiveEnabledLlms = normaliseEnabledLlmEntries(
     settings?.effective_enabled_llms || settings?.enabled_llms,
   );
+  persistedTargetEnabledLlms = normaliseEnabledLlmEntries(settings?.enabled_llms);
   currentEnabledLlmAlternatives = normaliseEnabledLlmEntries(settings?.enabled_llms)
     .filter((entry) => !resolved || !sameLlmSlot(entry, resolved));
   explicitlyRemovedWorkflowPoolKeys = new Set();
@@ -2278,13 +2300,9 @@ function updateSelectedPremiumEligibilityControls() {
     }
   }
   if (toggleEl) {
+    toggleEl.checked = sameLlmSlot(browserChatPrimaryEntry(), selected);
     toggleEl.disabled = !selectedAllowed;
     toggleEl.setAttribute('aria-disabled', String(!selectedAllowed));
-  }
-  if (!selectedAllowed && toggleEl?.checked) {
-    toggleEl.checked = false;
-    setLocalPremiumModelUseEnabled(false);
-    notifyLocalModelPreferenceChanged();
   }
   return selectedAllowed;
 }
@@ -2401,6 +2419,10 @@ function renderModelPoolTargetScopeNote() {
   note.textContent = 'Saving changes only the current user primary and pool.';
 }
 
+function isPersistedTargetModelAllowed(entry) {
+  return scopedModelStateReady && persistedTargetEnabledLlms.some((candidate) => sameLlmSlot(candidate, entry));
+}
+
 function updatePoolActionButton(buttonId, entry) {
   const button = document.getElementById(buttonId);
   if (!button) return;
@@ -2424,10 +2446,10 @@ function updatePoolActionButton(buttonId, entry) {
 
   const existing = currentEnabledLlmAlternatives.find((candidate) => sameLlmSlot(candidate, entry));
   if (existing && sameLlmEntry(existing, entry)) {
-    button.disabled = true;
-    button.textContent = isPersistedEffectiveModelAllowed(entry)
+    button.disabled = scopedModelSaveInFlight || isPersistedTargetModelAllowed(entry);
+    button.textContent = isPersistedTargetModelAllowed(entry)
       ? 'Already allowed for this scope'
-      : 'Pending allowed-model save';
+      : 'Save allowed model now';
     return;
   }
 
@@ -2522,11 +2544,91 @@ function renderWorkflowModelPool() {
   updateSelectedPremiumEligibilityControls();
 }
 
+let additionalModelInventories = [];
+let modelInventoryGeneration = 0;
+
+function renderAdditionalModelInventory() {
+  renderModelInventory({
+    inventories: additionalModelInventories,
+    enabled: persistedTargetEnabledLlms,
+    effectiveEnabled: currentEffectiveEnabledLlms,
+    roles: [
+      { entry: currentEffectiveLlm, label: 'Effective primary' },
+      { entry: currentResolvedLlm, label: 'Save target primary' },
+      { entry: browserChatPrimaryEntry(), label: 'Browser chat' },
+      { entry: currentServerDefaultLlm, label: 'Server default' },
+      { entry: latestRagRuntimeConfiguration?.llm_resolution?.effective, label: 'RAG language model' },
+      { entry: latestRagRuntimeConfiguration?.embedder_resolution?.effective, label: 'RAG embedder' },
+    ],
+    ready: scopedModelStateReady,
+    busy: scopedModelSaveInFlight,
+    allow: allowAndSaveWorkflowPoolEntry,
+  });
+}
+
+async function refreshAdditionalModelInventory() {
+  if (!document.getElementById('additionalModelInventory')) return;
+  const generation = ++modelInventoryGeneration;
+  additionalModelInventories = [];
+  renderAdditionalModelInventory();
+  await Promise.all(['openai', 'openrouter', 'gemini', 'meta', 'ollama'].map(async (provider) => {
+    let inventory;
+    try {
+      inventory = await modelSettingsRequest(`/api/settings/models/inventory/${provider}`, {
+        cache: 'no-store', headers: await buildSettingsFetchHeaders(),
+      });
+    } catch (_) {
+      inventory = { provider, models: [], error: `${provider}: model discovery unavailable. Check provider configuration and refresh the inventory.` };
+    }
+    if (generation !== modelInventoryGeneration) return;
+    additionalModelInventories.push(inventory);
+    renderAdditionalModelInventory();
+  }));
+}
+
+async function allowAndSaveWorkflowPoolEntry(entry) {
+  if (scopedModelSaveInFlight || !entry) return false;
+  const generation = scopedModelLoadGeneration;
+  scopedModelSaveInFlight = true;
+  renderModelScopeOverview();
+  setInlineStatusMessage(document.getElementById('modelPoolStatusMessage'), `Checking ${entry.provider}: ${entry.model} availability…`, null);
+  try {
+    const inventory = await modelSettingsRequest(`/api/settings/models/inventory/${entry.provider}`, {
+      cache: 'no-store', headers: await buildSettingsFetchHeaders(),
+    });
+    if (!inventory.available || !inventory.models?.some((candidate) => candidate.available && sameLlmSlot(candidate, entry))) {
+      throw new Error(inventory.error || `${entry.provider}: ${entry.model} is unavailable. Check the provider key or host and refresh its model list.`);
+    }
+    if (generation !== scopedModelLoadGeneration) return false;
+  } catch (error) {
+    if (generation === scopedModelLoadGeneration) {
+      setInlineStatusMessage(document.getElementById('modelPoolStatusMessage'), `${entry.provider}: ${error.message}`, 'error');
+    }
+    return false;
+  } finally {
+    scopedModelSaveInFlight = false;
+    renderModelScopeOverview();
+  }
+  addOrUpdateWorkflowPoolEntry(entry);
+  const saved = await persistModelScopeSettings();
+  if (!saved) {
+    const status = document.getElementById('modelPoolStatusMessage');
+    setInlineStatusMessage(status, `${entry.provider}: ${entry.model}: ${status?.textContent || 'Save failed; retry.'}`, 'error');
+  }
+  return saved;
+}
+
 function renderModelScopeOverview() {
+  renderAdditionalModelInventory();
   const browserPrimary = browserChatPrimaryEntry();
+  const browserStatus = !scopedModelStateReady
+    ? 'checking allowed models; browser preference retained'
+    : !isPersistedEffectiveModelAllowed(browserPrimary)
+      ? 'not allowed for the current scope; select an allowed replacement explicitly or restore its scoped allowance'
+      : 'browser preference';
   setModelScopeSummaryText(
     'browserChatModelSummary',
-    browserPrimary ? `${formatLlmEntry(browserPrimary)} (browser preference)` : 'No usable browser chat model selected',
+    browserPrimary ? `${formatLlmEntry(browserPrimary)} (${browserStatus})` : 'No usable browser chat model selected',
   );
   setModelScopeSummaryText(
     'effectiveScopedModelSummary',
@@ -2630,6 +2732,7 @@ function restoreScopedPrimary() {
 }
 
 async function persistModelScopeSettings() {
+  if (scopedModelSaveInFlight) return false;
   if (!scopedModelStateReady) {
     setInlineStatusMessage(
       document.getElementById('modelPoolStatusMessage'),
@@ -2641,6 +2744,7 @@ async function persistModelScopeSettings() {
   }
   scopedModelSaveInFlight = true;
   updateScopedModelSaveAvailability();
+  renderModelScopeOverview();
   setInlineStatusMessage(
     document.getElementById('modelPoolStatusMessage'),
     'Saving scoped primary and allowed models...',
@@ -2655,15 +2759,18 @@ async function persistModelScopeSettings() {
       'success',
     );
     void refreshSelectedOpenAiCostSummary();
+    return true;
   } catch (error) {
     setInlineStatusMessage(
       document.getElementById('modelPoolStatusMessage'),
       error?.message || 'Failed to save scoped primary and allowed models.',
       'error',
     );
+    return false;
   } finally {
     scopedModelSaveInFlight = false;
     updateScopedModelSaveAvailability();
+    renderModelScopeOverview();
   }
 }
 
@@ -3970,7 +4077,7 @@ function setupSpeechSettingsSection() {
   const sttSupported = isSpeechRecognitionSupported();
 
   if (supportNote) {
-    supportNote.textContent = `${supportsAudioRecording() ? 'Recorded dictation is supported; enable an OpenAI transcription model (gpt-transcribe, gpt-4o-transcribe or gpt-4o-mini-transcribe) in your model pool.' : 'Recorded dictation needs HTTPS and microphone recording support.'} Browser recognition: ${sttSupported ? 'available with limited context support' : 'unavailable'}. Spoken playback: ${ttsSupported ? 'available' : 'unavailable'}.`;
+    supportNote.textContent = `${supportsAudioRecording() ? 'Recorded dictation uses enabled models with file-transcription metadata and a supported provider transport. Allow a model in the inventory, then select it here. Live dictation uses a separate realtime transport.' : 'Recorded dictation needs HTTPS and microphone recording support.'} Browser recognition: ${sttSupported ? 'available with limited context support' : 'unavailable'}. Spoken playback: ${ttsSupported ? 'available' : 'unavailable'}.`;
   }
 
   if (!ttsSupported) {
@@ -4389,6 +4496,7 @@ export function __testOnly_setModelScopeState({
     );
   currentEffectiveEnabledLlms = normaliseEnabledLlmEntries(effectiveEnabledLlms);
   currentServerDefaultLlm = buildCanonicalLlmEntry(serverDefaultLlm);
+  persistedTargetEnabledLlms = normaliseEnabledLlmEntries(enabledLlms);
   currentEnabledLlmAlternatives = normaliseEnabledLlmEntries(enabledLlms)
     .filter((entry) => !currentResolvedLlm || !sameLlmSlot(entry, currentResolvedLlm));
   explicitlyRemovedWorkflowPoolKeys = new Set();
@@ -4408,6 +4516,14 @@ export function __testOnly_renderRuntimeModelSummaries(options = {}) {
 
 export function __testOnly_addOrUpdateWorkflowPoolEntry(entry) {
   return addOrUpdateWorkflowPoolEntry(entry);
+}
+
+export function __testOnly_allowAndSaveWorkflowPoolEntry(entry) {
+  return allowAndSaveWorkflowPoolEntry(entry);
+}
+
+export function __testOnly_refreshAdditionalModelInventory() {
+  return refreshAdditionalModelInventory();
 }
 
 export function __testOnly_useBrowserModelAsScopedPrimary() {
@@ -5028,6 +5144,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadAndDisplaySettings();
   setupConversationHistorySettingsSection();
   setupSpeechSettingsSection();
+  void refreshAdditionalModelInventory();
+  document.getElementById('refreshModelInventoryButton')?.addEventListener('click', refreshAdditionalModelInventory);
   setupConceptUiSettings();
   // Load DB info
   try { await loadAndDisplayDbInfo(); } catch { }
@@ -5131,7 +5249,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const provider = selectedPremiumProvider();
     if (!isPersistedEffectiveModelAllowed(selectedPremiumPoolEntry(provider))) {
       premiumToggle.checked = false;
-      setLocalPremiumModelUseEnabled(false);
       updatePremiumModelStatusMessages();
       refreshActiveSettingsConcernGuidance();
       notifyLocalModelPreferenceChanged();
@@ -5139,6 +5256,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
 
+    setStoredPremiumSelectedModel(provider, selectedPremiumModelName(provider));
+    setStoredPremiumModelParameters(provider, readPremiumModelParametersFromUi(provider));
     setLocalPremiumModelUseEnabled(true, provider);
     updatePremiumModelStatusMessages();
     refreshActiveSettingsConcernGuidance();
@@ -5244,19 +5363,19 @@ document.getElementById('testOpenRouterModelButton')?.addEventListener('click', 
 document.getElementById('testMetaModelButton')?.addEventListener('click', testSelectedMetaModel);
 document.getElementById('testOllamaModelButton')?.addEventListener('click', testSelectedOllamaModel);
 document.getElementById('addOpenAiToWorkflowPoolButton')?.addEventListener('click', () => {
-  addOrUpdateWorkflowPoolEntry(selectedOpenAiPoolEntry());
+  void allowAndSaveWorkflowPoolEntry(selectedOpenAiPoolEntry());
 });
 document.getElementById('addGeminiToWorkflowPoolButton')?.addEventListener('click', () => {
-  addOrUpdateWorkflowPoolEntry(selectedGeminiPoolEntry());
+  void allowAndSaveWorkflowPoolEntry(selectedGeminiPoolEntry());
 });
 document.getElementById('addOpenRouterToWorkflowPoolButton')?.addEventListener('click', () => {
-  addOrUpdateWorkflowPoolEntry(selectedOpenRouterPoolEntry());
+  void allowAndSaveWorkflowPoolEntry(selectedOpenRouterPoolEntry());
 });
 document.getElementById('addMetaToWorkflowPoolButton')?.addEventListener('click', () => {
-  addOrUpdateWorkflowPoolEntry(selectedMetaPoolEntry());
+  void allowAndSaveWorkflowPoolEntry(selectedMetaPoolEntry());
 });
 document.getElementById('addOllamaToWorkflowPoolButton')?.addEventListener('click', () => {
-  addOrUpdateWorkflowPoolEntry(selectedOllamaPoolEntry());
+  void allowAndSaveWorkflowPoolEntry(selectedOllamaPoolEntry());
 });
 document.getElementById('useBrowserModelAsScopedPrimaryButton')?.addEventListener(
   'click',
@@ -5267,6 +5386,9 @@ document.getElementById('restoreScopedPrimaryButton')?.addEventListener(
   restoreScopedPrimary,
 );
 document.getElementById('saveModelPoolButton')?.addEventListener('click', persistModelScopeSettings);
+document.getElementById('reloadModelPoolButton')?.addEventListener('click', () => {
+  if (!scopedModelSaveInFlight) void reloadScopedModelSettings();
+});
 document.getElementById('saveRuntimeModelSettingsButton')?.addEventListener('click', persistRuntimeModelSettings);
 document.getElementById('modelPoolTargetScopeSelect')?.addEventListener('change', (event) => {
   if (!actorSessionReady) {
@@ -5570,8 +5692,8 @@ async function loadAndDisplaySettings() {
       syncGmailOutboundRateLimitWriteAccess();
     }
 
-    // The selector should reflect the resolved active model for the provider in scope,
-    // not a stale enabled_llms entry from an older or broader context.
+    // Restore the browser choice independently of the server primary. Eligibility
+    // is checked against the current effective scope after loading.
     const {
       effectiveLlm: displayedEffectiveLlm,
       currentOpenAIModel,
@@ -5587,10 +5709,10 @@ async function loadAndDisplaySettings() {
     currentServerDefaultLlm = buildCanonicalLlmEntry(settings.server_default_llm);
     const localModelPreference = getEffectiveLocalModelPreference();
     const currentOllamaModel = resolveOllamaDropdownSelectionValue(localModelPreference);
-    const preferredOpenAiModel = currentOpenAIModel || localModelPreference.openaiModel || null;
-    const preferredOpenRouterModel = currentOpenRouterModel || localModelPreference.openrouterModel || null;
-    const preferredGeminiModel = currentGeminiModel || localModelPreference.geminiModel || null;
-    const preferredMetaModel = currentMetaModel || localModelPreference.metaModel || null;
+    const preferredOpenAiModel = localModelPreference.openaiModel || currentOpenAIModel || null;
+    const preferredOpenRouterModel = localModelPreference.openrouterModel || currentOpenRouterModel || null;
+    const preferredGeminiModel = localModelPreference.geminiModel || currentGeminiModel || null;
+    const preferredMetaModel = localModelPreference.metaModel || currentMetaModel || null;
     const premiumEnabled = ['openai', 'openrouter', 'gemini', 'meta'].includes(localModelPreference.activeSource);
     const preferredPremiumProvider = normalisePremiumProvider(
       localModelPreference.premiumProvider || localModelPreference.activeSource,
@@ -6216,16 +6338,18 @@ async function saveAllSettings({
       settings.rag_llm = ragLlmSetting;
     }
 
-    const response = await fetch('/api/settings/', {
+    const requestOptions = {
       method: 'POST',
       headers: await buildSettingsFetchHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(settings),
-    });
-    const payload = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-      const message = payload?.message || `Failed to save settings (${response.status})`;
-      throw new Error(message);
+    };
+    let payload;
+    if (includeChatModels) {
+      payload = await modelSettingsRequest('/api/settings/', requestOptions);
+    } else {
+      const response = await fetch('/api/settings/', requestOptions);
+      payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.message || `Failed to save settings (${response.status})`);
     }
 
     if (includeChatModels && modelScopeGenerationAtSave !== scopedModelLoadGeneration) {
@@ -6248,10 +6372,16 @@ async function saveAllSettings({
     }
 
     if (includeChatModels && payload?.resolved_llm) {
+      if (!Array.isArray(payload.enabled_llms) || settings.enabled_llms.some(
+        (entry) => !payload.enabled_llms.some((saved) => sameLlmEntry(entry, saved)),
+      )) throw new Error('Saved pool did not contain all requested models. Reload the pool and retry.');
       currentResolvedLlm = payload.resolved_llm;
+      if (selectedModelPoolTargetScope === 'user' || effectiveModelScope(currentEffectiveLlm) === 'organisation') {
+        currentEffectiveLlm = payload.resolved_llm;
+      }
       stagedScopedPrimaryLlm = buildCanonicalLlmEntry(payload.resolved_llm);
       if (Array.isArray(payload?.enabled_llms)) {
-        const persistedTargetEnabledLlms = normaliseEnabledLlmEntries(payload.enabled_llms);
+        persistedTargetEnabledLlms = normaliseEnabledLlmEntries(payload.enabled_llms);
         currentEnabledLlmAlternatives = [...persistedTargetEnabledLlms]
           .filter((entry) => !currentResolvedLlm || !sameLlmSlot(entry, currentResolvedLlm));
         if (
@@ -6325,6 +6455,7 @@ async function saveAllSettings({
         true,
       );
     }
+    if (includeChatModels) throw error;
     return false;
   }
 }

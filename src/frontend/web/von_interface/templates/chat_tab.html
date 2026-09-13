@@ -10,6 +10,7 @@
               aria-label="Collapse conversation list" aria-expanded="true" aria-controls="chatSessionTabs"
               title="Collapse conversation list" data-keep-title="true"><span aria-hidden="true">◧</span></button>
             <span class="conversation-tray-heading">Conversations</span>
+            <span id="conversationTrayContext" class="conversation-tray-context" aria-live="polite"></span>
           </div>
           <div id="chatSessionTabs" class="chat-session-tabs" role="tablist" aria-label="Conversation sessions"
             aria-orientation="horizontal"></div>
@@ -366,12 +367,12 @@
   </div>
 
   <!-- Task Panel (JVNAUTOSCI-1040) -->
-  <div id="taskPanel" class="llm-popup hidden task-panel" aria-hidden="true">
+  <div id="taskPanel" class="llm-popup hidden task-panel" role="dialog" aria-label="Tasks" aria-hidden="true">
     <div class="llm-popup-header">
       <span>Tasks</span>
       <div class="task-panel-header-actions">
-        <button id="refreshTasksBtn" class="btn-mini" title="Refresh tasks">🔄</button>
-        <button id="closeTaskPanel" class="btn-mini" title="Close">✕</button>
+        <button id="refreshTasksBtn" type="button" class="btn-mini" title="Refresh tasks" aria-label="Refresh tasks">Refresh</button>
+        <button id="closeTaskPanel" type="button" class="btn-mini" title="Close Tasks popup" aria-label="Close Tasks popup">Close</button>
       </div>
     </div>
     <div class="llm-popup-body">

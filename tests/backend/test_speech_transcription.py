@@ -10,6 +10,11 @@ from src.backend.services import speech_transcription_service as speech
 
 @pytest.fixture
 def provider(monkeypatch):
+    from src.backend.services import model_registry_service
+
+    monkeypatch.setattr(
+        model_registry_service, "get_model_registry_snapshot", lambda: {"models": []}
+    )
     monkeypatch.setattr(
         speech,
         "resolve_enabled_llm_settings",
@@ -145,3 +150,58 @@ def test_bad_recording_never_reaches_provider(provider, data, mime):
             actor="#V#a", organisation=None, audio=data, mime_type=mime
         )
     provider[0].audio.transcriptions.create.assert_not_called()
+
+
+def test_explicit_metadata_model_selection_is_checked_against_effective_pool(
+    provider, monkeypatch
+):
+    from src.backend.services import model_registry_service
+
+    monkeypatch.setattr(
+        model_registry_service,
+        "get_model_registry_snapshot",
+        lambda: {
+            "models": [
+                {
+                    "provider": "openai",
+                    "model_id": "future-transcription",
+                    "capabilities": {"audio_transcription": True},
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        speech,
+        "resolve_enabled_llm_settings",
+        lambda **kw: [
+            {"provider": "openai", "model": "future-transcription"},
+            {"provider": "openai", "model": "general-chat"},
+        ],
+    )
+    assert (
+        speech.transcription_model("#V#speaker", None, "future-transcription")
+        == "future-transcription"
+    )
+    for model in ("general-chat", "removed-transcription", "gpt-4o-transcribe"):
+        with pytest.raises(speech.SpeechUnavailable, match="not an enabled"):
+            speech.transcription_model("#V#speaker", None, model)
+    client, _ = provider
+    speech.transcribe_audio(
+        actor="#V#speaker",
+        organisation=None,
+        audio=b"fixture",
+        mime_type="audio/webm",
+        model="future-transcription",
+    )
+    assert (
+        client.audio.transcriptions.create.call_args.kwargs["model"]
+        == "future-transcription"
+    )
+
+
+def test_disabled_provider_cannot_transcribe_even_with_enabled_model(
+    provider, monkeypatch
+):
+    monkeypatch.delenv("TEST_SPEECH_KEY")
+    with pytest.raises(speech.SpeechUnavailable, match="OpenAI key"):
+        speech.transcription_capability("#V#speaker", None)
