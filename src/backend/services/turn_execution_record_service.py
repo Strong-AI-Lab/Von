@@ -8844,6 +8844,19 @@ def build_conversation_situation_turn_projection(
                 "tool": tool_name,
                 "status": effect_status,
             }
+            if tool_name == "task_create":
+                arguments = invocation.get("effective_arguments")
+                if not isinstance(arguments, Mapping):
+                    arguments = invocation.get("arguments")
+                if isinstance(arguments, Mapping):
+                    task_key = _safe_str(arguments.get("idempotency_key"))
+                    if task_key and len(task_key) <= 512:
+                        # Preserve the dispatched key even if a model sidecar
+                        # forgets it. This is an attempt locator, not completion.
+                        effect["task_idempotency_key"] = task_key
+                task_id = _safe_str(payload.get("task_concept_id"))
+                if task_id and task_id.startswith("#V#"):
+                    effect["task_concept_id"] = task_id
             if effect_id:
                 effect["effect_id"] = effect_id
             if isinstance(changed, bool):

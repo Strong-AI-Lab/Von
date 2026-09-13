@@ -40826,7 +40826,10 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             description=(
                 "Resolve a Vontology concept deterministically from a user-provided surface form. "
                 "Read-only: does not mutate concepts. Returns resolved/ambiguous/not_found with an audit trail. "
-                "Supports language preferences, instance_of restriction, and optional code-string matching."
+                "Supports language preferences, instance_of restriction, and optional code-string matching. "
+                "Resolution is lexical candidate evidence, not intended operational identity or authority. "
+                "Inspect match stage, accessible alternatives and bounded search coverage before relying "
+                "on a weak match. Not-found does not prove absence outside the searched scope."
             ),
         ),
         MethodDefinition(

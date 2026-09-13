@@ -1,3 +1,4 @@
+import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './conversationNavigation.js';
 import { resizeCompactDraft, shouldSubmitComposerKey } from './compactComposer.js';
 import { initializeConceptAutocomplete } from './conceptAutocomplete.js';
 import { simpleMarkdownToHtml } from '../markdownUtils.js';
@@ -140,6 +141,38 @@ function updateUnreadMarkers() {
             element.prepend(label);
         } else if (!unread) label?.remove();
     });
+    updateMessageNavigation();
+}
+
+function updateMessageNavigation() {
+    const content = _messagesContainer?.querySelector('#messageViewContent');
+    const compose = _messagesContainer?.querySelector('#messageComposeArea');
+    if (!content || !compose) return;
+    let navigation = compose.querySelector('.message-navigation');
+    if (!navigation) {
+        navigation = document.createElement('div');
+        navigation.className = 'message-navigation';
+        const unread = document.createElement('button');
+        unread.type = 'button';
+        unread.className = 'message-jump-unread';
+        unread.textContent = 'Jump to first unread message';
+        unread.onclick = () => {
+            const target = content.querySelector('.is-unread');
+            target?.scrollIntoView({ block: 'start' });
+            focusConversationTarget(target);
+        };
+        const latest = createLatestMessageButton(() => {
+            content.scrollTop = content.scrollHeight;
+            focusConversationTarget(content.querySelector('.message-list')?.lastElementChild || content);
+            updateMessageNavigation();
+        });
+        navigation.append(unread, latest);
+        compose.prepend(navigation);
+        content.addEventListener('scroll', updateMessageNavigation, { passive: true });
+    }
+    navigation.querySelector('.message-jump-unread').hidden = !content.querySelector('.is-unread');
+    setNavigationVisible(navigation.querySelector('.chat-scroll-to-end-btn'),
+        content.scrollHeight - content.scrollTop - content.clientHeight > 60);
 }
 
 function observeDisplayedMessages() {
@@ -148,6 +181,12 @@ function observeDisplayedMessages() {
     const root = _messagesContainer?.querySelector('#messageViewContent');
     const generation = _exchangeGeneration;
     const org = getSessionScopedOrgId();
+    // A fixed narrow-screen composer can overlap the scroll root. Content
+    // behind it is not displayed to the reader.
+    const rootBox = root?.getBoundingClientRect();
+    const composeBox = _messagesContainer?.querySelector('#messageComposeArea')?.getBoundingClientRect();
+    const coveredBottom = rootBox && composeBox?.height
+        ? Math.max(0, Math.min(rootBox.height, rootBox.bottom - composeBox.top)) : 0;
     const observer = new IntersectionObserver(entries => {
         // Disconnected observers can still deliver entries for the old pane.
         if (observer !== _readObserver || generation !== _exchangeGeneration
@@ -181,7 +220,7 @@ function observeDisplayedMessages() {
         }).catch(() => {
             if (generation === _exchangeGeneration) showReadFailure();
         }).finally(() => ids.forEach(id => _pendingReads.delete(`${generation}:${id}`)));
-    }, { root, threshold: 0.01 });
+    }, { root, rootMargin: `0px 0px -${coveredBottom}px 0px`, threshold: 0.01 });
     _readObserver = observer;
     root?.querySelectorAll('.is-unread[data-contribution-id]').forEach(el => observer.observe(el));
 }
@@ -390,7 +429,7 @@ function attachMessagesEventListeners() {
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => {
             if (_currentConversationUserId) {
-                loadConversation(_currentConversationUserId);
+                loadConversation(_currentConversationUserId, { silent: true });
             }
         });
     }
@@ -722,6 +761,8 @@ async function loadConversation(userId, { silent = false, before = null, observe
         }
         if (before || !silent) _olderCursor = response.before || null;
         _currentUserId = response.current_user_id || null;
+        _readObserver?.disconnect();
+        _readObserver = null;
         await renderMessages();
         if (generation !== _exchangeGeneration || org !== getSessionScopedOrgId()) return;
         restoreReplyDeliveryAttemptForCurrentScope();
@@ -731,13 +772,13 @@ async function loadConversation(userId, { silent = false, before = null, observe
             contentEl.prepend(earlier);
         }
         if (contentEl && before) contentEl.scrollTop = oldTop + contentEl.scrollHeight - oldHeight;
-        else if (contentEl && silent && !nearBottom) {
-            contentEl.scrollTop = oldTop;
-            const jump = document.createElement('button'); jump.type = 'button'; jump.className = 'message-jump-latest'; jump.textContent = 'New messages · Jump to latest';
-            jump.onclick = () => { contentEl.scrollTop = contentEl.scrollHeight; jump.remove(); };
-            contentEl.append(jump);
-        }
+        else if (contentEl && silent && !nearBottom) contentEl.scrollTop = oldTop;
+        else if (contentEl) contentEl.scrollTop = contentEl.scrollHeight;
         updateUnreadMarkers();
+        // Opening starts at the first loaded unread contribution, without
+        // acknowledging earlier/unloaded or skipped contributions.
+        if (contentEl && !silent) contentEl.querySelector('.is-unread')?.scrollIntoView?.({ block: 'start' });
+        updateMessageNavigation();
         if (observeReads) observeDisplayedMessages();
     } catch (_) {
         if (generation === _exchangeGeneration && contentEl && !silent) contentEl.innerHTML = '<div class="message-error">Could not load this conversation. Try Refresh.</div>';
@@ -1075,8 +1116,7 @@ async function renderMessages() {
     });
     await hydrateConceptCartouchesInRoot(contentEl);
 
-    // Scroll to bottom
-    contentEl.scrollTop = contentEl.scrollHeight;
+    // The loader restores the viewport before attaching read observers.
 }
 
 function isComposePending(scope) {

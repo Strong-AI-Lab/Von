@@ -159,3 +159,60 @@ test('queued observers from a previous selection and hidden documents cannot mar
     observers[0].callback([visibleEntry()]);
     expect(api.postJson.mock.calls.filter(([url]) => url === '/api/messages/read/bulk')).toHaveLength(0);
 });
+
+test('scrolling away exposes the shared latest control without waiting for new messages or writing read state', async () => {
+    const panel = require(base + 'components/messagePanel.js');
+    await panel.openMessageExchange(row('#V#bob'));
+    const content = document.getElementById('messageViewContent');
+    Object.defineProperties(content, { scrollHeight: { configurable: true, value: 1000 }, clientHeight: { configurable: true, value: 200 } });
+    content.scrollTop = 20;
+    content.dispatchEvent(new Event('scroll'));
+    const latest = document.querySelector('.chat-scroll-to-end-btn');
+    expect(latest.getAttribute('aria-label')).toBe('Scroll to latest message');
+    expect(latest.tabIndex).toBe(0);
+    latest.click();
+    expect(content.scrollTop).toBe(1000);
+    expect(latest.tabIndex).toBe(-1);
+    expect(document.activeElement.dataset.contributionId).toBe('one');
+    expect(require(base + 'apiService.js').postJson).toHaveBeenCalledTimes(1);
+});
+
+test('refresh and pagination preserve scroll position and first unread navigation without bulk acknowledgement', async () => {
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValueOnce({ ...unreadResponse(), before: 'older' });
+    const panel = require(base + 'components/messagePanel.js');
+    await panel.openMessageExchange(row('#V#bob'));
+    const content = document.getElementById('messageViewContent');
+    Object.defineProperties(content, { scrollHeight: { configurable: true, value: 1000 }, clientHeight: { configurable: true, value: 200 } });
+    content.scrollTop = 25;
+    const updated = unreadResponse();
+    updated.messages.push({ ...response('two').messages[0], created_at: '2026-09-12T12:00:00Z' });
+    api.postJson.mockResolvedValueOnce(updated);
+    await panel.refreshOpenMessageExchange();
+    expect(content.scrollTop).toBe(25);
+    const first = content.querySelector('.is-unread');
+    first.scrollIntoView = jest.fn();
+    document.querySelector('.message-jump-unread').click();
+    expect(first.scrollIntoView).toHaveBeenCalledWith({ block: 'start' });
+    expect(document.activeElement).toBe(first);
+    const older = response('old'); older.messages[0].created_at = '2026-09-10T12:00:00Z';
+    api.postJson.mockResolvedValueOnce(older);
+    [...content.querySelectorAll('button')].find(b => b.textContent === 'Load earlier messages').click();
+    await flush();
+    expect(content.scrollTop).toBe(25);
+    expect(content.querySelectorAll('[data-contribution-id]')).toHaveLength(3);
+    expect(api.postJson.mock.calls.some(([url]) => url.includes('/read/'))).toBe(false);
+});
+
+test('the visible-read observer excludes the fixed composer overlap', async () => {
+    const observers = mockReadObserver();
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValue(unreadResponse());
+    const panel = require(base + 'components/messagePanel.js');
+    await panel.openMessageExchange(row('#V#bob'));
+    document.getElementById('messageViewContent').getBoundingClientRect = () => ({ top: 100, bottom: 800, height: 700 });
+    document.getElementById('messageComposeArea').getBoundingClientRect = () => ({ top: 650, bottom: 800, height: 150 });
+    await panel.refreshOpenMessageExchange();
+    expect(observers).toHaveLength(2);
+    expect(global.IntersectionObserver.mock.calls[1][1].rootMargin).toBe('0px 0px -150px 0px');
+});

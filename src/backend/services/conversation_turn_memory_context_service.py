@@ -624,6 +624,16 @@ def _render_runtime_turn_fact_block(projection: Mapping[str, Any]) -> str | None
             target_ids = _normalise_strings(effect.get("target_ids"), limit=12)
             if target_ids:
                 details.append("targets=" + ",".join(target_ids))
+            task_key = _safe_str(effect.get("task_idempotency_key"))
+            if task_key:
+                details.append(
+                    "task_idempotency_key=" + json.dumps(task_key, ensure_ascii=False)
+                )
+            task_id = _safe_str(effect.get("task_concept_id"))
+            if task_id:
+                details.append(
+                    "task_concept_id=" + json.dumps(task_id, ensure_ascii=False)
+                )
             rendered_effects.append(f"{identity}: " + "; ".join(details))
         if rendered_effects:
             lines.append("effect receipts:")
@@ -679,11 +689,11 @@ def merge_conversation_situation_turn_projection(
             else ""
         )
     )
-    if not isinstance(projection, Mapping):
-        return selected_situation or None
-    block = _render_runtime_turn_fact_block(projection)
-    if not block:
-        return selected_situation or None
+    block = (
+        _render_runtime_turn_fact_block(projection)
+        if isinstance(projection, Mapping)
+        else None
+    )
 
     model_base, _model_blocks = _separate_runtime_turn_fact_blocks(selected_situation)
     _current_base, current_blocks = _separate_runtime_turn_fact_blocks(
@@ -694,7 +704,7 @@ def merge_conversation_situation_turn_projection(
     # Runtime blocks are server projections, not model-authored situation text.
     # Preserve prior canonical blocks and add the current deterministic block;
     # never let a model sidecar introduce a reusable object or resource scope.
-    for prior_block in [*current_blocks, block]:
+    for prior_block in [*current_blocks, *([block] if block else [])]:
         prior_request_id = _runtime_turn_fact_block_request_id(prior_block)
         if prior_request_id:
             blocks_by_request_id[prior_request_id] = prior_block

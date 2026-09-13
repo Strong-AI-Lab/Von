@@ -35,7 +35,6 @@
 .unified-message-content .message-content pre { overflow: auto; white-space: pre; max-width: 100%; }
 .unified-message-content .message-author { font-weight: 600; margin-bottom: 8px; }
 .message-reply-destination { margin: 0 0 6px; font-size: 12px; opacity: .8; }
-.message-jump-latest { position: sticky; bottom: 8px; display: block; margin: auto; }
 .message-conversation-row .chat-session-tab-header { display: flex; align-items: center; gap: 8px; }
 .conversation-source-status { font-size: 12px; padding: 8px; }
 @media (max-width: 800px) { .unified-message-content .message-view-header { flex-wrap: wrap; } .unified-message-content .message-bubble { padding: 12px; } }

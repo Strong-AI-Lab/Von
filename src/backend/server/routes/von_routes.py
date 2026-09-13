@@ -13954,6 +13954,7 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
             conversation_history_owner_user_id=history_user_id,
             conversation_history_namespace=history_namespace,
             conversation_situation=conversation_situation_text,
+            conversation_situation_revision=conversation_situation_revision,
             conversation_observations=conversation_observations,
             conversation_observation_state=conversation_observation_state,
             model_registry_snapshot=turn_model_registry_snapshot,
@@ -13978,6 +13979,18 @@ def _generate_impl():  # pyright: ignore[reportGeneralTypeIssues]
         updated_conversation_situation_text = getattr(
             adaptive_turn_result, "conversation_situation", None
         )
+        checkpoint_revision = getattr(
+            adaptive_turn_result, "conversation_situation_revision", None
+        )
+        if isinstance(checkpoint_revision, int) and not isinstance(
+            checkpoint_revision, bool
+        ):
+            conversation_situation_revision = checkpoint_revision
+            checkpoint_text = getattr(
+                adaptive_turn_result, "conversation_situation_checkpoint", None
+            )
+            if isinstance(checkpoint_text, str):
+                conversation_situation_text = checkpoint_text
         response_authority = str(
             getattr(adaptive_turn_result, "response_authority", "model") or "model"
         ).strip()
