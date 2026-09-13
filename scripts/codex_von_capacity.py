@@ -8,12 +8,23 @@ This intentionally serialises coding work; it is not a fleet scheduler.
 
 import fcntl
 import os
+import platform
+import re
+import subprocess
 import stat
 from contextlib import contextmanager
 from pathlib import Path
 
 
 def available_memory_bytes():
+    if platform.system() == "Darwin":
+        output = subprocess.check_output(["/usr/bin/vm_stat"], text=True)
+        page_size = int(re.search(r"page size of (\d+) bytes", output).group(1))
+        pages = sum(
+            int(re.search(rf"{name}:\s+(\d+)", output).group(1))
+            for name in ("Pages free", "Pages inactive", "Pages speculative")
+        )
+        return pages * page_size
     for line in Path("/proc/meminfo").read_text().splitlines():
         if line.startswith("MemAvailable:"):
             return int(line.split()[1]) * 1024
