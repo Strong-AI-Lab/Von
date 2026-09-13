@@ -71,6 +71,19 @@ be answered and `blocked` for a technical impediment. Include the question in
 plain English, or an empty string when none is needed. Keep the summary useful
 to Michael without requiring him to read raw logs.
 
+For an external dependency that prevents further useful authorised work, you may
+include `blocker`: key (stable dependency name), kind (dependency or transient),
+owner, recovery, scope_json (JSON object of relevant revision/profile/scope),
+required_observations_json (JSON object of exact observations that demonstrate
+repair), and probe_key (null unless an applicable operator probe is supplied).
+Use null or omit blocker otherwise. Report observed facts, not an inferred ready
+flag; authentication/profile prerequisites must include their actual observations.
+The controller adds the task/actor/organisation and failed-attempt binding.
+Do not classify code you can safely repair as a controller dependency. Continue
+independently useful work before returning a blocked result. Old text-only
+failures remain supported, but need explicit retry or contextual inbox review;
+unrelated edits, new archives, status changes and elapsed time will not retry them.
+
 The supplied capabilities describe the controller and this sandbox, with known
 limitations; configured execution settings are not provider-observed model
 identity. Use available read-only host tools when relevant facts are absent.

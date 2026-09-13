@@ -27,6 +27,7 @@ def source(tmp_path):
     for name in (
         "codex_von_worker.py",
         "codex_von_inbox.py",
+        "codex_von_retry.py",
         "codex_von_deploy.py",
         "codex_von_release.py",
         "deploy_local_main.py",
@@ -130,6 +131,28 @@ def test_activation_cannot_redirect_to_an_unrelated_checkout(source, tmp_path):
     root.mkdir()
     with pytest.raises(deployer.runtime.DeploymentError, match="outside"):
         releases.activate(root, source)
+
+
+def test_retry_dependency_is_required_only_for_workers_that_import_it(source, tmp_path):
+    source, _, _ = source
+    (source / "scripts/codex_von_retry.py").unlink()
+    git(source, "add", "-u")
+    git(source, "commit", "-qm", "Incomplete new worker fixture")
+    with pytest.raises(deployer.runtime.DeploymentError, match="codex_von_retry"):
+        releases.prepare(
+            source, tmp_path / "releases", git(source, "rev-parse", "HEAD")
+        )
+    (source / "scripts/codex_von_worker.py").write_text(
+        "# Pre-retry worker rollback fixture\n"
+    )
+    git(source, "commit", "-qam", "Legacy worker fixture")
+    target = releases.prepare(
+        source, tmp_path / "releases", git(source, "rev-parse", "HEAD")
+    )
+    assert (
+        releases.activate(tmp_path / "releases", target)["status"]
+        == "selected_for_next_invocation"
+    )
 
 
 def test_shared_controller_lock_is_inherited_without_unlocking(tmp_path):

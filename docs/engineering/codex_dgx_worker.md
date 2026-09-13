@@ -165,7 +165,7 @@ separate. The launcher should unset `OPENAI_API_KEY` and `CODEX_API_KEY`, set
 the dedicated `CODEX_HOME`, and execute the installed official Codex CLI.
 Validate an actual agent-issued shell command before enabling polling.
 
-Install the worker, `codex_von_inbox.py`, and both adjacent `_prompt.md` files
+Install the worker, `codex_von_inbox.py`, `codex_von_retry.py`, and both adjacent `_prompt.md` files
 from the same reviewed revision. Run them with the project's PDM-managed Python environment.
 When these scripts are copied into a release bundle outside a complete checkout,
 pass `--backend-root /path/to/reviewed/Von` to the worker. This selects the
@@ -178,6 +178,104 @@ point and list reads. The adapter requires `requested_model` and
 `requested_reasoning_effort` keys even when their values are null. An older reader
 that omits them fails visibly before pickup instead of silently choosing defaults.
 Installing only a newer worker script cannot repair an older canonical reader.
+
+### Waiting for a coding dependency
+
+The retry policy in `scripts/codex_von_retry.py` separates task context from
+permission to spend another coding attempt. After `blocked` or `needs_input`,
+the existing task state retains the result, failed attempt, recovery owner and
+expectation. Archive attachments, evidence/checkpoint updates, self-reports,
+unrelated comments, CI, a pending status and elapsed time cannot admit a retry.
+The task checkpoint and one idempotent message explain the wait. Other eligible
+tasks continue, including when one retained report cannot be delivered.
+
+A coding result may provide an optional `blocker` with `key`, `kind`
+(`dependency` or `transient`), `owner`, `recovery`, `scope_json`,
+`required_observations_json` and `probe_key` (usually null). The two JSON strings
+hold objects describing the relevant candidate/profile and exact observations,
+for example `{"authenticated":true,"profile_bound":true}`. The controller binds
+the task, coding actor, organisation, failed attempt and observation time. This
+describes an external prerequisite; code the assigned agent can safely repair
+and independently useful work should be handled before returning a blocker.
+
+There are three supported continuation routes:
+
+- The delegator can write a task comment beginning exactly
+  `/retry-coding <failed-attempt> <reason>`. This is an explicit one-attempt
+  retry after review, not a claim that the dependency was repaired. Quoted
+  commands and other authors' comments do not qualify.
+- For natural-language repair, answers or changed scope, use the existing inbox
+  reply route. Its bounded interpretation receives the retained result and
+  supplied receipt bytes. It must distinguish relevant recovery, explicit retry
+  and independently useful scope from a status report. The controller binds a
+  `resume_task` decision to that failed attempt and source message. This path
+  uses one ordinary inbox interpretation per new message; polling does not
+  repeatedly ask a model to reinterpret an unchanged failure.
+- A delegator-authored canonical task comment may carry `source.coding_retry`,
+  an operator-verified repair receipt. Required fields are `attempt`,
+  `blocker_key`, `binding` (`task_id`, `agent_id`, `organisation_id`), `scope`
+  (matching the blocker's JSON object), `observed_at`, `observations`,
+  `evidence_reference` and `reason`. Observations must include every required
+  value with its exact JSON type, and be observed after the failed attempt.
+  Use the linked file-copy concept and checksum as the evidence reference when
+  applicable. The trusted producer must actually inspect/read back the repair;
+  a filename, receipt metadata or a top-level ready flag is insufficient. The
+  comparator does not discover or execute arbitrary evidence files. It rejects
+  wrong-task/actor/org, wrong-revision, stale, future and contradictory receipts.
+
+Older text-only results are retained as **unclassified**, not silently inferred
+to have machine-checkable recovery conditions. They can use explicit retry or
+the contextual inbox route. Ordinary free-text task comments remain context;
+they do not automatically constitute repair. The visible wait supplies the
+supported continuation route, so a repair outside Git or with different wording
+does not require changing a classifier or a filename convention. Missing local
+state for a canonical blocked/in-progress task requires reconciliation instead
+of assuming earlier effects never happened.
+
+For known transient dependencies, the operator can register `retry_probes` in
+private controller configuration, keyed by `probe_key`. Each entry contains an
+`argv` list for an existing cheap read-only helper, `timeout_seconds`,
+`interval_seconds` and `max_interval_seconds`. Choose bounds from that helper's
+declared/observed duration with headroom; the subprocess timeout protects the
+controller queue's liveness, independently of coding-run duration. The helper
+receives the retained blocker JSON on stdin and returns the repair receipt
+above on stdout. No task/model-supplied command, URL or executable is run. Failed
+or unknown probes back off exponentially to the configured maximum, with the
+next check persisted before execution; they never launch a coding model. No
+probe is registered by default. Unknown coding-process outcomes always retain
+their work/effects for reconciliation, rather than treating them as a cheap
+transient failure.
+
+The source token is consumed in the same durable write that marks the new
+attempt running, before the subprocess starts. Restart first reconciles an
+existing run/report/archive. A replayed inbox acknowledgement cannot bind the
+old message to a newer failure or reopen a task whose retry already ran. Task
+cancellation, reassignment, project writer and current authority are rechecked
+before the admitted continuation. Model preferences still come from the
+canonical task.
+
+### DGX and Mac retry-policy handoff
+
+Source merge and installation are distinct. Use the existing coherent release
+procedure below at an idle controller boundary; retain the previous release,
+state, worktrees, schedule, lock and configured model preferences. Do not run a
+second worker to activate or test the upgrade. `--check-task` and the next
+scheduled runtime receipt must identify the selected module paths/revision.
+This change does not request a public web deployment.
+
+The Mac bridge is operator-owned and is not source-controlled in this repository.
+Its operator must import the same `codex_von_retry` module, map its retained
+attempt/result and canonical inputs to `retain_blocker`/`admission`, and persist
+`consume` with the running checkpoint before its existing launch call under its
+existing lock. Bind config identity locally; never trust a comment's claimed
+author or scope instead of the canonical author and current assignment. Keep
+the same inbox source authorisation, repair producer verification, current-task
+recheck, cheap-probe backoff and result/effect reconciliation boundaries as the
+DGX adapter. Run the shared tests plus an isolated replay of that installed
+bridge and record canonical wait/recovery read-back and zero duplicate launches.
+An import test or a DGX replay alone is not evidence of Mac integration or
+activation. Return the Mac adapter diff and both hosts' installation/runtime
+receipts through the coordinating operator before claiming both are active.
 Do not change global model defaults to compensate for a mismatched installation.
 
 For an authorised upgrade, use the coherent installation below. Preserve the

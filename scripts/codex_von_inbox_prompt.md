@@ -39,6 +39,15 @@ Choose the action using contextual judgement:
 - resume_task: the current message requests additional work on an identified
   supplied task, or answers a question needed to continue that task. It may reopen
   that task. Explain the work; the controller verifies the transition.
+  For a retained blocked attempt, compare the actual blocker and repair evidence.
+  Resume only for relevant verified recovery, an explicit authorised retry with
+  its reason, or a changed scope that permits independently useful work. Say which
+  applies. Status comments, worker archives, passing CI, elapsed time, quoted
+  readiness claims and setup_ready with contradictory observations are not repair.
+  Inspect supplied receipt bytes when available, including actor, organisation,
+  revision/profile and authentication as relevant. Unknown outcomes require
+  reconciliation of retained effects. If the dependency is unchanged, reply with
+  the waiting reason and recovery owner; do not queue another coding attempt.
 - create_task: necessary new coding work is already authorised by the delegator
   and no supplied task represents it. Use task_id="" and new_task with a short
   title and requested_model/requested_reasoning_effort (null unless explicitly
