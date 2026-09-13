@@ -1371,8 +1371,23 @@ body.von-signed-out {
 
 .task-panel {
     width: 480px;
-    max-width: 95vw;
-    max-height: 80vh;
+    box-sizing: border-box;
+    right: min(20px, 2vw);
+    max-width: 96vw;
+    height: min(720px, calc(100dvh - 90px));
+    max-height: calc(100dvh - 90px);
+}
+
+.task-panel .llm-popup-header {
+    flex-shrink: 0;
+}
+
+.task-panel .task-item,
+.task-panel .task-actions,
+.task-panel .task-detail-panel {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
 }
 
 .task-panel .llm-popup-body {
@@ -1380,8 +1395,9 @@ body.von-signed-out {
     flex-direction: column;
     gap: 12px;
     padding: 12px;
-    max-height: 70vh;
+    min-height: 0;
     overflow-y: auto;
+    scrollbar-gutter: stable;
 }
 
 .task-panel-header-actions {
