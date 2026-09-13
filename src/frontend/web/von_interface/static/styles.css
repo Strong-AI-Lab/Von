@@ -18583,3 +18583,12 @@ body.settings-body {
     .unified-message-content .send-message-btn { padding: 0 12px; font-size: 14px; }
     .unified-message-content .message-reply-destination { margin: 0 0 4px; font-size: 12px; }
 }
+
+.task-deployment {
+    border: 1px solid var(--border-color, #ccc);
+    border-radius: 6px;
+    padding: 10px;
+    margin-block: 10px;
+    overflow-wrap: anywhere;
+}
+.task-deployment pre { white-space: pre-wrap; overflow-wrap: anywhere; }

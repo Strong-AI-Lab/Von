@@ -23,6 +23,13 @@ choosing a neighbouring product or guessing a revision from timestamps. The
 concept inspector remains available for accessible products needing revision
 resolution. Product reads do not change task status or start work.
 
+
+A selected software deployment is a structured work product: its current receipt
+history and deployment status are read directly, without requiring a copied
+`hasContent` assertion. Task details also show all linked deployment attempts and
+allow selecting a verified attempt. See [build and deployment evidence](deployment_evidence.md)
+for the distinct build, source revision, deployment and verification identities.
+
 **Discuss** opens the existing task-focused conversation path with the accessible
 product reference alongside the task. This also works for human review tasks;
 it does not transfer their assignment to Von. For an eligible task assigned to
