@@ -44,7 +44,7 @@ RESULT_SCHEMA = {
         "deploy_commit": {"type": "string"},
         "blocker": retry_policy.BLOCKER_SCHEMA,
     },
-    "required": ["status", "summary", "evidence", "question", "deploy_commit"],
+    "required": ["status", "summary", "evidence", "question", "deploy_commit", "blocker"],
     "additionalProperties": False,
 }
 
@@ -442,7 +442,8 @@ def check_task(config, api, task_id):
 
 
 def validate_result(value):
-    fields = set(RESULT_SCHEMA["required"])
+    # Strict output requires every property; retained old results may omit blocker.
+    fields = set(RESULT_SCHEMA["required"]) - {"blocker"}
     if not isinstance(value, dict) or set(value) - {"blocker"} not in (
         fields,
         fields - {"deploy_commit"},

@@ -18,6 +18,32 @@ worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
 
 
+def test_result_schema_meets_strict_provider_contract_and_preserves_old_results():
+    # The provider rejects an object before execution if any declared property
+    # is absent from required, even when the property's value permits null.
+    def check_objects(schema):
+        if "properties" in schema:
+            assert set(schema["required"]) == set(schema["properties"])
+            assert schema["additionalProperties"] is False
+            for child in schema["properties"].values():
+                check_objects(child)
+
+    check_objects(worker.RESULT_SCHEMA)
+    legacy = {
+        "status": "completed",
+        "summary": "Done",
+        "evidence": "Verified",
+        "question": "",
+        "deploy_commit": "",
+    }
+    assert worker.validate_result(legacy) == legacy
+    current = dict(legacy, blocker=None)
+    assert worker.validate_result(current) == current
+    assert "null" in worker.RESULT_SCHEMA["properties"]["blocker"]["type"]
+    older = {key: value for key, value in legacy.items() if key != "deploy_commit"}
+    assert worker.validate_result(older) == older
+
+
 @pytest.fixture(autouse=True)
 def isolated_archive_boundary(monkeypatch):
     # Existing controller tests isolate publication; canonical archive capture
