@@ -32,3 +32,15 @@ def test_build_change_changes_entry_url_without_rewriting_templates(tmp_path):
         with app.test_request_context():
             urls.append(url_for('static',filename='js/main.js'))
     assert urls[0] != urls[1]
+
+
+def test_outage_worker_has_narrow_scope_and_release_specific_public_cache():
+    root = Path(__file__).resolve().parents[2] / 'src/frontend/web/von_interface/static'
+    app = Flask(__name__, static_folder=str(root), static_url_path='/static')
+    install_versioned_static(app, 'outage-fixture')
+    response = app.test_client().get('/von/outage-worker.js')
+    assert response.status_code == 200
+    assert response.headers['Service-Worker-Allowed'] == '/von/'
+    assert response.headers['Cache-Control'] == 'no-cache'
+    assert "const CACHE = 'von-outage-v1-" in response.text
+    assert 'session' not in response.text.lower()

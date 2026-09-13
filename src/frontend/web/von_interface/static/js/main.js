@@ -11,6 +11,8 @@ import { getLanguageDisplayName } from './languageConfig.js';
 import { escapeHtml } from './markdownUtils.js';
 import './suppressTooltips.js';
 import { activateTab, loadTabData, setupTabNavigation } from './tabNavigation.js';
+import { installOutageView } from '../outage/app.js';
+import { preserveOutageDraft } from '../outage/draft.js';
 import { evaluateServerHealthState } from './utils/serverHealthState.js';
 import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.js';
 import {
@@ -54,6 +56,7 @@ const getCurrentNamespace = getSessionScopedNamespace;
 
 document.addEventListener('DOMContentLoaded', async () => {
   console.log("DOM fully loaded and parsed.");
+  installOutageView();
 
   const authStatus = await initialiseHomeAuthentication();
   if (!hasAuthenticatedVonActor(authStatus)) {
@@ -92,6 +95,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     applyHomeAuthUnavailable(new Error(`Organisation context could not be confirmed. ${error.message}`));
     return;
   }
+  preserveOutageDraft(getCurrentNamespace);
   loadDeferredSettingsFrame();
 
   // JVNAUTOSCI-954: report bounded, client-reported capability hints (speech/audio)
@@ -980,8 +984,8 @@ function startHealthPolling() {
           ? formatUptime(Math.max(0, Date.now() - lastHealthSuccessAtMs))
           : null;
         uptimeSpan.textContent = lastCheckLabel
-          ? `server down (checked ${lastCheckLabel})`
-          : 'server down';
+          ? `cannot reach Von (checked ${lastCheckLabel})`
+          : 'cannot reach Von';
         const baseTitle = lastSuccessLabel
           ? `Von server is unreachable | Last healthy response ${lastSuccessLabel} ago`
           : 'Von server is unreachable';
@@ -1120,6 +1124,10 @@ function startHealthPolling() {
       clearTimeout(timeout);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
+      if (data?.status !== 'healthy' || typeof data.start_time !== 'string') {
+        throw new Error('Invalid Von health response');
+      }
+      const recoveringFromOutage = serverHealthUiState === 'down';
       lastHealthCheckCompletedAtMs = Date.now();
       hasSeenSuccessfulHealthPoll = true;
       firstFailureAtMs = null;
@@ -2299,7 +2307,8 @@ function startHealthPolling() {
         writeCachedStartTimeIso(newStart);
       }
 
-      if (autoReloadEnabled() && !reloadTriggered && lastIdentity.pid !== null && lastIdentity.start !== null) {
+      if (autoReloadEnabled() && !recoveringFromOutage && !isThinkingActive()
+          && !document.getElementById('promptInput')?.value && !reloadTriggered && lastIdentity.pid !== null && lastIdentity.start !== null) {
         if (newPid !== null && newStart !== null && (newPid !== lastIdentity.pid || newStart !== lastIdentity.start)) {
           reloadTriggered = true;
           setTimeout(() => { try { window.location.reload(); } catch (_) { /* no-op */ } }, 300);
@@ -2375,6 +2384,10 @@ function startHealthPolling() {
     }
     scheduleHealthPoll(nextDelay);
   }
+  document.addEventListener('von:requestHealthCheck', () => {
+    if (healthPollTimerId) clearTimeout(healthPollTimerId);
+    void poll();
+  });
   poll();
   // Also update busy indicator more responsively
   setInterval(updateBusyIndicator, 1500);
