@@ -3406,6 +3406,21 @@ def _actor_scoped_task_query_candidates(
 
 
 def search_tasks(
+    *, query: str | None = None, search_mode: str = "lexical", **filters
+) -> Dict[str, Any]:
+    """Search canonical tasks lexically or by actor-scoped semantic relevance."""
+    if any(key.startswith("_") for key in filters):
+        raise InvalidTaskDataError("Internal search parameters are not accepted")
+    if search_mode == "semantic":
+        from .task_semantic_index_service import search_semantic_tasks
+
+        return search_semantic_tasks(query=query, filters=filters)
+    if search_mode != "lexical":
+        raise InvalidTaskDataError("search_mode must be lexical or semantic")
+    return _search_tasks(query=query, **filters)
+
+
+def _search_tasks(
     *,
     query: str | None = None,
     project_concept_id: str | None = None,
@@ -3443,6 +3458,7 @@ def search_tasks(
     bulk_collection_ids: list[str] | str | None = None,
     limit: int = 50,
     offset: int = 0,
+    _semantic_query: str | None = None,
 ) -> Dict[str, Any]:
     """Search tasks with Jira-style filters over Vontology-backed task concepts."""
 
@@ -3522,6 +3538,11 @@ def search_tasks(
                 query_filter,
                 sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
             )
+        )
+    if _semantic_query is not None:
+        # Do not index placeholder text after a failed canonical text read.
+        query_texts_by_task = get_texts_for_concepts(
+            [doc["concept_id"] for doc in docs]
         )
     tasks = _build_task_responses(docs, texts_by_task=query_texts_by_task)
 
@@ -3859,8 +3880,20 @@ def search_tasks(
         bulk_collection_ids=bulk_collection_ids,
     )
     tasks = visibility_payload["tasks"]
+    semantic_diagnostics = None
+    if _semantic_query is not None:
+        from .task_semantic_index_service import assemble_task_context, rank_tasks
+
+        tasks, semantic_diagnostics = rank_tasks(tasks, _semantic_query)
     total = len(tasks)
     paged = tasks[offset : offset + limit]
+    rag_context = None
+    if semantic_diagnostics is not None:
+        rag_context = assemble_task_context(paged)
+        paged = [
+            {key: value for key, value in task.items() if key != "retrieval_text"}
+            for task in paged
+        ]
     return {
         "tasks": paged,
         "total": total,
@@ -3876,6 +3909,14 @@ def search_tasks(
         "query_candidate_prefilter": query_candidate_prefilter,
         "total_is_exhaustive": bool(
             query_candidate_prefilter.get("total_is_exhaustive", True)
+        ),
+        **(
+            {
+                "semantic_retrieval": semantic_diagnostics,
+                "rag_context": rag_context,
+            }
+            if semantic_diagnostics is not None
+            else {}
         ),
     }
 
