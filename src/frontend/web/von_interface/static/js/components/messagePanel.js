@@ -42,6 +42,7 @@ let _deliveryKeySequence = 0;
 let _exchange = null;
 let _exchangeGeneration = 0;
 let _olderCursor = null;
+let _unreadJumpGeneration = null;
 let _readObserver = null;
 const _exchangeDrafts = new Map();
 const _pendingReads = new Set();
@@ -144,6 +145,57 @@ function updateUnreadMarkers() {
     updateMessageNavigation();
 }
 
+async function jumpToMostRecentUnread() {
+    const generation = _exchangeGeneration;
+    const org = getSessionScopedOrgId();
+    if (_unreadJumpGeneration === generation || _isLoading) return;
+    _unreadJumpGeneration = generation;
+    _readObserver?.disconnect();
+    _readObserver = null;
+    const content = _messagesContainer?.querySelector('#messageViewContent');
+    content?.querySelector('.message-unread-navigation-status')?.remove();
+    const stillCurrent = () => generation === _exchangeGeneration && org === getSessionScopedOrgId();
+    updateMessageNavigation();
+    try {
+        while (stillCurrent()) {
+            const targets = content?.querySelectorAll('.is-unread[data-contribution-id]');
+            const target = targets?.[targets.length - 1];
+            if (target) {
+                target.scrollIntoView({ block: 'start' });
+                focusConversationTarget(target);
+                return;
+            }
+            if (!_olderCursor) {
+                showUnreadNavigationStatus('No unread messages remain in this conversation.');
+                return;
+            }
+            const cursor = _olderCursor;
+            const loaded = await loadConversation(_currentConversationUserId, {
+                silent: true, before: cursor, observeReads: false
+            });
+            if (!stillCurrent()) return;
+            if (!loaded || _olderCursor === cursor) {
+                showUnreadNavigationStatus('Could not load earlier unread messages. Try jumping again.');
+                return;
+            }
+        }
+    } finally {
+        if (_unreadJumpGeneration === generation) _unreadJumpGeneration = null;
+        if (stillCurrent()) {
+            updateMessageNavigation();
+            observeDisplayedMessages();
+        }
+    }
+}
+
+function showUnreadNavigationStatus(text) {
+    const status = document.createElement('div');
+    status.className = 'message-unread-navigation-status';
+    status.setAttribute('role', 'status');
+    status.textContent = text;
+    _messagesContainer?.querySelector('#messageViewContent')?.prepend(status);
+}
+
 function updateMessageNavigation() {
     const content = _messagesContainer?.querySelector('#messageViewContent');
     const compose = _messagesContainer?.querySelector('#messageComposeArea');
@@ -155,12 +207,7 @@ function updateMessageNavigation() {
         const unread = document.createElement('button');
         unread.type = 'button';
         unread.className = 'message-jump-unread';
-        unread.textContent = 'Jump to first unread message';
-        unread.onclick = () => {
-            const target = content.querySelector('.is-unread');
-            target?.scrollIntoView({ block: 'start' });
-            focusConversationTarget(target);
-        };
+        unread.onclick = () => void jumpToMostRecentUnread();
         const latest = createLatestMessageButton(() => {
             content.scrollTop = content.scrollHeight;
             focusConversationTarget(content.querySelector('.message-list')?.lastElementChild || content);
@@ -170,7 +217,12 @@ function updateMessageNavigation() {
         compose.prepend(navigation);
         content.addEventListener('scroll', updateMessageNavigation, { passive: true });
     }
-    navigation.querySelector('.message-jump-unread').hidden = !content.querySelector('.is-unread');
+    const unread = navigation.querySelector('.message-jump-unread');
+    const jumping = _unreadJumpGeneration === _exchangeGeneration;
+    unread.textContent = jumping ? 'Loading unread messages…' : 'Jump to most recent unread';
+    unread.disabled = jumping || _isLoading;
+    unread.hidden = !jumping && !content.querySelector('.is-unread')
+        && !(_olderCursor && _exchange?.shared_unread_count > 0);
     setNavigationVisible(navigation.querySelector('.chat-scroll-to-end-btn'),
         content.scrollHeight - content.scrollTop - content.clientHeight > 60);
 }
@@ -780,9 +832,16 @@ async function loadConversation(userId, { silent = false, before = null, observe
         if (contentEl && !silent) contentEl.querySelector('.is-unread')?.scrollIntoView?.({ block: 'start' });
         updateMessageNavigation();
         if (observeReads) observeDisplayedMessages();
+        return true;
     } catch (_) {
         if (generation === _exchangeGeneration && contentEl && !silent) contentEl.innerHTML = '<div class="message-error">Could not load this conversation. Try Refresh.</div>';
-    } finally { if (generation === _exchangeGeneration) _isLoading = false; }
+        return false;
+    } finally {
+        if (generation === _exchangeGeneration) {
+            _isLoading = false;
+            updateMessageNavigation();
+        }
+    }
 }
 
 function isPaperRecommendationMessage(message) {
