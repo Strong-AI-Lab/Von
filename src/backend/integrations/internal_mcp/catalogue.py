@@ -35903,6 +35903,7 @@ def _task_search(**kwargs):
     try:
         result = search_tasks(
             query=kwargs.get("query"),
+            search_mode=kwargs.get("search_mode", "lexical"),
             project_concept_id=kwargs.get("project_concept_id"),
             collection_concept_id=kwargs.get("collection_concept_id"),
             status_filter=kwargs.get("status_filter") or kwargs.get("status"),
@@ -45116,6 +45117,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "project_concept_id": (str, type(None)),
                     "collection_concept_id": (str, type(None)),
                     "query": (str, type(None)),
+                    "search_mode": str,
                     "status_filter": (str, type(None)),
                     "status": (str, type(None)),
                     "statuses": (list, type(None)),
@@ -45169,7 +45171,9 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             description=(
                 "Search Von's internal task store with rich filters (status, assignee, "
                 "creator, report-to, labels, planning metadata, category/source semantics, "
-                "hierarchy, date ranges, and dependency state)."
+                "hierarchy, date ranges, and dependency state). Set search_mode='semantic' "
+                "with a natural-language query to retrieve related tasks and citation-ready "
+                "RAG context. Inspect semantic_retrieval for embedding failures and lexical fallback."
             ),
         ),
         MethodDefinition(

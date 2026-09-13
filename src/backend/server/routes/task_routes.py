@@ -806,6 +806,7 @@ def search_tasks_route() -> ResponseReturnValue:
 
         result = search_tasks(
             query=request.args.get("query"),
+            search_mode=request.args.get("search_mode", "lexical"),
             project_concept_id=request.args.get("project_concept_id"),
             collection_concept_id=request.args.get("collection_concept_id"),
             status_filter=request.args.get("status_filter"),

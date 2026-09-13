@@ -1,0 +1,15 @@
+{
+  "description": "Synthetic ordinary research-administration queries; relevance judgements are fixtures, not measured model quality.",
+  "tasks": [
+    {"id": "travel", "title": "Arrange conference flights", "description": "Book return airfare and accommodation for the research symposium."},
+    {"id": "minutes", "title": "Summarise lab meeting", "description": "Record decisions and action items from the weekly research discussion."},
+    {"id": "review", "title": "Review experiment results", "description": "Compare replication measurements with the published findings."},
+    {"id": "invoice", "title": "Reconcile supplier invoice", "description": "Check the equipment purchase receipt against the laboratory budget."}
+  ],
+  "queries": [
+    {"query": "organise transport to the academic event", "relevant": ["travel"]},
+    {"query": "what did the team agree to do", "relevant": ["minutes"]},
+    {"query": "check whether the study reproduced", "relevant": ["review"]},
+    {"query": "verify the bill for lab supplies", "relevant": ["invoice"]}
+  ]
+}
