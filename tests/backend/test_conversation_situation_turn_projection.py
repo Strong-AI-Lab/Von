@@ -10,6 +10,32 @@ from src.backend.services.turn_execution_record_service import (
 )
 
 
+def test_indeterminate_task_key_survives_omitted_sidecar_and_context_truncation():
+    projection = build_conversation_situation_turn_projection(
+        request_id="original-create",
+        terminal_status="effect_partially_completed",
+        response_text="Creation is indeterminate; inspect the existing attempt.",
+        tool_invocations=[
+            {
+                "tool": "task_create",
+                "effect_id": "effect:task-A1",
+                "effect_status": "indeterminate",
+                "effective_arguments": {"idempotency_key": "stable-action-A1"},
+                "result": {"task_concept_id": "#V#existing_task"},
+            }
+        ],
+    )
+    assert projection["effects"][0]["task_idempotency_key"] == "stable-action-A1"
+    merged = merge_conversation_situation_turn_projection(
+        current_situation="One task pending; prepared key stable-action-A1.",
+        model_situation="Discardable narrative. " * 1000,
+        projection=projection,
+    )
+    assert 'task_idempotency_key="stable-action-A1"' in merged
+    assert "indeterminate" in merged
+    assert len(merged) <= 12000
+
+
 def test_design_proposal_projects_only_answer_material_verified_concept_ids() -> None:
     projection = build_conversation_situation_turn_projection(
         request_id="turn-design",
