@@ -6566,7 +6566,7 @@ footer {
     left: 0;
     right: 0;
     min-height: 40px;
-    /* Allow footer to grow if content wraps */
+    /* Keep footer information on one scrollable row. */
     margin-top: 0;
     /* REMOVED: margin-top as it's fixed */
     font-size: 0.8rem;
@@ -6592,7 +6592,7 @@ footer {
     left: 0;
     right: 0;
     min-height: 40px;
-    /* Allow footer to grow if content wraps */
+    /* Keep footer information on one scrollable row. */
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -13360,12 +13360,6 @@ button.prompt-vontology-cartouche {
     color: #991b1b;
 }
 
-@media (max-width: 760px) {
-    .server-build-info {
-        display: none;
-    }
-}
-
 .footer-separator {
     margin: 0 4px;
     opacity: 0.5;
@@ -18639,3 +18633,60 @@ body.settings-body {
     min-height: 44px;
     padding: 4px;
 }
+
+/* Footer presentation preferences also apply to the narrow-screen details panel. */
+.footer-container,
+.mobile-footer-details-panel .footer-container {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    overflow-x: auto;
+    white-space: nowrap;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+.footer-container > *,
+.footer-container .footer-segment,
+.footer-container .db-conn-badge { flex: 0 0 auto; }
+.footer-container .footer-info,
+.mobile-footer-details-panel .footer-info,
+.footer-container .pid-indicator {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    white-space: nowrap;
+}
+.footer-container .footer-separator { display: none; }
+.footer-container .footer-info:empty,
+.footer-container .pid-indicator:empty { display: none; }
+.footer-visibility-settings { display: grid; gap: 10px; }
+.footer-visibility-settings label { display: flex; align-items: center; gap: 6px; }
+/* Fixed panels escape the scroll container's clipping boundary. */
+.footer-container .footer-org-menu,
+.footer-container .conversation-runtime-cost-details {
+    position: fixed;
+    left: 12px;
+    right: auto;
+    bottom: var(--von-fixed-footer-clearance, 64px);
+    white-space: normal;
+    max-height: min(420px, 60vh);
+    overflow-y: auto;
+}
+.mobile-footer-details-panel .footer-container .conversation-runtime-cost-details {
+    top: calc(var(--von-fixed-shell-height, 60px) + 72px);
+    bottom: auto;
+}
+html[data-footer-model="false"] .footer-container .conversation-model-controls { display: none; }
+html[data-footer-conversationcost="false"] .footer-container #modelInfoFooter > .conversation-runtime-cost-segment { display: none; }
+html[data-footer-user="false"] .footer-container .footer-user-segment { display: none; }
+html[data-footer-organisation="false"] .footer-container .footer-org-switcher { display: none; }
+html[data-footer-language="false"] .footer-container #languageIndicator { display: none; }
+html[data-footer-database="false"] .footer-container .db-conn-badge { display: none; }
+html[data-footer-uptime="false"] .footer-container #serverUptimeInfo { display: none; }
+html[data-footer-runtimecost="false"] .footer-container #serverRuntimeCostInfo { display: none; }
+html[data-footer-build="false"] .footer-container #serverBuildInfo { display: none; }
+html[data-footer-diagnostics="false"] .footer-container #serverPidFooter { display: none; }
+html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-build="false"] #serverUptimeFooter { display: none; }
+
+.footer-container [hidden] { display: none !important; }

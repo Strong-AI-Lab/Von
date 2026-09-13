@@ -1,3 +1,4 @@
+import { resetFooterPreferences } from './utils/footerPreferences.js';
 import { modelSettingsRequest, renderModelInventory } from './modelInventory.js';
 import { profileButton } from './components/participantProfile.js';
 import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_TRAY_HOVER_KEY, loadConversationLayoutPreferences, normaliseConversationLayout, saveConversationLayoutPreference } from './utils/conversationLayoutPreferences.js';
@@ -222,10 +223,12 @@ const SETTINGS_CONCERN_CONFIG = Object.freeze({
   conversations: Object.freeze({
     sectionIds: Object.freeze([
       'conversation-history-settings',
+      'footer-settings',
       'speech-settings',
     ]),
     anchorIds: Object.freeze([
       'conversation-history-settings',
+      'footer-settings',
       'speech-settings',
     ]),
   }),
@@ -5548,6 +5551,7 @@ document.getElementById('refreshDeprecationMetricsButton')?.addEventListener('cl
 // Reset local preferences button
 document.getElementById('resetLocalPrefsButton')?.addEventListener('click', () => {
   try {
+    resetFooterPreferences();
     setStoredJson(LS_ORG_KEY, null);
     setSessionScopedNamespace(null);
     localStorage.removeItem(LS_LANG_KEY);
