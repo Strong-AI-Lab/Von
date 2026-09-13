@@ -23,6 +23,7 @@ export function detectMarkdown(text) {
 
     // Detect clear markdown indicators (conservative patterns)
     const patterns = [
+        /\bhttps?:\/\/[^\s<>]+/i, // Bare web links also need rendering
         /^#{1,6}\s+.+$/m,           // Headers (# ## ### etc.) - must have space after hashes
         /\*\*[^*\s][^*]*[^*\s]\*\*/, // Bold text (**text**) - must have content without spaces at edges
         /\*[^*\s][^*]*[^*\s]\*/,    // Italic text (*text*) - must have content without spaces at edges
@@ -101,6 +102,46 @@ function isExternalHttpLink(href) {
     return lower.startsWith('http://') || lower.startsWith('https://');
 }
 
+// Process only text in escaped/sanitised HTML; preserve anchors and literal code.
+function linkifyRenderedHtml(html) {
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    let changed = false;
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const node of nodes) {
+        if (node.parentElement?.closest('a, code, pre')) continue;
+        const fragment = document.createDocumentFragment();
+        let offset = 0;
+        for (const match of node.textContent.matchAll(/\bhttps?:\/\/[^\s<>"'`]+/gi)) {
+            let href = match[0].replace(/[.,;:!?]+$/, '');
+            // Retain balanced URL parentheses, excluding sentence delimiters.
+            while (/[)\]}]$/.test(href)) {
+                const closing = href.at(-1);
+                const opening = { ')': '(', ']': '[', '}': '{' }[closing];
+                if (href.split(closing).length <= href.split(opening).length) break;
+                href = href.slice(0, -1).replace(/[.,;:!?]+$/, '');
+            }
+            if (!sanitiseHref(href)) continue;
+            fragment.append(node.textContent.slice(offset, match.index));
+            const anchor = document.createElement('a');
+            anchor.href = href;
+            anchor.textContent = href;
+            anchor.target = '_blank';
+            anchor.rel = 'noopener noreferrer';
+            fragment.append(anchor);
+            offset = match.index + href.length;
+        }
+        if (offset) {
+            changed = true;
+            fragment.append(node.textContent.slice(offset));
+            node.replaceWith(fragment);
+        }
+    }
+    return changed ? template.innerHTML : html;
+}
+
 export function simpleMarkdownToHtml(markdown) {
     if (!markdown || typeof markdown !== 'string') return '';
 
@@ -121,26 +162,28 @@ export function simpleMarkdownToHtml(markdown) {
     const orderedListRule = /^ {0,3}\d+\.\s+(.+)$/;
     const blockquoteRule = /^>\s?(.*)$/;
     const renderInlineMarkdown = (text) => {
-        let html = escapeHtml(text ?? '');
-
-        // Inline code first so markdown markers inside code spans are not re-processed.
-        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-
-        // Links (sanitise href; never allow javascript: etc.)
-        html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, linkText, href) => {
+        // Protect code and links from subsequent substitutions; escape URLs once.
+        const tokens = [];
+        const protect = (html) => `\u0000${tokens.push(html) - 1}\u0000`;
+        // NUL is reserved for internal placeholders, never user-authored markup.
+        // eslint-disable-next-line no-control-regex
+        let html = String(text ?? '').replace(/\u0000/g, '\ufffd');
+        html = html.replace(/`([^`]+)`/g, (_, code) => protect(`<code>${escapeHtml(code)}</code>`));
+        html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, href) => {
             const safeHref = sanitiseHref(href);
-            if (!safeHref) {
-                return String(linkText);
-            }
+            const content = escapeHtml(label);
+            if (!safeHref) return protect(content);
             const targetAttr = isExternalHttpLink(safeHref) ? ' target="_blank"' : '';
-            return `<a href="${escapeHtml(safeHref)}"${targetAttr} rel="noopener noreferrer">${String(linkText)}</a>`;
+            return protect(`<a href="${escapeHtml(safeHref)}"${targetAttr} rel="noopener noreferrer">${content}</a>`);
         });
+        html = escapeHtml(html);
 
         // Bold and italic (conservative ordering).
         html = html.replace(/\*\*([^*\n][\s\S]*?)\*\*/g, '<strong>$1</strong>');
         html = html.replace(/(^|[^*])\*([^*\n][\s\S]*?)\*([^*]|$)/g, '$1<em>$2</em>$3');
 
-        return html;
+        // eslint-disable-next-line no-control-regex
+        return html.replace(/\u0000(\d+)\u0000/g, (_, index) => tokens[Number(index)]);
     };
 
     const splitTableRow = (line) => {
@@ -275,7 +318,7 @@ export function simpleMarkdownToHtml(markdown) {
         i += 1;
     }
 
-    return blocks.join('\n');
+    return linkifyRenderedHtml(blocks.join('\n'));
 }
 
 export function renderSmartText(text, escapeHtmlOutput = true) {
@@ -313,7 +356,7 @@ export async function renderMarkdownViaServer(markdown) {
         }
 
         if (typeof data?.html === 'string') {
-            return data.html;
+            return linkifyRenderedHtml(data.html);
         }
 
         throw new Error('render_markdown response missing html');
