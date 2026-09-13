@@ -27,6 +27,10 @@ SEARCH_SCHEMA_VERSION = "conversation_search_result.v1"
 _VALID_MATCH_MODES = frozenset({"lexical", "semantic", "hybrid"})
 _VALID_SORTS = frozenset({"relevance", "updated"})
 _MAX_CANDIDATES = 500
+_RANKING_VERSION = 2
+_METADATA_MATCH_FIELDS = frozenset(
+    {"title", "display_name", "display_name_override", "participant"}
+)
 _SEARCH_CURSOR_TTL_SECONDS = 24 * 60 * 60
 
 
@@ -45,6 +49,11 @@ def _safe_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _metadata_priority(row: Mapping[str, Any]) -> int:
+    fields = (row.get("match") or {}).get("fields", [])
+    return int(bool(_METADATA_MATCH_FIELDS.intersection(fields)))
 
 
 def _row_timestamp(row: Mapping[str, Any]) -> str:
@@ -535,6 +544,13 @@ def search_actor_conversations(
         terms = [term.casefold() for term in query_text.split() if term.strip()]
         for session_id, row in accessible_by_session.items():
             display_name = str(row.get("session_name") or "")
+            participants = " ".join(
+                str(value) for value in (row.get("participant_ids") or [])
+            ).casefold()
+            participant_text = participants + " " + participants.replace("_", " ")
+            if terms and all(term in participant_text for term in terms):
+                scores[session_id] = scores.get(session_id, 0.0) + 6.0
+                matched_fields.setdefault(session_id, set()).add("participant")
             if terms and all(term in display_name.casefold() for term in terms):
                 scores[session_id] = scores.get(session_id, 0.0) + 6.0
                 matched_fields.setdefault(session_id, set()).add("display_name")
@@ -620,6 +636,7 @@ def search_actor_conversations(
     else:
         result_rows.sort(
             key=lambda row: (
+                _metadata_priority(row),
                 _safe_float((row.get("match") or {}).get("score")),
                 _row_timestamp(row),
                 str(row.get("session_id") or ""),
@@ -639,6 +656,7 @@ def search_actor_conversations(
         "trashed_only": trashed_only,
         "index_version": chat_history_service.CONVERSATION_SEARCH_INDEX_VERSION,
         "index_generation": index_generation,
+        "ranking_version": _RANKING_VERSION,
     }
     if cursor:
         try:
@@ -670,6 +688,7 @@ def search_actor_conversations(
             ]
         else:
             marker = (
+                int(position.get("metadata_priority", 0)),
                 _safe_float(position.get("score")),
                 str(position.get("timestamp") or ""),
                 str(position.get("session_id") or ""),
@@ -678,6 +697,7 @@ def search_actor_conversations(
                 row
                 for row in result_rows
                 if (
+                    _metadata_priority(row),
                     _safe_float((row.get("match") or {}).get("score")),
                     _row_timestamp(row),
                     str(row.get("session_id") or ""),
@@ -695,6 +715,7 @@ def search_actor_conversations(
             "session_id": str(final_row.get("session_id") or ""),
         }
         if sort_mode == "relevance":
+            position["metadata_priority"] = _metadata_priority(final_row)
             position["score"] = _safe_float((final_row.get("match") or {}).get("score"))
         next_cursor = encode_opaque_cursor(
             purpose="conversation_search",
