@@ -38962,7 +38962,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageText.className = 'chat-message-text';
             messageText.style.cssText = 'color: #333; white-space: pre-wrap; text-align: left; font-weight: 400; overflow-wrap: anywhere; word-break: break-word; min-width: 0;';
             const userText = String(message ?? '');
-            const shouldRenderUserMarkdown = sender === 'User' && detectMarkdown(userText);
+            const shouldRenderUserMarkdown = sender !== 'Error' && detectMarkdown(userText);
             if (shouldRenderUserMarkdown) {
                 messageText.classList.add('markdown-rendered', 'chat-markdown');
                 messageText.style.whiteSpace = 'normal';

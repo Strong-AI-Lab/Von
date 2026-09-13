@@ -28,12 +28,21 @@ const actor = '#V#alice', other = '#V#bob';
 const row = { session_id: 'messages:fixture', source_kind: 'message_exchange', viewer_id: actor,
     participant_ids: [actor, other], other_participant_ids: [other], session_name: 'Bob fixture', organisation_concept_id: null,
     last_message_at: '2026-09-12T10:59:00Z', preview: 'Fixture conversation' };
+const linkText = 'Published https://github.com/Strong-AI-Lab/knowkat/pull/5. ' +
+    '[Private PR](https://github.com/Strong-AI-Lab/Von-Private/pull/67), ' +
+    '`https://example.org/literal` [unsafe](javascript:alert) [unsafe](data:text/html,x)';
+async function checkLinks(container) {
+    await expect(container.locator('a[href="https://github.com/Strong-AI-Lab/knowkat/pull/5"]')).toHaveCount(1);
+    await expect(container.locator('a[href="https://github.com/Strong-AI-Lab/Von-Private/pull/67"]')).toHaveText('Private PR');
+    await expect(container.locator('code')).toHaveText('https://example.org/literal');
+    await expect(container.locator('code a, a[href^="javascript:"], a[href^="data:"]')).toHaveCount(0);
+}
 let messages, reads, failRead;
 function seed() {
     reads = []; failRead = false;
     messages = Array.from({ length: 60 }, (_, i) => ({ concept_id: `fixture-${i}`, created_at: `2026-09-12T10:${String(i).padStart(2, '0')}:00Z`,
         relationships: { '#V#has_sender': [i % 2 ? actor : other], '#V#has_recipient': [i % 2 ? other : actor] },
-        concept_data: { read_by: [], content_fallback: `Contribution ${i}. ` + 'A research update with observations, provenance and next steps. '.repeat(5) } }));
+        concept_data: { read_by: [], content_fallback: linkText + ` Contribution ${i}. ` + 'A research update with observations, provenance and next steps. '.repeat(5) } }));
 }
 const unread = () => messages.filter(m => m.relationships['#V#has_recipient'].includes(actor) && !m.concept_data.read_by.includes(actor));
 async function setup(page) {
@@ -110,6 +119,7 @@ async function measure(page, name) {
             assert(unread().length > 20, 'Opening cannot clear unseen messages');
             assert(unread().some(m => m.concept_id === 'fixture-0'), 'unloaded page stays unread');
             await expect(page.locator('.chat-session-tab-unread')).toHaveText(String(unread().length));
+            await checkLinks(page.locator('[data-contribution-id="fixture-59"] .message-content'));
             results.push(await measure(page, `messages-${width}`));
             const firstUnread = page.locator('.message-bubble.is-unread').first();
             const id = await firstUnread.getAttribute('data-contribution-id');
@@ -144,6 +154,7 @@ async function measure(page, name) {
             await expect.poll(() => unread().some(m => m.concept_id === 'fixture-0')).toBe(false);
             const persisted = unread().length;
             await setup(page); // Simulate page reload against retained canonical fixture state.
+            await checkLinks(page.locator('[data-contribution-id="fixture-59"] .message-content'));
             assert(unread().length <= persisted);
             assert(!unread().some(m => m.concept_id === id));
             await page.evaluate(async () => {
@@ -158,6 +169,19 @@ async function measure(page, name) {
             assert(layout[0].x > layout[1].x + 5 && layout[0].x > layout[2].x + 5, 'Old-style participant alignment');
             assert(layout.every(item => item.overflow <= 1), 'Old-style controls/content fit');
             assert(layout[1].text.includes('Bob'));
+            for (const history of [false, true]) {
+                await page.evaluate(async ({ linkText, history }) => {
+                    const chat = await import('/static/js/chatTab.js');
+                    document.querySelector('#scrollableField').replaceChildren();
+                    for (const sender of ['User', 'Bob', 'Von']) {
+                        chat.__testOnly_appendMessage(sender, linkText, `links-${sender}`, false, history);
+                    }
+                }, { linkText, history });
+                for (const turn of ['User', 'Bob', 'Von']) {
+                    await checkLinks(page.locator(`[data-turn-id="links-${turn}"] .chat-message-text`));
+                }
+                await page.screenshot({ path: path.join(evidence, `links-chat-${width}-${history}.png`) });
+            }
             await page.evaluate(async () => {
                 const chat = await import('/static/js/chatTab.js');
                 const field = document.querySelector('#scrollableField');
