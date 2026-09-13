@@ -1582,6 +1582,12 @@ def create_flask_app(
     _bootstrap_constitutive_relation_requirements_for_startup(app)
     _configure_durable_workflow_startup(app)
     _maybe_start_external_conversation_import_worker(app)
+    from ..services.web_push_service import start_worker as start_web_push_worker
+
+    try:
+        start_web_push_worker()
+    except Exception:
+        app.logger.warning("Web Push startup unavailable; canonical messaging is unaffected")
     _maybe_start_chat_prompt_queue_dispatcher(app)
     _log_prompt_concept_health(app)
 
@@ -2605,6 +2611,9 @@ def _register_default_blueprints(app: Flask) -> None:
     app.register_blueprint(admin_bp, url_prefix="/admin")
     app.register_blueprint(task_bp, url_prefix="/api/tasks")
     app.register_blueprint(message_bp, url_prefix="/api/messages")
+    from .routes.web_push_routes import web_push_bp
+
+    app.register_blueprint(web_push_bp)
     app.register_blueprint(ontology_authority_bp)
     app.register_blueprint(auth_bp, url_prefix="/von")
     app.register_blueprint(agent_gmail_oauth_bp, url_prefix="/von")

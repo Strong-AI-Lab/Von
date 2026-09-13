@@ -137,6 +137,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Start background preload of Vontology data while chat is active
   try {
+    const { openNotificationMessage } = await import('./pushNotifications.js');
+    await openNotificationMessage();
+  } catch (error) {
+    console.warn('[main] Notification navigation unavailable');
+  }
+
+  try {
     preloadVontologyData();
     startHealthPolling();
   } catch (e) {

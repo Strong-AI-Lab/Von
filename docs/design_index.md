@@ -160,6 +160,10 @@ human acceptance and promotion into a current public authority surface.
 
 ## 7. Dated snapshots, diagnostics, and proposals
 
+- [Mobile Web Push candidate and operator handoff](engineering/mobile_web_push.md)
+  records the bounded JVNAUTOSCI-2757 implementation and unfulfilled browser
+  transport acceptance; it does not establish a deployed notification service.
+
 These files retain evidence and rationale, but must not drive current task
 ordering or implementation without live revalidation:
 
