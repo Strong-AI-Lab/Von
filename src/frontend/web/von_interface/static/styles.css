@@ -1365,7 +1365,7 @@ body.von-signed-out {
     margin-top: 6px;
 }
 
-/* ============================================================================
+/* =====================================================================
    Task Panel Styles (JVNAUTOSCI-1040)
    ============================================================================ */
 
@@ -12208,7 +12208,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     color: #065f46;
 }
 
-/* =============================================================================
+/* ======================================================================
    JVNAUTOSCI-1043: User editing of AI outputs
    ============================================================================= */
 
@@ -16303,7 +16303,7 @@ body.settings-body {
     color: #14532d;
 }
 
-/* ===========================
+/* ====================
    MARKDOWN CONTENT STYLING
    ========================== */
 
@@ -18583,6 +18583,15 @@ body.settings-body {
     .unified-message-content .send-message-btn { padding: 0 12px; font-size: 14px; }
     .unified-message-content .message-reply-destination { margin: 0 0 4px; font-size: 12px; }
 }
+
+.task-deployment {
+    border: 1px solid var(--border-color, #ccc);
+    border-radius: 6px;
+    padding: 10px;
+    margin-block: 10px;
+    overflow-wrap: anywhere;
+}
+.task-deployment pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* Shared navigation stays inside the composer so narrow-screen overflow cannot
    clip it. It occupies its own row, rather than covering transcript text. */
