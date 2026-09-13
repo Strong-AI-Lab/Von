@@ -18527,6 +18527,7 @@ body.settings-body {
     }
     .composer-more-icon { display: none; }
     .composer-add-icon { display: inline; font-size: 24px; font-weight: 400; }
+    .chat-composer-more-actions[open] > summary .composer-add-icon { transform: rotate(45deg); }
     .chat-composer-more-actions:not([open]) > .button-row { display: none; }
     .chat-composer-more-actions[open] > .button-row {
         grid-column: 1 / -1; grid-row: 2;
