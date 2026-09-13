@@ -1,3 +1,4 @@
+import { initialiseConversationActions } from './conversationActions.js';
 import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './conversationNavigation.js';
 import { bindAttachmentComposer, imageItems, imagesBlocked, renderImageAttachments, removeSentAttachments } from '../utils/conversationImages.js';
 import { getWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
@@ -99,7 +100,7 @@ export async function openMessageExchange(row) {
     header?.querySelectorAll('.exchange-profile-button').forEach(el => el.remove());
     for (const id of row.participant_ids) {
         const b = profileButton(id, id === row.viewer_id ? 'Your profile' : 'Participant profile');
-        b.className = 'exchange-profile-button'; header?.append(b);
+        b.className = 'exchange-profile-button'; header?.querySelector('.conversation-actions-panel')?.append(b);
     }
     const input = _messagesContainer?.querySelector('#messageInput');
     if (input) {
@@ -413,10 +414,15 @@ function renderMessagesTabContent() {
             <div class="messages-main">
                 <div id="messageViewHeader" class="message-view-header hidden">
                     <span id="conversationTitle" class="conversation-title" tabindex="0">Select a conversation</span>
-                    <button id="messageTaskPanelBtn" class="chat-export-btn" type="button" title="Open tasks panel" aria-label="Tasks">📋</button>
+                    <details class="conversation-actions">
+                      <summary>Conversation actions</summary>
+                      <div class="conversation-actions-panel">
+                    <button id="messageTaskPanelBtn" class="chat-export-btn" type="button" title="Open tasks panel" aria-label="Tasks referenced in messages">Tasks referenced in messages</button>
                     <button id="refreshMessagesBtn" class="message-refresh-btn" type="button" title="Refresh" aria-label="Refresh messages">
-                        ${renderMessagePanelIcon('refresh')}
+                        Refresh messages
                     </button>
+                      </div>
+                    </details>
                 </div>
                 <div id="messageViewContent" class="message-view-content">
                     <div class="message-empty-state" role="status" aria-live="polite">
@@ -482,6 +488,7 @@ function renderMessagesTabContent() {
 
     // Attach event listeners
     attachMessagesEventListeners();
+    initialiseConversationActions(_messagesContainer);
     initializeConceptAutocomplete(_messagesContainer.querySelector('#newMessageRecipient'));
     restoreNewMessageDeliveryAttemptForCurrentScope();
     renderComposePendingUi(COMPOSE_SCOPE_REPLY);
