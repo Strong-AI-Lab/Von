@@ -318,3 +318,71 @@ def get_exchange(actor, participants, *, organisation=None, limit=50, before=Non
         "before": cursor,
         "current_user_id": actor,
     }
+
+
+def materialise_exchange_reference(actor, participants, *, organisation=None):
+    """Create an actor-private reference, never a second message transcript.
+
+    Access is rechecked on every request, including reuse. The actor is part of
+    the reference identity so another participant cannot inherit its visibility.
+    """
+    from .concept_service import (
+        create_concept,
+        get_concept_by_concept_id_exact,
+        ConceptNotFoundError,
+    )
+
+    def read_reference(concept_id):
+        try:
+            return get_concept_by_concept_id_exact(concept_id)
+        except ConceptNotFoundError:
+            return None
+
+    from ..security.visibility_predicates import get_specific_to_user_values
+
+    exchange = get_exchange(actor, participants, organisation=organisation, limit=1)
+    if not exchange["messages"]:
+        raise PermissionError("Conversation unavailable.")
+    with override_current_actor(actor, organisation):
+        participants = sorted(set(participants))
+        session_id = exchange_id(participants, organisation)
+        digest = hashlib.sha256(json.dumps([actor, session_id]).encode()).hexdigest()[
+            :32
+        ]
+        concept_id = "#V#message_exchange_reference_" + digest
+        locator = {
+            "source_kind": "message_exchange",
+            "session_id": session_id,
+            "participant_ids": participants,
+            "organisation_concept_id": organisation,
+            "method": "POST /api/messages/exchange",
+        }
+        existing = read_reference(concept_id)
+        if not existing:
+            try:
+                create_concept(
+                    name="Message conversation reference",
+                    concept_id=concept_id,
+                    parent_concept_ids=["#V#conversation"],
+                    description="Private reference to an exact message exchange. Messages remain in their canonical store. Retrieve using: "
+                    + json.dumps(locator, sort_keys=True),
+                    attributes={"message_exchange_reference": locator},
+                    created_by_concept_id=actor,
+                    organisation_concept_id=organisation,
+                    visibility_scope_mode="user_only_default",
+                    resolve_visibility_from_event_namespace=False,
+                    maintain_relationship_inverses=False,
+                )
+            except Exception:
+                # A concurrent copy may have created the same private reference.
+                if not read_reference(concept_id):
+                    raise
+        verified = read_reference(concept_id)
+        if (
+            not verified
+            or get_specific_to_user_values(verified.get("relationships")) != [actor]
+            or verified.get("attributes", {}).get("message_exchange_reference")
+            != locator
+        ):
+            raise RuntimeError("Conversation reference could not be verified.")
+        return {"concept_id": concept_id, "message_exchange_reference": locator}

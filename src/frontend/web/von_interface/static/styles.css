@@ -10561,6 +10561,11 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 }
 
 .chat-session-menu {
+    box-sizing: border-box;
+    width: max-content;
+    max-width: min(320px, calc(100vw - 16px));
+    max-height: calc(100dvh - 16px);
+    overflow-y: auto;
     position: fixed;
     z-index: 20050;
     min-width: 160px;
@@ -10577,6 +10582,9 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 }
 
 .chat-session-menu button {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    min-height: 44px;
     width: 100%;
     text-align: left;
     background: transparent;
@@ -18617,4 +18625,11 @@ body.settings-body {
 }
 @media (prefers-reduced-motion: reduce) {
     .chat-scroll-to-end-btn { transition: none; }
+}
+
+.conversation-menu-trigger {
+    margin-left: auto;
+    flex: 0 0 44px;
+    min-height: 44px;
+    padding: 4px;
 }

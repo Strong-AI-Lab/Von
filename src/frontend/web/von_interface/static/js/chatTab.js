@@ -27583,7 +27583,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         }
         const isPinned = isConversationPinned(sid);
         if (session.source_kind === 'message_exchange') {
-            fragment.append(renderMessageConversationRow(session, { selected: sid === activeSessionId, pinned: isPinned, togglePin: () => toggleConversationPinned(sid), hide: () => hideConversation(sid) }));
+            fragment.append(renderMessageConversationRow(session, { selected: sid === activeSessionId, pinned: isPinned, togglePin: () => toggleConversationPinned(sid), hide: () => isConversationHidden(sid) ? unhideConversation(sid) : hideConversation(sid), hidden: isConversationHidden(sid), openMenu: openChatSessionMenu }));
             return;
         }
         const isFirstPinnedTab = pinnedSessions.length > 0 && index === 0 && isPinned;

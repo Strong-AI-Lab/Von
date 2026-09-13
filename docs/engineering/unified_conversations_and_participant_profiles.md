@@ -134,3 +134,19 @@ precision, draft and selection preservation, exact group/organisation identity,
 profile permission denial, publication read-back, and authenticated desktop and
 narrow-viewport checks. The native task holds dated delivery evidence and the
 current merge decision. Repository publication does not activate a running server.
+
+## Message conversation references
+
+Message rows expose a touch-accessible actions button and the shared, viewport-
+bounded conversation menu. Actions include opening the exchange, copying its
+exact structured reference, pinning/hiding (or their inverses), and participant
+profiles. Chat-history-only actions such as moving a transcript are not offered
+for a message exchange.
+
+**Copy Concept ID** calls `POST /api/messages/exchange/reference`. After checking
+that the authenticated actor can read an existing exact participant/organisation
+exchange, the service lazily creates and reads back an actor-private conversation
+reference concept. Its `attributes.message_exchange_reference` and description
+retain the source locator; messages remain canonical message concepts. References
+are stable per actor/exchange, not shared ownership or an access grant. Repeated
+copies recheck source access. No existing message migration is required.
