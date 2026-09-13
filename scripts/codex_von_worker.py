@@ -201,6 +201,60 @@ def referenced_tasks(config, api, supplied, task_ids=()):
     }
 
 
+def delegated_task_image_context(config, supplied):
+    """Resolve operator-authorised source images from a fresh assigned task.
+
+    Context from another conversation, a prior result or the model cannot add
+    identifiers to this handoff. Credentials stay in the trusted controller.
+    """
+    policy = config.get("delegated_task_images") or {}
+    if policy.get("enabled") is not True or not policy.get("authorisation_reference"):
+        return {}
+    task_id = supplied.get("task_id") if isinstance(supplied, dict) else None
+    if not task_id:
+        return {}
+    from src.backend.services.file_copy_reference_service import (
+        extract_file_copy_concept_ids_from_text,
+    )
+
+    api = Von(config)
+    task = api.task(task_id)
+    if not (
+        authorised_task(task, config)
+        and task.get("status") in ACTIVE
+        and api.native_writer(task)
+    ):
+        return {}
+    inputs = api.inputs(task)
+    sources = {
+        "description": task.get("description"),
+        "evidence": task.get("evidence"),
+        "notes": task.get("notes"),
+        "attachments": inputs.get("attachments"),
+        "comments": [
+            row
+            for row in inputs.get("comments", [])
+            if row.get("author_concept_id") == config["delegator_id"]
+        ],
+        "replies": [
+            row
+            for row in inputs.get("replies", [])
+            if row.get("sender_id") == config["delegator_id"]
+            and row.get("organisation_concept_id") == config["organisation_id"]
+        ],
+    }
+    return {
+        "task_id": task_id,
+        "source_actor": config["delegator_id"],
+        "recipient_actor": config["agent_id"],
+        "organisation_id": config["organisation_id"],
+        "authorisation_reference": policy["authorisation_reference"],
+        "file_copy_concept_ids": extract_file_copy_concept_ids_from_text(
+            json.dumps(sources, default=str)
+        ),
+    }
+
+
 def stage_file_copy_evidence(config, supplied, run_dir):
     """Controller-only authorised byte reads; expose local copies, never blob URLs."""
     from src.backend.services.computer_file_copy_service import (
@@ -212,6 +266,10 @@ def stage_file_copy_evidence(config, supplied, run_dir):
     )
 
     ids = extract_file_copy_concept_ids_from_text(json.dumps(supplied, default=str))
+    try:
+        delegation = delegated_task_image_context(config, supplied)
+    except Exception as exc:
+        delegation = {"lookup_error_type": type(exc).__name__}
     results = []
     for concept_id in ids[:20]:
         item = {
@@ -222,12 +280,52 @@ def stage_file_copy_evidence(config, supplied, run_dir):
             "scope": "configured worker actor and organisation",
         }
         try:
+            record = None
             result = fetch_file_copy_bytes(
                 file_copy_concept_id=concept_id,
                 user_concept_id=config["agent_id"],
                 organisation_concept_id=config["organisation_id"],
                 max_bytes=5_000_000,
             )
+            if (
+                not result.get("success")
+                and result.get("error") == "not_found"
+                and concept_id in delegation.get("file_copy_concept_ids", [])
+            ):
+                from src.backend.security.access_control import override_current_actor
+
+                # This task-scoped read uses an explicit operator grant. The
+                # coding process receives image copies, never the owner's access.
+                with override_current_actor(
+                    config["delegator_id"], config["organisation_id"]
+                ):
+                    result = fetch_file_copy_bytes(
+                        file_copy_concept_id=concept_id,
+                        user_concept_id=config["delegator_id"],
+                        organisation_concept_id=config["organisation_id"],
+                        max_bytes=5_000_000,
+                    )
+                    if result.get("success"):
+                        if not (result["info"].content_type or "").startswith("image/"):
+                            result = {
+                                "success": False,
+                                "error": "delegated_image_required",
+                            }
+                        else:
+                            record = (
+                                build_file_copy_artifact_record(
+                                    file_copy_concept_id=concept_id
+                                )
+                                or {}
+                            )
+                            item.update(
+                                scope="explicit task-scoped source-image delegation",
+                                source_actor=config["delegator_id"],
+                                delegated_task_id=delegation["task_id"],
+                                authorisation_reference=delegation[
+                                    "authorisation_reference"
+                                ],
+                            )
             if not result.get("success"):
                 item["error_code"] = result.get("error")
                 item["status"] = (
@@ -238,10 +336,11 @@ def stage_file_copy_evidence(config, supplied, run_dir):
             else:
                 data = result["data"]
                 digest = hashlib.sha256(data).hexdigest()
-                record = (
-                    build_file_copy_artifact_record(file_copy_concept_id=concept_id)
-                    or {}
-                )
+                if record is None:
+                    record = (
+                        build_file_copy_artifact_record(file_copy_concept_id=concept_id)
+                        or {}
+                    )
                 expected = record.get("sha256")
                 item.update(
                     sha256=digest,
@@ -277,6 +376,7 @@ def stage_file_copy_evidence(config, supplied, run_dir):
         "results": results,
         "omitted": max(0, len(ids) - 20),
         "source": "canonical actor-scoped file-copy service",
+        "delegation_lookup_error": delegation.get("lookup_error_type"),
     }
 
 
