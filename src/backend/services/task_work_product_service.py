@@ -40,6 +40,21 @@ def resolve_task_work_product(
         if not doc:
             return {"status": "unavailable"}
         reference = {"concept_id": product_id}
+        from .deployment_evidence_service import DEPLOYMENT, get_deployment
+
+        if DEPLOYMENT in (doc.get("relationships") or {}).get("is_an_instance_of", []):
+            deployment = get_deployment(product_id)
+            result = {
+                **reference,
+                "status": "ready",
+                "kind": "deployment",
+                "deployment": deployment,
+            }
+            if include_content:
+                import json
+
+                result["content"] = json.dumps(deployment, indent=2, ensure_ascii=False)
+            return result
         rows = get_texts_for_concept(
             product_id,
             predicate="hasContent",

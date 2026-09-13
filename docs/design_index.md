@@ -80,6 +80,7 @@ live.
 |---|---|
 | Every task | [`AGENTS.md`](../AGENTS.md) |
 | Substantial, architecture-sensitive, or older-doc-dependent work | This index, then the applicable sections below |
+| Build/deployment receipts and task work products | [Build and deployment evidence](engineering/deployment_evidence.md) |
 | Task product selection and continuing a responsibility from Tasks | [Task responsibility continuation](engineering/task_responsibility_continuation.md) |
 | Subscription-backed coding task pickup on the DGX | [Codex DGX worker pilot](engineering/codex_dgx_worker.md) |
 | Coding-agent progress and completion messages in Von | [Interactive coding-agent messages](engineering/codex_dgx_worker.md#interactive-coding-agent-messages); operator-specific delivery configuration in personal `AGENTS.md` |

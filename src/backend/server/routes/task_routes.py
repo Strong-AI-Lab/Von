@@ -398,6 +398,62 @@ def get_task_taxonomy_route() -> ResponseReturnValue:
         return jsonify({"error": "Internal server error"}), 500
 
 
+@task_bp.route("/deployment-vocabulary", methods=["POST"])
+@task_bp.route("/deployments", methods=["POST"])
+@task_bp.route("/deployments/<deployment_id>", methods=["GET"])
+@task_bp.route("/builds/<build_id>/deployments", methods=["GET"])
+@task_bp.route("/<task_concept_id>/deployments", methods=["GET"])
+def deployment_evidence_route(deployment_id=None, build_id=None, task_concept_id=None):
+    """Actor-scoped receipt ingestion and represented evidence traversal."""
+    from ...services import deployment_evidence_service as evidence
+
+    actor = _get_current_user_concept_id()
+    if not actor:
+        return jsonify({"error": "Authentication required"}), 401
+    try:
+        if request.method == "POST":
+            if request.path.endswith("/deployment-vocabulary"):
+                evidence.bootstrap_vocabulary(
+                    actor=actor, organisation=_get_current_org_concept_id()
+                )
+                return jsonify({"concept_ids": list(evidence.VOCABULARY)}), 200
+            return (
+                jsonify(
+                    evidence.ingest_deployment(
+                        request.get_json(silent=True),
+                        actor=actor,
+                        organisation=_get_current_org_concept_id(),
+                    )
+                ),
+                200,
+            )
+        if task_concept_id:
+            return (
+                jsonify(
+                    {"deployments": evidence.list_task_deployments(task_concept_id)}
+                ),
+                200,
+            )
+        if build_id:
+            return (
+                jsonify({"deployments": evidence.list_build_deployments(build_id)}),
+                200,
+            )
+        return jsonify(evidence.get_deployment(deployment_id)), 200
+    except TaskNotFoundError:
+        return jsonify({"error": "Task unavailable"}), 404
+    except evidence.DeploymentEvidenceError as exc:
+        return jsonify({"error": str(exc)}), 409 if request.method == "POST" else 404
+    except Exception:
+        logger.exception("Deployment evidence operation failed")
+        return (
+            jsonify(
+                {"error": "Evidence operation unavailable; retry the same receipt"}
+            ),
+            503,
+        )
+
+
 @task_bp.route("/<task_concept_id>/work-product", methods=["GET"])
 def get_task_work_product_route(task_concept_id: str) -> ResponseReturnValue:
     """Read the selected product through the same actor-visible task boundary."""
@@ -416,6 +472,9 @@ def get_task_route(task_concept_id: str) -> ResponseReturnValue:
     """Get a task by concept_id."""
     try:
         result = dict(get_task(task_concept_id))
+        from ...services.deployment_evidence_service import list_task_deployments
+
+        result["deployments"] = list_task_deployments(task_concept_id)
         actions = list_task_external_resource_actions(result)
         result["external_resource_actions"] = [
             {
