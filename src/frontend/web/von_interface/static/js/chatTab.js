@@ -1,3 +1,4 @@
+import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './components/conversationNavigation.js';
 import { initialiseCompactChatComposer, isCompactComposer, resizeCompactDraft, shouldSubmitComposerKey } from './components/compactComposer.js';
 import { updateExecutionCost } from './components/executionCost.js';
 import { canUseWorkflowStudio } from './workflowStudioAccess.js';
@@ -31147,22 +31148,15 @@ function ensureScrollToEndButton(scrollableField = null) {
     }
 
     if (!(button instanceof HTMLButtonElement)) {
-        button = document.createElement('button');
-        button.type = 'button';
-        button.id = CHAT_SCROLL_TO_END_BUTTON_ID;
-        button.className = 'chat-scroll-to-end-btn';
-        button.setAttribute('aria-label', 'Scroll to latest message');
-        button.title = 'Scroll to latest message';
-        button.innerHTML = '<span aria-hidden="true">↓</span><span class="sr-only">Scroll to latest message</span>';
-        button.setAttribute('aria-hidden', 'true');
-        button.tabIndex = -1;
-        button.addEventListener('click', (event) => {
+        button = createLatestMessageButton((event) => {
             if (event?.shiftKey && scrollConversationToSessionList({ smooth: true })) {
                 event.preventDefault();
                 return;
             }
             void scrollConversationToEnd(targetField, { smooth: true });
+            focusConversationTarget(targetField.lastElementChild || targetField);
         });
+        button.id = CHAT_SCROLL_TO_END_BUTTON_ID;
         controlHost.appendChild(button);
     }
 
@@ -31249,9 +31243,7 @@ function updateScrollToEndButtonVisibility(scrollableField = null) {
     const nearBottom = isScrollableFieldNearBottom(targetField);
     const shouldShow = hasOverflow && !nearBottom;
 
-    button.classList.toggle('visible', shouldShow);
-    button.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
-    button.tabIndex = shouldShow ? 0 : -1;
+    setNavigationVisible(button, shouldShow);
 }
 
 function handleConversationScrollPositionChange(scrollableField) {
@@ -31284,15 +31276,15 @@ function setLatestUnreadBoundary(messageElement) {
     }
 
     if (latestUnreadBoundaryElement?.isConnected) {
-        latestUnreadBoundaryElement.remove();
+        return latestUnreadBoundaryElement;
     }
 
     const boundary = document.createElement('div');
     boundary.className = 'latest-unread-boundary';
     boundary.setAttribute('role', 'separator');
-    boundary.setAttribute('aria-label', 'Latest unread boundary');
+    boundary.setAttribute('aria-label', 'First new message');
     boundary.setAttribute('tabindex', '-1');
-    boundary.textContent = 'Latest unread';
+    boundary.textContent = 'New messages';
     messageElement.parentElement.insertBefore(boundary, messageElement);
     latestUnreadBoundaryElement = boundary;
     return boundary;
@@ -31338,8 +31330,8 @@ function showNewSharedMessagesIndicator() {
         indicator.type = 'button';
         indicator.id = 'newSharedMessagesIndicator';
         indicator.className = 'new-shared-messages-indicator';
-        indicator.setAttribute('aria-label', 'Jump to latest unread message');
-        indicator.textContent = 'Jump to latest unread';
+        indicator.setAttribute('aria-label', 'Jump to first new message');
+        indicator.textContent = 'New messages · Jump to first new message';
         indicator.addEventListener('click', () => {
             void jumpToLatestUnreadBoundary();
         });

@@ -125,9 +125,17 @@ async function measure(page, name) {
             // An arrival stays unread while the reader is inspecting earlier content.
             messages.push({ concept_id: 'arrival', created_at: '2026-09-12T11:01:00Z', relationships: { '#V#has_sender': [other], '#V#has_recipient': [actor] }, concept_data: { read_by: [], content_fallback: 'A new incoming research update.' } });
             await page.evaluate(() => fixturePanel.refreshOpenMessageExchange());
-            await expect(page.locator('.message-jump-latest')).toBeVisible();
+            await expect(page.locator('#messageComposeArea .chat-scroll-to-end-btn')).toBeVisible();
             assert(unread().some(m => m.concept_id === 'arrival'));
-            await page.locator('.message-jump-latest').click();
+            const latest = page.locator('#messageComposeArea .chat-scroll-to-end-btn');
+            await expect(latest).toHaveAccessibleName('Scroll to latest message');
+            const bounds = await latest.boundingBox();
+            assert(bounds.width >= 44 && bounds.height >= 44 && bounds.x >= 0 && bounds.x + bounds.width <= width);
+            await page.keyboard.press('Tab');
+            await latest.focus();
+            assert(await latest.evaluate(el => getComputedStyle(el).outlineStyle !== 'none'));
+            await page.screenshot({ path: path.join(evidence, `messages-navigation-${width}.png`) });
+            await latest.press('Enter');
             await expect.poll(() => unread().some(m => m.concept_id === 'arrival')).toBe(false);
             await page.getByRole('button', { name: 'Load earlier messages', exact: true }).click();
             await expect(page.locator('[data-contribution-id="fixture-0"]')).toHaveCount(1);
@@ -150,7 +158,23 @@ async function measure(page, name) {
             assert(layout[0].x > layout[1].x + 5 && layout[0].x > layout[2].x + 5, 'Old-style participant alignment');
             assert(layout.every(item => item.overflow <= 1), 'Old-style controls/content fit');
             assert(layout[1].text.includes('Bob'));
-            results.push({ name: `chat-${width}`, layout });
+            await page.evaluate(async () => {
+                const chat = await import('/static/js/chatTab.js');
+                const field = document.querySelector('#scrollableField');
+                for (let i = 0; i < 12; i++) chat.__testOnly_appendMessage('Bob', 'Long fixture content. '.repeat(20), `long-${i}`, false, true);
+                window.scrollTo(0, 0);
+                chat.__testOnly_updateScrollToEndButtonVisibility(field);
+            });
+            const chatLatest = page.locator('.chat-composer > .chat-scroll-to-end-btn');
+            await expect(chatLatest).toBeVisible();
+            await expect(chatLatest).toHaveAccessibleName('Scroll to latest message');
+            const boundsChat = await chatLatest.boundingBox();
+            assert(boundsChat.width >= 44 && boundsChat.height >= 44);
+            await chatLatest.focus();
+            await page.screenshot({ path: path.join(evidence, `chat-navigation-${width}.png`) });
+            await chatLatest.press('Space');
+            await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+            results.push({ name: `chat-${width}`, layout, latest: boundsChat });
             await page.screenshot({ path: path.join(evidence, `chat-${width}.png`) });
             await page.close();
         }
