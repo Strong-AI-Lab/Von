@@ -38,6 +38,10 @@ from src.backend.services.adaptive_turn_service import (
 def native_store(monkeypatch):
     db = mongomock.MongoClient()["isolated_coding_task_acceptance_2750"]
     db.concepts.create_index("concept_id", unique=True)
+    monkeypatch.setattr("src.backend.db.mongo_client.get_db", lambda: db)
+    monkeypatch.setattr(
+        "src.backend.db.mongo_client.get_concepts_collection", lambda: db.concepts
+    )
     monkeypatch.setattr(ConceptsRepository, "collection", lambda: db.concepts)
     # The fixture does not replicate the ontology catalogue used for target
     # visibility. Actor/org query filtering and the assignment checks stay real.
@@ -266,6 +270,92 @@ def test_create_schema_exposes_preferences_without_exposing_trusted_creator(gate
         "requested_reasoning_effort",
     } <= schema["properties"].keys()
     assert "created_by_concept_id" not in schema["properties"]
+
+
+@pytest.mark.parametrize(
+    "field,value,hint",
+    [
+        ("requested_model", "DGX Codex", "assignee_concept_id"),
+        ("requested_model", "Codex DGX", "assignee_concept_id"),
+        ("requested_model", "#V#codex_dgx", "assignee_concept_id"),
+        ("requested_model", "CodexDGX", "exact model ID"),
+        ("requested_model", "Astra", "exact model ID"),
+        ("requested_reasoning_effort", "extra_high", "xhigh"),
+        ("requested_reasoning_effort", "extra-high", "xhigh"),
+    ],
+)
+def test_malformed_preferences_reject_before_writes_and_corrected_retry_is_unique(
+    native_store, gateway, field, value, hint
+):
+    with override_current_actor("#V#alice", "#V#lab"):
+        invalid = payload(gateway, **{field: value})
+        rejected = gateway.invoke("task_create", invalid).payload
+        assert rejected["error_code"] == "INVALID_DATA", rejected
+        assert hint in rejected["error"]
+        assert rejected["changed"] is False
+        assert native_store.concepts.count_documents({}) == 0
+        assert native_store.relations.count_documents({}) == 0
+
+        # The canonical service also protects non-MCP task creation.
+        with pytest.raises(tasks.InvalidTaskDataError, match=hint):
+            tasks.create_task(
+                title="Invalid fixture", description="Never launch", **{field: value}
+            )
+        assert native_store.concepts.count_documents({}) == 0
+
+        corrected = payload(gateway, requested_reasoning_effort="xhigh")
+        created = gateway.invoke("task_create", corrected).payload
+        assert created["success"], created
+        task_id = created["task_concept_id"]
+        repeated = gateway.invoke("task_create", corrected).payload
+        assert repeated["success"] and repeated["task_concept_id"] == task_id
+        assert repeated["changed"] is False
+        before = tasks.get_task(task_id)
+        assert before["requested_model"] == "gpt-6-astra"
+        assert before["requested_reasoning_effort"] == "xhigh"
+        assert before["assignee_concept_id"] == "#V#worker"
+
+        # Reject the complete edit before status/notes or preferences can change.
+        rejected_update = gateway.invoke(
+            "task_update_fields",
+            {
+                "task_concept_id": task_id,
+                "fields": {
+                    "status": "completed",
+                    "notes": "Must not persist",
+                    field: value,
+                },
+            },
+        ).payload
+        assert rejected_update["error_code"] == "INVALID_DATA", rejected_update
+        assert hint in rejected_update["error"]
+        assert tasks.get_task(task_id) == before
+        assert native_store.concepts.count_documents({}) == 1
+
+
+def test_exact_future_execution_tokens_are_preserved(native_store, gateway):
+    # Availability belongs to the execution provider, not a frozen task allowlist.
+    model = "provider/Model-Preview_vNext:2026"
+    effort = "future_effort"
+    with override_current_actor("#V#alice", "#V#lab"):
+        result = gateway.invoke(
+            "task_create",
+            payload(gateway, requested_model=model, requested_reasoning_effort=effort),
+        ).payload
+        assert result["success"], result
+        task_id = result["task_concept_id"]
+        task = tasks.get_task(task_id)
+        assert task["requested_model"] == model
+        assert task["requested_reasoning_effort"] == effort
+        tasks.update_task_fields(
+            task_id, fields={"requested_reasoning_effort": "ultra"}
+        )
+        task = tasks.get_task(task_id)
+        worker = load_worker(
+            Path(__file__).resolve().parents[2] / "scripts/codex_von_worker.py"
+        )
+        resolved = worker.resolve_execution_settings({}, task)
+        assert resolved["model"] == model and resolved["reasoning_effort"] == "ultra"
 
 
 def test_creation_failed_parent_update_and_assignment_recovery_answer(

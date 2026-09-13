@@ -35274,11 +35274,19 @@ def _task_create(**kwargs):
     evidence = kwargs.get("evidence")
     notes = kwargs.get("notes")
     reference_code = kwargs.get("reference_code")
-    requested_settings = {
-        key: (value.strip() or None) if isinstance(value, str) else value
-        for key in ("requested_model", "requested_reasoning_effort")
-        if (value := kwargs.get(key)) is not None
-    }
+    from ...utils.task_execution_preferences import normalise_task_execution_preference
+
+    try:
+        requested_settings = {
+            key: normalise_task_execution_preference(value, field_name=key)
+            for key in ("requested_model", "requested_reasoning_effort")
+            if (value := kwargs.get(key)) is not None
+        }
+    except ValueError as exc:
+        return {
+            **make_error_response("INVALID_DATA", str(exc)),
+            "changed": False,
+        }
     request_id = str(kwargs.get("request_id") or "").strip()
     idempotency_key = str(kwargs.get("idempotency_key") or "").strip()
 
@@ -35908,6 +35916,7 @@ def _task_search(**kwargs):
     try:
         result = search_tasks(
             query=kwargs.get("query"),
+            search_mode=kwargs.get("search_mode", "lexical"),
             project_concept_id=kwargs.get("project_concept_id"),
             collection_concept_id=kwargs.get("collection_concept_id"),
             status_filter=kwargs.get("status_filter") or kwargs.get("status"),
@@ -40831,7 +40840,10 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             description=(
                 "Resolve a Vontology concept deterministically from a user-provided surface form. "
                 "Read-only: does not mutate concepts. Returns resolved/ambiguous/not_found with an audit trail. "
-                "Supports language preferences, instance_of restriction, and optional code-string matching."
+                "Supports language preferences, instance_of restriction, and optional code-string matching. "
+                "Resolution is lexical candidate evidence, not intended operational identity or authority. "
+                "Inspect match stage, accessible alternatives and bounded search coverage before relying "
+                "on a weak match. Not-found does not prove absence outside the searched scope."
             ),
         ),
         MethodDefinition(
@@ -45045,8 +45057,12 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 "task categories, source semantics, and richer task-detail fields. "
                 "For coding-agent work, preserve a user-specified model and reasoning level in "
                 "requested_model (exact model ID, e.g. gpt-6-astra) and "
-                "requested_reasoning_effort (e.g. medium or high). Omit either to inherit "
-                "the coding worker default. These fields do not execute the task."
+                "requested_reasoning_effort (e.g. high or xhigh; extra-high is xhigh). "
+                "Agent names/IDs belong in assignee_concept_id, never requested_model; "
+                "use an exact model ID, not a display label such as Astra. Omit a "
+                "preference to inherit the worker default only if none was requested. "
+                "Malformed preferences are rejected before creation; correct and retry "
+                "without dropping the user's choice. These fields do not execute the task."
             ),
         ),
         MethodDefinition(
@@ -45102,7 +45118,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 "List Von tasks. Filter by user (assignee), status, priority, task category, "
                 "task source, or organisation. "
                 "If user_concept_id is provided, returns tasks assigned to that user. "
-                "Valid statuses: pending, in_progress, completed, cancelled, blocked."
+                "Valid statuses: pending, in_progress, completed, deployed, cancelled, blocked."
             ),
         ),
         MethodDefinition(
@@ -45114,6 +45130,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "project_concept_id": (str, type(None)),
                     "collection_concept_id": (str, type(None)),
                     "query": (str, type(None)),
+                    "search_mode": str,
                     "status_filter": (str, type(None)),
                     "status": (str, type(None)),
                     "statuses": (list, type(None)),
@@ -45167,7 +45184,9 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             description=(
                 "Search Von's internal task store with rich filters (status, assignee, "
                 "creator, report-to, labels, planning metadata, category/source semantics, "
-                "hierarchy, date ranges, and dependency state)."
+                "hierarchy, date ranges, and dependency state). Set search_mode='semantic' "
+                "with a natural-language query to retrieve related tasks and citation-ready "
+                "RAG context. Inspect semantic_retrieval for embedding failures and lexical fallback."
             ),
         ),
         MethodDefinition(

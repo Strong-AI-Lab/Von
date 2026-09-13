@@ -1,8 +1,9 @@
+import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './components/conversationNavigation.js';
 import { initialiseCompactChatComposer, isCompactComposer, resizeCompactDraft, shouldSubmitComposerKey } from './components/compactComposer.js';
 import { updateExecutionCost } from './components/executionCost.js';
 import { canUseWorkflowStudio } from './workflowStudioAccess.js';
 import { createChatSteeringControls } from './components/chatSteeringControls.js';
-import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows } from './components/conversationCatalogue.js';
+import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows, catalogueSearchActive, rankCatalogueSearchRows } from './components/conversationCatalogue.js';
 import { catalogueHasMore } from './components/conversationCatalogue.js';
 import { profileButton, participantAvatar, participantIdentityAvatar } from './components/participantProfile.js';
 import { setButtonLabel } from './utils/buttonLabel.js';
@@ -27175,7 +27176,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     const unreadBadge = document.getElementById('conversationUnreadBadge');
     const unreadCount = [...canonicalSessions, ...directConversationRows()].filter(row => !isConversationHidden(row.session_id) && row.shared_unread_count > 0).length;
     if (unreadBadge) { unreadBadge.hidden = !unreadCount; unreadBadge.textContent = `${unreadCount}${catalogueHasMore() ? '+' : ''}`; unreadBadge.setAttribute('aria-label', `${catalogueHasMore() ? 'At least ' : ''}${unreadCount} unread conversations`); }
-    if (canonicalSessions.length === 0 && directConversationRows().length === 0) {
+    if (canonicalSessions.length === 0 && directConversationRows().length === 0 && !catalogueSearchActive()) {
         renderChatSessionTabsPlaceholder('empty');
         mountCatalogueControls(container);
         lastRenderedSessionCount = 0;
@@ -27235,7 +27236,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         recentWindowDays: conversationHistorySettings.recentWindowDays,
         showAll: false
     });
-    let visibleSessions = Array.isArray(filteredResult.sessionsToRender)
+    let visibleSessions = catalogueSearchActive() ? sessionsAfterHiddenFilter : Array.isArray(filteredResult.sessionsToRender)
         ? filteredResult.sessionsToRender
         : [];
     const newestAgentSessionId = agentCreatedSessionVisibilityState.newestVisibleSessionId;
@@ -27320,7 +27321,9 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             return !pinnedSessionIdsInFilteredOrder.has(sid);
         })
     ];
-    const orderedVisibleSessions = [...pinnedSessions, ...unpinnedSessions];
+    const orderedVisibleSessions = catalogueSearchActive()
+        ? rankCatalogueSearchRows(visibleSessions)
+        : [...pinnedSessions, ...unpinnedSessions];
 
     container.hidden = false;
     const focusedId = container.contains(document.activeElement) ? document.activeElement?.closest('[data-session-id]')?.dataset.sessionId : null;
@@ -27401,7 +27404,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         }
         const isPinned = isConversationPinned(sid);
         if (session.source_kind === 'message_exchange') {
-            fragment.append(renderMessageConversationRow(session, { selected: sid === activeSessionId, pinned: isPinned, togglePin: () => toggleConversationPinned(sid), hide: () => hideConversation(sid) }));
+            fragment.append(renderMessageConversationRow(session, { selected: sid === activeSessionId, pinned: isPinned, togglePin: () => toggleConversationPinned(sid), hide: () => isConversationHidden(sid) ? unhideConversation(sid) : hideConversation(sid), hidden: isConversationHidden(sid), openMenu: openChatSessionMenu }));
             return;
         }
         const isFirstPinnedTab = pinnedSessions.length > 0 && index === 0 && isPinned;
@@ -30966,22 +30969,15 @@ function ensureScrollToEndButton(scrollableField = null) {
     }
 
     if (!(button instanceof HTMLButtonElement)) {
-        button = document.createElement('button');
-        button.type = 'button';
-        button.id = CHAT_SCROLL_TO_END_BUTTON_ID;
-        button.className = 'chat-scroll-to-end-btn';
-        button.setAttribute('aria-label', 'Scroll to latest message');
-        button.title = 'Scroll to latest message';
-        button.innerHTML = '<span aria-hidden="true">↓</span><span class="sr-only">Scroll to latest message</span>';
-        button.setAttribute('aria-hidden', 'true');
-        button.tabIndex = -1;
-        button.addEventListener('click', (event) => {
+        button = createLatestMessageButton((event) => {
             if (event?.shiftKey && scrollConversationToSessionList({ smooth: true })) {
                 event.preventDefault();
                 return;
             }
             void scrollConversationToEnd(targetField, { smooth: true });
+            focusConversationTarget(targetField.lastElementChild || targetField);
         });
+        button.id = CHAT_SCROLL_TO_END_BUTTON_ID;
         controlHost.appendChild(button);
     }
 
@@ -31068,9 +31064,7 @@ function updateScrollToEndButtonVisibility(scrollableField = null) {
     const nearBottom = isScrollableFieldNearBottom(targetField);
     const shouldShow = hasOverflow && !nearBottom;
 
-    button.classList.toggle('visible', shouldShow);
-    button.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
-    button.tabIndex = shouldShow ? 0 : -1;
+    setNavigationVisible(button, shouldShow);
 }
 
 function handleConversationScrollPositionChange(scrollableField) {
@@ -31103,15 +31097,15 @@ function setLatestUnreadBoundary(messageElement) {
     }
 
     if (latestUnreadBoundaryElement?.isConnected) {
-        latestUnreadBoundaryElement.remove();
+        return latestUnreadBoundaryElement;
     }
 
     const boundary = document.createElement('div');
     boundary.className = 'latest-unread-boundary';
     boundary.setAttribute('role', 'separator');
-    boundary.setAttribute('aria-label', 'Latest unread boundary');
+    boundary.setAttribute('aria-label', 'First new message');
     boundary.setAttribute('tabindex', '-1');
-    boundary.textContent = 'Latest unread';
+    boundary.textContent = 'New messages';
     messageElement.parentElement.insertBefore(boundary, messageElement);
     latestUnreadBoundaryElement = boundary;
     return boundary;
@@ -31157,8 +31151,8 @@ function showNewSharedMessagesIndicator() {
         indicator.type = 'button';
         indicator.id = 'newSharedMessagesIndicator';
         indicator.className = 'new-shared-messages-indicator';
-        indicator.setAttribute('aria-label', 'Jump to latest unread message');
-        indicator.textContent = 'Jump to latest unread';
+        indicator.setAttribute('aria-label', 'Jump to first new message');
+        indicator.textContent = 'New messages · Jump to first new message';
         indicator.addEventListener('click', () => {
             void jumpToLatestUnreadBoundary();
         });
@@ -38797,7 +38791,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageText.className = 'chat-message-text';
             messageText.style.cssText = 'color: #333; white-space: pre-wrap; text-align: left; font-weight: 400; overflow-wrap: anywhere; word-break: break-word; min-width: 0;';
             const userText = String(message ?? '');
-            const shouldRenderUserMarkdown = sender === 'User' && detectMarkdown(userText);
+            const shouldRenderUserMarkdown = sender !== 'Error' && detectMarkdown(userText);
             if (shouldRenderUserMarkdown) {
                 messageText.classList.add('markdown-rendered', 'chat-markdown');
                 messageText.style.whiteSpace = 'normal';

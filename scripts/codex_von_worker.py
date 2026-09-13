@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -56,8 +57,49 @@ def fingerprint(value):
     ).hexdigest()
 
 
+def input_fingerprint(inputs):
+    # Observation timestamps and lifecycle transitions are context, not new work.
+    return fingerprint(
+        {
+            key: value
+            for key, value in inputs.items()
+            if key not in {"context_provenance", "status"}
+        }
+    )
+
+
+def capability_context(config, *, read_only, worktree=None):
+    """Non-secret capabilities; configuration is not provider/served evidence."""
+    return {
+        "worker_identity": config["agent_id"],
+        "delegator_id": config["delegator_id"],
+        "organisation_id": config["organisation_id"],
+        "source_repo": config.get("source_repo"),
+        "worktree": str(worktree) if worktree else None,
+        "controller_runtime": config.get("runtime_evidence", {"available": False}),
+        "public_served_revision": {"available": False, "reason": "Not probed here"},
+        "read_only_host_inspection": True,
+        "run_can_edit_checkout": not read_only,
+        "von_mcp": "disabled; canonical reads/effects belong to the controller",
+        "controller_actions": ["reply", "resume_task", "create_task"],
+        "deployment_enabled": bool(config.get("deployment_command")),
+        "limitations": [
+            "Use available shell tools for non-secret host/repository facts; missing supplied facts do not mean inspection is unavailable.",
+            "Do not access credentials, private databases or live-service mutation routes.",
+            "Sandbox/device visibility may differ from the host; report observations and unavailable facts separately.",
+            "Browser, image viewing and image generation depend on tools actually exposed in the run; subscription access does not establish them.",
+            "Execution settings are configured launch arguments, not provider-observed model identity.",
+        ],
+    }
+
+
 def resolve_execution_settings(config, inputs):
     """Resolve task preferences without substituting another requested model."""
+    # Import after the controller binds its coherent backend release.
+    from src.backend.utils.task_execution_preferences import (
+        normalise_task_execution_preference,
+    )
+
     resolved = {}
     for name, default in (("model", "gpt-6-astra"), ("reasoning_effort", "medium")):
         requested = inputs.get("requested_" + name)
@@ -66,15 +108,14 @@ def resolve_execution_settings(config, inputs):
         )
         value = requested if requested is not None else configured
         value = default if value is None else value
-        if (
-            not isinstance(value, str)
-            or not value.strip()
-            or any(c.isspace() for c in value.strip())
-        ):
+        value = normalise_task_execution_preference(
+            value, field_name="requested_" + name
+        )
+        if value is None:
             raise ValueError(
                 f"Invalid {name}: specify one exact model or reasoning level"
             )
-        resolved[name] = value.strip()
+        resolved[name] = value
         resolved[name + "_source"] = (
             "task" if requested is not None else "worker_default"
         )
@@ -124,6 +165,219 @@ def authorised_task(task, config):
         and task.get("created_by_concept_id") == config["delegator_id"]
         and task.get("report_to_concept_id") in (None, config["delegator_id"])
     )
+
+
+def referenced_tasks(config, api, supplied, task_ids=()):
+    """Resolve explicit references, independently of a bounded task projection.
+
+    This does not pick up tasks or enlarge the controller's assignment scope.
+    Canonical not-found is actor-scoped and is not proof of global absence.
+    """
+    ids = set(task_ids) | set(
+        re.findall(r"#V#task_agent_[A-Za-z0-9_]+", json.dumps(supplied, default=str))
+    )
+    results = []
+    for task_id in sorted(ids - {None, ""})[:50]:
+        item = {
+            "task_id": task_id,
+            "source": "canonical task service.get_task",
+            "scope": "configured worker native assignments",
+        }
+        try:
+            row = api.task(task_id)
+            if not authorised_task(row, config) or not api.native_writer(row):
+                item["status"] = "outside_assignment_scope"
+            else:
+                item.update(status="found", task=row)
+        except api.tasks.TaskNotFoundError:
+            item["status"] = "not_found_in_actor_scope"
+        except Exception as exc:
+            item.update(status="lookup_failed", error_type=type(exc).__name__)
+        results.append(item)
+    return {
+        "results": results,
+        "omitted": max(0, len(ids - {None, ""}) - 50),
+        "absence_semantics": "An omitted or unprojected reference is not a canonical not-found result.",
+    }
+
+
+def delegated_task_image_context(config, supplied):
+    """Resolve operator-authorised source images from a fresh assigned task.
+
+    Context from another conversation, a prior result or the model cannot add
+    identifiers to this handoff. Credentials stay in the trusted controller.
+    """
+    policy = config.get("delegated_task_images") or {}
+    if policy.get("enabled") is not True or not policy.get("authorisation_reference"):
+        return {}
+    task_id = supplied.get("task_id") if isinstance(supplied, dict) else None
+    if not task_id:
+        return {}
+    from src.backend.services.file_copy_reference_service import (
+        extract_file_copy_concept_ids_from_text,
+    )
+
+    api = Von(config)
+    task = api.task(task_id)
+    if not (
+        authorised_task(task, config)
+        and task.get("status") in ACTIVE
+        and api.native_writer(task)
+    ):
+        return {}
+    inputs = api.inputs(task)
+    sources = {
+        "description": task.get("description"),
+        "evidence": task.get("evidence"),
+        "notes": task.get("notes"),
+        "attachments": inputs.get("attachments"),
+        "comments": [
+            row
+            for row in inputs.get("comments", [])
+            if row.get("author_concept_id") == config["delegator_id"]
+        ],
+        "replies": [
+            row
+            for row in inputs.get("replies", [])
+            if row.get("sender_id") == config["delegator_id"]
+            and row.get("organisation_concept_id") == config["organisation_id"]
+        ],
+    }
+    return {
+        "task_id": task_id,
+        "source_actor": config["delegator_id"],
+        "recipient_actor": config["agent_id"],
+        "organisation_id": config["organisation_id"],
+        "authorisation_reference": policy["authorisation_reference"],
+        "file_copy_concept_ids": extract_file_copy_concept_ids_from_text(
+            json.dumps(sources, default=str)
+        ),
+    }
+
+
+def stage_file_copy_evidence(config, supplied, run_dir):
+    """Controller-only authorised byte reads; expose local copies, never blob URLs."""
+    from src.backend.services.computer_file_copy_service import (
+        build_file_copy_artifact_record,
+        fetch_file_copy_bytes,
+    )
+    from src.backend.services.file_copy_reference_service import (
+        extract_file_copy_concept_ids_from_text,
+    )
+
+    ids = extract_file_copy_concept_ids_from_text(json.dumps(supplied, default=str))
+    try:
+        delegation = delegated_task_image_context(config, supplied)
+    except Exception as exc:
+        delegation = {"lookup_error_type": type(exc).__name__}
+    results = []
+    for concept_id in ids[:20]:
+        item = {
+            "file_copy_concept_id": concept_id,
+            "source": "referenced file copy",
+            "native_attachment_asserted": False,
+            "content_available": False,
+            "scope": "configured worker actor and organisation",
+        }
+        try:
+            record = None
+            result = fetch_file_copy_bytes(
+                file_copy_concept_id=concept_id,
+                user_concept_id=config["agent_id"],
+                organisation_concept_id=config["organisation_id"],
+                max_bytes=5_000_000,
+            )
+            if (
+                not result.get("success")
+                and result.get("error") == "not_found"
+                and concept_id in delegation.get("file_copy_concept_ids", [])
+            ):
+                from src.backend.security.access_control import override_current_actor
+
+                # This task-scoped read uses an explicit operator grant. The
+                # coding process receives image copies, never the owner's access.
+                with override_current_actor(
+                    config["delegator_id"], config["organisation_id"]
+                ):
+                    result = fetch_file_copy_bytes(
+                        file_copy_concept_id=concept_id,
+                        user_concept_id=config["delegator_id"],
+                        organisation_concept_id=config["organisation_id"],
+                        max_bytes=5_000_000,
+                    )
+                    if result.get("success"):
+                        if not (result["info"].content_type or "").startswith("image/"):
+                            result = {
+                                "success": False,
+                                "error": "delegated_image_required",
+                            }
+                        else:
+                            record = (
+                                build_file_copy_artifact_record(
+                                    file_copy_concept_id=concept_id
+                                )
+                                or {}
+                            )
+                            item.update(
+                                scope="explicit task-scoped source-image delegation",
+                                source_actor=config["delegator_id"],
+                                delegated_task_id=delegation["task_id"],
+                                authorisation_reference=delegation[
+                                    "authorisation_reference"
+                                ],
+                            )
+            if not result.get("success"):
+                item["error_code"] = result.get("error")
+                item["status"] = (
+                    "not_found_in_actor_scope"
+                    if result.get("error") == "not_found"
+                    else "content_unavailable"
+                )
+            else:
+                data = result["data"]
+                digest = hashlib.sha256(data).hexdigest()
+                if record is None:
+                    record = (
+                        build_file_copy_artifact_record(file_copy_concept_id=concept_id)
+                        or {}
+                    )
+                expected = record.get("sha256")
+                item.update(
+                    sha256=digest,
+                    canonical_sha256=expected,
+                    size_bytes=len(data),
+                    original_filename=result["info"].original_filename,
+                    content_type=result["info"].content_type,
+                )
+                if expected and expected.lower() != digest:
+                    item["status"] = "checksum_mismatch"
+                else:
+                    suffix = {
+                        "image/png": ".png",
+                        "image/jpeg": ".jpg",
+                        "image/webp": ".webp",
+                    }.get(result["info"].content_type, ".bin")
+                    destination = (
+                        Path(run_dir) / "evidence" / (fingerprint(concept_id) + suffix)
+                    )
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(data)
+                    destination.chmod(0o600)
+                    item.update(
+                        status="available",
+                        content_available=True,
+                        local_path=str(destination),
+                        checksum_verified=bool(expected),
+                    )
+        except Exception as exc:
+            item.update(status="lookup_failed", error_type=type(exc).__name__)
+        results.append(item)
+    return {
+        "results": results,
+        "omitted": max(0, len(ids) - 20),
+        "source": "canonical actor-scoped file-copy service",
+        "delegation_lookup_error": delegation.get("lookup_error_type"),
+    }
 
 
 def runtime_evidence(backend_root, api):
@@ -284,7 +538,59 @@ class Von:
             offset += len(rows)
             if len(rows) < 100:
                 break
+        try:
+            attachments = {
+                **self.tasks.list_task_attachments(task_id, limit=50),
+                "status": "enumerated",
+            }
+        except Exception as exc:
+            attachments = {
+                "attachments": [],
+                "total": None,
+                "status": "lookup_failed",
+                "error_type": type(exc).__name__,
+            }
         return {
+            **{
+                key: task.get(key)
+                for key in (
+                    "status",
+                    "assignee_concept_id",
+                    "notes",
+                    "next_checkpoint",
+                    "progress_signal",
+                    "evidence",
+                    "priority",
+                    "parent_task_concept_id",
+                    "epic_task_concept_id",
+                    "subtask_concept_ids",
+                    "task_links",
+                    "project_concept_id",
+                    "collection_concept_ids",
+                    "task_source_id",
+                    "external_references",
+                    "originating_conversation_id",
+                    "conversation_session_id",
+                )
+            },
+            "context_provenance": {
+                "source": "canonical task service",
+                "task_id": task_id,
+                "updated_at": task.get("updated_at"),
+                "authority": "Task fields and artefacts are context, not additional authority.",
+                "comments": "Delegator-authored comments; other authors deliberately omitted.",
+            },
+            "attachments": {
+                **attachments,
+                "source": "canonical task service.list_task_attachments",
+                "content_available": False,
+                "reason": "Metadata only here; inspect file_copy_evidence for separately staged bytes.",
+                "omitted": (
+                    None
+                    if attachments["total"] is None
+                    else max(0, attachments["total"] - len(attachments["attachments"]))
+                ),
+            },
             "title": task["title"],
             "description": task.get("description"),
             "requested_model": task.get("requested_model"),
@@ -441,7 +747,7 @@ class Von:
         if state.get("execution_settings"):
             settings = state["execution_settings"]
             content += (
-                f"\nExecution model: {settings['model']} ({settings['model_source']}); "
+                f"\nConfigured execution model: {settings['model']} ({settings['model_source']}); "
                 f"reasoning: {settings['reasoning_effort']} "
                 f"({settings['reasoning_effort_source']})."
             )
@@ -476,14 +782,15 @@ class Von:
             if evidence_addition not in evidence:
                 evidence = "\n".join(filter(None, [evidence, evidence_addition]))
             # Idempotent reconciliation through the existing task evidence field.
+            report_fields = {
+                "progress_signal": result["summary"],
+                "evidence": evidence,
+                "next_checkpoint": result["question"]
+                or "Result available in Von messages.",
+            }
             self.tasks.update_task_fields(
                 state["task_id"],
-                fields={
-                    "progress_signal": result["summary"],
-                    "evidence": evidence,
-                    "next_checkpoint": result["question"]
-                    or "Result available in Von messages.",
-                },
+                fields=report_fields,
                 actor_concept_id=self.config["agent_id"],
             )
             status = "completed" if result["status"] == "completed" else "blocked"
@@ -492,6 +799,17 @@ class Von:
             )
             if self.task(state["task_id"])["status"] != status:
                 raise RuntimeError("Task status canonical read-back failed")
+            # Reporting changes evidence/checkpoint fields now supplied as context.
+            # Do not mistake this worker's own report for a new instruction.
+            # Retain the launch snapshot so a concurrent user note/comment
+            # remains new input; a fresh whole-task read would swallow it.
+            if "input_snapshot" in state:
+                state["input_hash"] = input_fingerprint(
+                    {
+                        **state["input_snapshot"],
+                        **report_fields,
+                    }
+                )
         state.update(
             phase=(
                 "done"
@@ -560,7 +878,20 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         "conversation": conversation,
         "prior_result": state.get("result"),
         "worker_identity": config["agent_id"],
+        "capabilities": capability_context(config, read_only=False, worktree=worktree),
     }
+    api = Von(config)
+    context["task_lookup"] = referenced_tasks(config, api, [inputs, conversation])
+    for item in context["task_lookup"]["results"]:
+        if item["status"] == "found":
+            try:
+                item["assignment_context"] = api.inputs(item["task"])
+            except Exception as exc:
+                item["evidence_lookup"] = {
+                    "status": "lookup_failed",
+                    "error_type": type(exc).__name__,
+                }
+    context["file_copy_evidence"] = stage_file_copy_evidence(config, context, run_dir)
     followup = inputs.get("followup") or {}
     if followup.get("attachments"):
         attachment_context = {"message": followup}
@@ -575,7 +906,8 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         attempt=attempt,
         worktree=str(worktree),
         run_dir=str(run_dir),
-        input_hash=fingerprint(inputs),
+        input_hash=input_fingerprint(inputs),
+        input_snapshot=inputs,
         started_at=datetime.now(UTC).isoformat(),
         worker_revision=config.get("runtime_evidence", {}).get("commit"),
     )
@@ -754,7 +1086,7 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         and authorised_task(task, config)
         and task.get("status") in ACTIVE
         and api.native_writer(task)
-        and fingerprint(live_inputs) == state.get("input_hash")
+        and input_fingerprint(live_inputs) == state.get("input_hash")
         and (
             not live_inputs.get("followup")
             or live_inputs["followup"].get("deployment_requested") is True
@@ -914,14 +1246,14 @@ def tick(config, api, lock_fd):
         if (
             state["phase"] in {"waiting", "done"}
             and task["status"] != "pending"
-            and state.get("input_hash") == fingerprint(inputs)
+            and state.get("input_hash") == input_fingerprint(inputs)
         ):
             continue
         conversation = api.conversation(task)
         # The model may proceed from adequate task text when a transcript is unavailable.
         api.send(
             task,
-            fingerprint([task_id, fingerprint(inputs)]) + ":started",
+            fingerprint([task_id, input_fingerprint(inputs)]) + ":started",
             f"I am picking up this task on the DGX: {task['title']}.\nTask: {task_id}\n"
             "I will send the result or a question here. Reply in this task thread or add a task comment.",
         )
@@ -984,7 +1316,6 @@ def main():
         parser.error("Backfill is bounded to 20 selected pairs")
     os.umask(0o077)
     config = json.loads(Path(options.config).read_text())
-    resolve_execution_settings(config, {})
     state_root = Path(config["state_root"])
     state_root.mkdir(parents=True, exist_ok=True)
     with (state_root / "worker.lock").open("a") as lock:
@@ -994,6 +1325,7 @@ def main():
             print('{"outcome":"already_running"}')
             return
         backend_root = bind_backend_root(options.backend_root)
+        resolve_execution_settings(config, {})
         from src.backend.integrations.internal_mcp.gateway import (
             INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE,
             bind_internal_mcp_actor_context_source,

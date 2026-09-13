@@ -2469,9 +2469,9 @@ class OpenAIClient(LLMInterface):
             )
             raise RuntimeError(f"OpenAI embedding error: {str(e)}") from e
 
-    def list_models(self) -> List[str]:
-        """List available models from OpenAI (focus on GPT models) with caching/backoff."""
-        cache_key = "openai:models"
+    def list_models(self, *, include_all: bool = False) -> List[str]:
+        """Discover all model IDs for inventory, or the legacy GPT chat catalogue."""
+        cache_key = "openai:models:all" if include_all else "openai:models"
         now = time.time()
 
         # Check cache
@@ -2501,7 +2501,7 @@ class OpenAIClient(LLMInterface):
             models_response = self.client.models.list()
             for model in getattr(models_response, "data", []):  # type: ignore[attr-defined]
                 mid = getattr(model, "id", None)
-                if isinstance(mid, str) and "gpt" in mid:
+                if isinstance(mid, str) and (include_all or "gpt" in mid):
                     models.append(mid)
             models = sorted(models)
             logger.debug(f"Found OpenAI models (filtered): {models}")

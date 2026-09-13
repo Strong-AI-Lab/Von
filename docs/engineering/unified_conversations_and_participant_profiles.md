@@ -56,7 +56,8 @@ losing the read acknowledgement. Existing shared-conversation invitation receipt
 remain authoritative. Direct messages retain canonical `read_by` state. Loading a
 background source alone does not mark it read.
 
-The title/participant and Unread filters apply to loaded catalogue rows. **Load
+The Unread filter applies to loaded catalogue rows; title/participant matching is
+combined with indexed chat-content search as described below. **Load
 older conversations** extends the bounded list. When further pages exist the badge
 is an explicit lower bound (`N+`), not a claimed total over unexamined history.
 Existing loaded pins remain visible across refreshes; discovering a pin beyond the
@@ -163,3 +164,57 @@ precision, draft and selection preservation, exact group/organisation identity,
 profile permission denial, publication read-back, and authenticated desktop and
 narrow-viewport checks. The native task holds dated delivery evidence and the
 current merge decision. Repository publication does not activate a running server.
+
+## Message conversation references
+
+Message rows expose a touch-accessible actions button and the shared, viewport-
+bounded conversation menu. Actions include opening the exchange, copying its
+exact structured reference, pinning/hiding (or their inverses), and participant
+profiles. Chat-history-only actions such as moving a transcript are not offered
+for a message exchange.
+
+**Copy Concept ID** calls `POST /api/messages/exchange/reference`. After checking
+that the authenticated actor can read an existing exact participant/organisation
+exchange, the service lazily creates and reads back an actor-private conversation
+reference concept. Its `attributes.message_exchange_reference` and description
+retain the source locator; messages remain canonical message concepts. References
+are stable per actor/exchange, not shared ownership or an access grant. Repeated
+copies recheck source access. No existing message migration is required.
+
+## Title, participant and topic search
+
+The Conversations search field now combines loaded title/participant matches
+(including participant display names and normalised concept IDs) with the existing
+`GET /von/api/session/conversation_search?match_mode=hybrid` retrieval path.
+Relevance ordering puts title/participant matches in a separate first tier;
+content scores cannot displace them. Within each tier scores, activity and session
+ID resolve order. Search bypasses the tray's recency cutoff and pin ordering;
+clearing it restores the normal activity view. API `sort=updated` remains an
+explicit activity-order option. Signed search continuations include the ranking
+version and tier so paging cannot skip semantic-only results after a title match.
+
+Content retrieval queries the existing RAG embeddings of visible user/assistant
+chat contributions, with lexical retrieval alongside it. No embedding model is
+called by the browser and no new index or database migration is introduced.
+System/tool/debug contributions are excluded. Retrieved session IDs must pass the
+existing actor-visible conversation intersection. Person/agent message exchanges
+retain loaded title/participant search; their Vontology message bodies are not
+part of the chat embedding index. All-organisations expands message metadata only;
+chat content search stays in the current window's authorised context.
+
+Typing pauses for 300 ms before a request. A response from an earlier query or
+organisation is discarded. Content is queried once per input, not on each catalogue
+poll. Pages contain at most 100 results, with an explicit load-more action. Existing
+backend bounds remain: 500 accessible conversations and up to 10 owner scopes,
+with a shared 500-candidate retrieval budget. Coverage warnings and retrieval
+failures remain visible; a failed content lookup does not hide metadata matches.
+These limits mean the search is not an exhaustive inventory of all past exchanges.
+
+New chat contributions already use the existing RAG upsert path. Older or failed
+embeddings require the existing operator-controlled chat-history reindex service
+(`reindex_chat_history_for_user_namespace` or chunked session reindex, exposed by
+the admin chat-history reindex route). The lexical backfill utility
+`utilities/backfill_conversation_search_index.py` repairs title/visible-text
+projections only; it does not backfill embeddings. Inspect coverage and use bounded,
+actor/namespace-specific reindexing rather than scanning history on every search.
+This change does not run a live backfill or certify current production index coverage.

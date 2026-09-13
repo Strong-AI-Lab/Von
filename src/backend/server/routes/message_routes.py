@@ -1119,3 +1119,30 @@ def read_message_attachment(message_id, concept_id):
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
+
+
+@message_bp.route("/exchange/reference", methods=["POST"])
+def message_exchange_reference():
+    from ...services.message_catalogue_service import materialise_exchange_reference
+
+    actor = _get_current_user_concept_id()
+    if not actor:
+        return jsonify(error="authentication_required"), 401
+    payload = request.get_json(silent=True) or {}
+    try:
+        org = (
+            _normalise_concept_id(payload["organisation_concept_id"])
+            if "organisation_concept_id" in payload
+            else _get_current_org_concept_id(actor, require_known_window=True)
+        )
+        result = materialise_exchange_reference(
+            actor, payload.get("participant_ids"), organisation=org
+        )
+        return jsonify(success=True, **result)
+    except PermissionError:
+        return jsonify(error="conversation_unavailable"), 403
+    except (ValueError, TypeError):
+        return jsonify(error="invalid_conversation"), 400
+    except Exception:
+        _log.exception("Message exchange reference unavailable")
+        return jsonify(error="conversation_reference_unavailable"), 503

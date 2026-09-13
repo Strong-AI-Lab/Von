@@ -28,12 +28,21 @@ const actor = '#V#alice', other = '#V#bob';
 const row = { session_id: 'messages:fixture', source_kind: 'message_exchange', viewer_id: actor,
     participant_ids: [actor, other], other_participant_ids: [other], session_name: 'Bob fixture', organisation_concept_id: null,
     last_message_at: '2026-09-12T10:59:00Z', preview: 'Fixture conversation' };
+const linkText = 'Published https://github.com/Strong-AI-Lab/knowkat/pull/5. ' +
+    '[Private PR](https://github.com/Strong-AI-Lab/Von-Private/pull/67), ' +
+    '`https://example.org/literal` [unsafe](javascript:alert) [unsafe](data:text/html,x)';
+async function checkLinks(container) {
+    await expect(container.locator('a[href="https://github.com/Strong-AI-Lab/knowkat/pull/5"]')).toHaveCount(1);
+    await expect(container.locator('a[href="https://github.com/Strong-AI-Lab/Von-Private/pull/67"]')).toHaveText('Private PR');
+    await expect(container.locator('code')).toHaveText('https://example.org/literal');
+    await expect(container.locator('code a, a[href^="javascript:"], a[href^="data:"]')).toHaveCount(0);
+}
 let messages, reads, failRead;
 function seed() {
     reads = []; failRead = false;
     messages = Array.from({ length: 60 }, (_, i) => ({ concept_id: `fixture-${i}`, created_at: `2026-09-12T10:${String(i).padStart(2, '0')}:00Z`,
         relationships: { '#V#has_sender': [i % 2 ? actor : other], '#V#has_recipient': [i % 2 ? other : actor] },
-        concept_data: { read_by: [], content_fallback: `Contribution ${i}. ` + 'A research update with observations, provenance and next steps. '.repeat(5) } }));
+        concept_data: { read_by: [], content_fallback: linkText + ` Contribution ${i}. ` + 'A research update with observations, provenance and next steps. '.repeat(5) } }));
 }
 const unread = () => messages.filter(m => m.relationships['#V#has_recipient'].includes(actor) && !m.concept_data.read_by.includes(actor));
 async function setup(page) {
@@ -110,6 +119,7 @@ async function measure(page, name) {
             assert(unread().length > 20, 'Opening cannot clear unseen messages');
             assert(unread().some(m => m.concept_id === 'fixture-0'), 'unloaded page stays unread');
             await expect(page.locator('.chat-session-tab-unread')).toHaveText(String(unread().length));
+            await checkLinks(page.locator('[data-contribution-id="fixture-59"] .message-content'));
             results.push(await measure(page, `messages-${width}`));
             const firstUnread = page.locator('.message-bubble.is-unread').first();
             const id = await firstUnread.getAttribute('data-contribution-id');
@@ -125,9 +135,17 @@ async function measure(page, name) {
             // An arrival stays unread while the reader is inspecting earlier content.
             messages.push({ concept_id: 'arrival', created_at: '2026-09-12T11:01:00Z', relationships: { '#V#has_sender': [other], '#V#has_recipient': [actor] }, concept_data: { read_by: [], content_fallback: 'A new incoming research update.' } });
             await page.evaluate(() => fixturePanel.refreshOpenMessageExchange());
-            await expect(page.locator('.message-jump-latest')).toBeVisible();
+            await expect(page.locator('#messageComposeArea .chat-scroll-to-end-btn')).toBeVisible();
             assert(unread().some(m => m.concept_id === 'arrival'));
-            await page.locator('.message-jump-latest').click();
+            const latest = page.locator('#messageComposeArea .chat-scroll-to-end-btn');
+            await expect(latest).toHaveAccessibleName('Scroll to latest message');
+            const bounds = await latest.boundingBox();
+            assert(bounds.width >= 44 && bounds.height >= 44 && bounds.x >= 0 && bounds.x + bounds.width <= width);
+            await page.keyboard.press('Tab');
+            await latest.focus();
+            assert(await latest.evaluate(el => getComputedStyle(el).outlineStyle !== 'none'));
+            await page.screenshot({ path: path.join(evidence, `messages-navigation-${width}.png`) });
+            await latest.press('Enter');
             await expect.poll(() => unread().some(m => m.concept_id === 'arrival')).toBe(false);
             await page.getByRole('button', { name: 'Load earlier messages', exact: true }).click();
             await expect(page.locator('[data-contribution-id="fixture-0"]')).toHaveCount(1);
@@ -136,6 +154,7 @@ async function measure(page, name) {
             await expect.poll(() => unread().some(m => m.concept_id === 'fixture-0')).toBe(false);
             const persisted = unread().length;
             await setup(page); // Simulate page reload against retained canonical fixture state.
+            await checkLinks(page.locator('[data-contribution-id="fixture-59"] .message-content'));
             assert(unread().length <= persisted);
             assert(!unread().some(m => m.concept_id === id));
             await page.evaluate(async () => {
@@ -150,7 +169,36 @@ async function measure(page, name) {
             assert(layout[0].x > layout[1].x + 5 && layout[0].x > layout[2].x + 5, 'Old-style participant alignment');
             assert(layout.every(item => item.overflow <= 1), 'Old-style controls/content fit');
             assert(layout[1].text.includes('Bob'));
-            results.push({ name: `chat-${width}`, layout });
+            for (const history of [false, true]) {
+                await page.evaluate(async ({ linkText, history }) => {
+                    const chat = await import('/static/js/chatTab.js');
+                    document.querySelector('#scrollableField').replaceChildren();
+                    for (const sender of ['User', 'Bob', 'Von']) {
+                        chat.__testOnly_appendMessage(sender, linkText, `links-${sender}`, false, history);
+                    }
+                }, { linkText, history });
+                for (const turn of ['User', 'Bob', 'Von']) {
+                    await checkLinks(page.locator(`[data-turn-id="links-${turn}"] .chat-message-text`));
+                }
+                await page.screenshot({ path: path.join(evidence, `links-chat-${width}-${history}.png`) });
+            }
+            await page.evaluate(async () => {
+                const chat = await import('/static/js/chatTab.js');
+                const field = document.querySelector('#scrollableField');
+                for (let i = 0; i < 12; i++) chat.__testOnly_appendMessage('Bob', 'Long fixture content. '.repeat(20), `long-${i}`, false, true);
+                window.scrollTo(0, 0);
+                chat.__testOnly_updateScrollToEndButtonVisibility(field);
+            });
+            const chatLatest = page.locator('.chat-composer > .chat-scroll-to-end-btn');
+            await expect(chatLatest).toBeVisible();
+            await expect(chatLatest).toHaveAccessibleName('Scroll to latest message');
+            const boundsChat = await chatLatest.boundingBox();
+            assert(boundsChat.width >= 44 && boundsChat.height >= 44);
+            await chatLatest.focus();
+            await page.screenshot({ path: path.join(evidence, `chat-navigation-${width}.png`) });
+            await chatLatest.press('Space');
+            await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+            results.push({ name: `chat-${width}`, layout, latest: boundsChat });
             await page.screenshot({ path: path.join(evidence, `chat-${width}.png`) });
             await page.close();
         }

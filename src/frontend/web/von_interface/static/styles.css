@@ -62,8 +62,8 @@ body {
     color: #333;
     padding-top: 0;
     /* Dynamic layout offsets the fixed header and tab container. */
-    padding-bottom: 60px;
-    /* ADDED: Space for the fixed footer */
+    padding-bottom: var(--von-fixed-footer-clearance, 64px);
+    /* Reserve the measured fixed footer height as its contents reflow. */
 }
 
 body.von-auth-pending,
@@ -1365,14 +1365,29 @@ body.von-signed-out {
     margin-top: 6px;
 }
 
-/* ============================================================================
+/* =====================================================================
    Task Panel Styles (JVNAUTOSCI-1040)
    ============================================================================ */
 
 .task-panel {
     width: 480px;
-    max-width: 95vw;
-    max-height: 80vh;
+    box-sizing: border-box;
+    right: min(20px, 2vw);
+    max-width: 96vw;
+    height: min(720px, calc(100dvh - 90px));
+    max-height: calc(100dvh - 90px);
+}
+
+.task-panel .llm-popup-header {
+    flex-shrink: 0;
+}
+
+.task-panel .task-item,
+.task-panel .task-actions,
+.task-panel .task-detail-panel {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
 }
 
 .task-panel .llm-popup-body {
@@ -1380,8 +1395,9 @@ body.von-signed-out {
     flex-direction: column;
     gap: 12px;
     padding: 12px;
-    max-height: 70vh;
+    min-height: 0;
     overflow-y: auto;
+    scrollbar-gutter: stable;
 }
 
 .task-panel-header-actions {
@@ -3536,6 +3552,7 @@ button.unified-search-conversation-main {
     min-height: 40px;
     padding: 6px 12px;
     background: #fff;
+    color: #0f172a;
     border: 1px solid #cbd5e1;
     border-radius: 10px;
     cursor: pointer;
@@ -3606,6 +3623,9 @@ button.unified-search-conversation-main {
 
 .global-task-main {
     min-width: 0;
+    align-self: stretch;
+    display: flex;
+    flex-direction: column;
 }
 
 .task-board-scroll-hint {
@@ -3625,7 +3645,10 @@ button.unified-search-conversation-main {
 
 .task-list[data-view-mode="board"] {
     max-width: 100%;
-    max-height: clamp(420px, 68dvh, 760px);
+    /* Fill the space beside the inspector without sizing to every loaded card. */
+    flex: 1 1 0;
+    min-height: max(420px, 68dvh);
+    height: 0;
     overflow: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
@@ -3647,6 +3670,8 @@ button.unified-search-conversation-main {
 
 .task-pagination-control {
     display: flex;
+    flex-wrap: wrap;
+    flex-shrink: 0;
     align-items: center;
     justify-content: center;
     gap: 12px;
@@ -3662,7 +3687,7 @@ button.unified-search-conversation-main {
 
 .task-board-view {
     display: grid;
-    grid-template-columns: repeat(5, minmax(240px, 1fr));
+    grid-template-columns: repeat(6, minmax(240px, 1fr));
     gap: 16px;
     align-items: start;
     min-width: 1280px;
@@ -5545,8 +5570,8 @@ h1 {
     right: 28px;
     bottom: 190px;
     z-index: 12;
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
     border: none;
     border-radius: 999px;
     display: none;
@@ -6541,7 +6566,7 @@ footer {
     left: 0;
     right: 0;
     min-height: 40px;
-    /* Allow footer to grow if content wraps */
+    /* Keep footer information on one scrollable row. */
     margin-top: 0;
     /* REMOVED: margin-top as it's fixed */
     font-size: 0.8rem;
@@ -6567,10 +6592,12 @@ footer {
     left: 0;
     right: 0;
     min-height: 40px;
-    /* Allow footer to grow if content wraps */
+    /* Keep footer information on one scrollable row. */
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 16px;
     padding: 8px 16px;
     background-color: rgba(255, 255, 255, 0.95);
     border-top: 1px solid #e5e7eb;
@@ -6937,6 +6964,8 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 }
 
 .language-indicator {
+    flex-shrink: 0;
+    white-space: nowrap;
     margin: 0;
     font-size: 0.75rem;
     color: #6b7280;
@@ -7249,7 +7278,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     overflow-y: visible;
     /* Allow body scrolling so content is never clipped */
     padding: 0 20px;
-    padding-bottom: 64px;
+    padding-bottom: var(--von-fixed-footer-clearance, 64px);
     /* Reserve space so content isn't hidden behind footer */
     box-sizing: border-box;
     width: 100% !important;
@@ -8686,6 +8715,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 /* The same session list serves horizontal navigation, the docked tray and peek. */
 .chat-conversation-nav { display: contents; }
 .conversation-tray-header,
+.conversation-tray-context,
 .conversation-tray-resize { display: none; }
 
 .conversation-workspace[data-effective-tabs-layout="vertical"] {
@@ -8879,6 +8909,40 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     .conversation-workspace[data-effective-tabs-layout="vertical"], .conversation-tray-toggle span { transition: none; }
 }
 
+/* Keep current context above the mobile list without moving any conversation. */
+.conversation-workspace[data-tray-mobile="true"] .chat-session-tabs-row {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    gap: 4px;
+}
+.conversation-workspace[data-tray-mobile="true"] .conversation-tray-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.conversation-workspace[data-tray-mobile="true"] .conversation-tray-heading { display: none; }
+.conversation-workspace[data-tray-mobile="true"] .conversation-tray-context {
+    display: block;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: 13px;
+    font-weight: 600;
+}
+.conversation-workspace[data-tray-mobile="true"] .conversation-tray-toggle {
+    flex-basis: 44px;
+    width: 44px;
+    height: 44px;
+}
+.conversation-workspace[data-tray-mobile="true"] .chat-session-tabs {
+    width: 100%;
+    flex: 0 1 auto;
+}
+.conversation-workspace[data-tray-mobile="true"][data-tray-collapsed="true"] .chat-session-tabs,
+.conversation-workspace[data-tray-mobile="true"][data-tray-collapsed="true"] .chat-session-history-summary,
+.conversation-workspace[data-tray-mobile="true"][data-tray-collapsed="true"] .catalogue-filters { display: none; }
+
 .chat-situation-toggle {
     min-height: 32px;
 }
@@ -8970,6 +9034,11 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     margin: 0;
     font-size: 20px;
     line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+.chat-reference-inspector-header > div:first-child {
+    min-width: 0;
 }
 
 .chat-reference-inspector-actions {
@@ -9025,6 +9094,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 .chat-reference-statement {
     color: #111827;
     font-size: 16px;
+    overflow-wrap: anywhere;
 }
 
 .chat-reference-notice {
@@ -10497,6 +10567,11 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 }
 
 .chat-session-menu {
+    box-sizing: border-box;
+    width: max-content;
+    max-width: min(320px, calc(100vw - 16px));
+    max-height: calc(100dvh - 16px);
+    overflow-y: auto;
     position: fixed;
     z-index: 20050;
     min-width: 160px;
@@ -10513,6 +10588,9 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 }
 
 .chat-session-menu button {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    min-height: 44px;
     width: 100%;
     text-align: left;
     background: transparent;
@@ -11614,7 +11692,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 
 .chat-composer {
     position: sticky;
-    bottom: 42px;
+    bottom: calc(var(--von-fixed-footer-clearance, 64px) + 8px);
     z-index: 30;
     display: grid;
     gap: 8px;
@@ -12012,12 +12090,6 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     background: #ffe4e6;
 }
 
-@media (max-height: 700px) {
-    .chat-composer {
-        bottom: 36px;
-    }
-}
-
 /* When inside the tab-content-area, make the tab content flex to propagate height */
 .tab-content-area .tab-content.active>.content-wrapper {
     min-height: calc(100vh - 60px - 80px);
@@ -12150,7 +12222,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     color: #065f46;
 }
 
-/* =============================================================================
+/* ======================================================================
    JVNAUTOSCI-1043: User editing of AI outputs
    ============================================================================= */
 
@@ -13286,12 +13358,6 @@ button.prompt-vontology-cartouche {
 
 #serverUptimeValue.health-telemetry-copy-error {
     color: #991b1b;
-}
-
-@media (max-width: 760px) {
-    .server-build-info {
-        display: none;
-    }
 }
 
 .footer-separator {
@@ -15524,6 +15590,13 @@ body.settings-body {
     gap: 8px;
 }
 
+#additionalModelInventory {
+    display: grid;
+    gap: 8px;
+    max-height: 32rem;
+    overflow: auto;
+}
+
 .settings-model-pool-entry {
     display: flex;
     align-items: center;
@@ -16238,7 +16311,7 @@ body.settings-body {
     color: #14532d;
 }
 
-/* ===========================
+/* ====================
    MARKDOWN CONTENT STYLING
    ========================== */
 
@@ -18485,6 +18558,7 @@ body.settings-body {
     }
     .composer-more-icon { display: none; }
     .composer-add-icon { display: inline; font-size: 24px; font-weight: 400; }
+    .chat-composer-more-actions[open] > summary .composer-add-icon { transform: rotate(45deg); }
     .chat-composer-more-actions:not([open]) > .button-row { display: none; }
     .chat-composer-more-actions[open] > .button-row {
         grid-column: 1 / -1; grid-row: 2;
@@ -18527,4 +18601,127 @@ body.settings-body {
 }
 #messageComposeArea[data-has-attachments="true"] .send-message-btn {
     display: inline-flex;
+}
+
+.task-deployment {
+    border: 1px solid var(--border-color, #ccc);
+    border-radius: 6px;
+    padding: 10px;
+    margin-block: 10px;
+    overflow-wrap: anywhere;
+}
+.task-deployment pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Shared navigation stays inside the composer so narrow-screen overflow cannot
+   clip it. It occupies its own row, rather than covering transcript text. */
+.chat-composer > .chat-scroll-to-end-btn,
+.message-navigation > .chat-scroll-to-end-btn {
+    position: static; flex: 0 0 44px; margin: 0 0 0 auto;
+    grid-column: 1 / -1; justify-self: end; padding: 0;
+}
+.message-navigation { display: flex; align-items: center; gap: 8px; width: 100%; }
+.message-navigation:not(:has(.visible, .message-jump-unread:not([hidden]))) { display: none; }
+.message-jump-unread, .new-shared-messages-indicator {
+    min-height: 44px; box-sizing: border-box; background: #1d4ed8;
+    color: #fff; border: 0; border-radius: 8px; padding: 8px 12px;
+    font-size: 14px; white-space: normal; cursor: pointer;
+}
+.message-jump-unread[hidden] { display: none; }
+.message-jump-unread:hover, .new-shared-messages-indicator:hover { background: #1e40af; }
+.chat-scroll-to-end-btn:active, .message-jump-unread:active,
+.new-shared-messages-indicator:active { background: #1e3a8a; transform: translateY(1px); }
+.chat-scroll-to-end-btn:focus-visible, .message-jump-unread:focus-visible,
+.new-shared-messages-indicator:focus-visible {
+    outline: 3px solid #1e40af; outline-offset: 3px; box-shadow: 0 0 0 3px white;
+}
+@media (prefers-reduced-motion: reduce) {
+    .chat-scroll-to-end-btn { transition: none; }
+}
+
+.conversation-menu-trigger {
+    margin-left: auto;
+    flex: 0 0 44px;
+    min-height: 44px;
+    padding: 4px;
+}
+
+/* Footer presentation preferences also apply to the narrow-screen details panel. */
+.footer-container,
+.mobile-footer-details-panel .footer-container {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    overflow-x: auto;
+    white-space: nowrap;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+.footer-container > *,
+.footer-container .footer-segment,
+.footer-container .db-conn-badge { flex: 0 0 auto; }
+.footer-container .footer-info,
+.mobile-footer-details-panel .footer-info,
+.footer-container .pid-indicator {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    white-space: nowrap;
+}
+.footer-container .footer-separator { display: none; }
+.footer-container .footer-info:empty,
+.footer-container .pid-indicator:empty { display: none; }
+.footer-visibility-settings { display: grid; gap: 10px; }
+.footer-visibility-settings label { display: flex; align-items: center; gap: 6px; }
+/* Fixed panels escape the scroll container's clipping boundary. */
+.footer-container .footer-org-menu,
+.footer-container .conversation-runtime-cost-details {
+    position: fixed;
+    left: 12px;
+    right: auto;
+    bottom: var(--von-fixed-footer-clearance, 64px);
+    white-space: normal;
+    max-height: min(420px, 60vh);
+    overflow-y: auto;
+}
+.mobile-footer-details-panel .footer-container .conversation-runtime-cost-details {
+    top: calc(var(--von-fixed-shell-height, 60px) + 72px);
+    bottom: auto;
+}
+html[data-footer-model="false"] .footer-container .conversation-model-controls { display: none; }
+html[data-footer-conversationcost="false"] .footer-container #modelInfoFooter > .conversation-runtime-cost-segment { display: none; }
+html[data-footer-user="false"] .footer-container .footer-user-segment { display: none; }
+html[data-footer-organisation="false"] .footer-container .footer-org-switcher { display: none; }
+html[data-footer-language="false"] .footer-container #languageIndicator { display: none; }
+html[data-footer-database="false"] .footer-container .db-conn-badge { display: none; }
+html[data-footer-uptime="false"] .footer-container #serverUptimeInfo { display: none; }
+html[data-footer-runtimecost="false"] .footer-container #serverRuntimeCostInfo { display: none; }
+html[data-footer-build="false"] .footer-container #serverBuildInfo { display: none; }
+html[data-footer-diagnostics="false"] .footer-container #serverPidFooter { display: none; }
+html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-build="false"] #serverUptimeFooter { display: none; }
+
+.footer-container [hidden] { display: none !important; }
+
+/* Compact status details expand in the row, preserving its scroll behaviour.
+   Keep clipped text available to assistive technology even before expansion. */
+.footer-container .db-conn-badge:not(:hover):not(:focus-within) .footer-quiet-metric,
+.footer-container :is(.conversation-model-controls, .footer-user-segment, .footer-org-switcher):not(:hover):not(:focus-within) > .footer-label-inline {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+.footer-container :is(.conversation-model-controls, .footer-user-segment, .footer-org-switcher):not(:hover):not(:focus-within) .concept-footer-button {
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.footer-container .db-conn-badge:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
 }

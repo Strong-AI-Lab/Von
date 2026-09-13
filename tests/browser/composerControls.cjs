@@ -126,6 +126,41 @@ async function bounds(page, selector) {
             await page.keyboard.press('Space');
             await expect(page.locator('.chat-composer-more-actions')).not.toHaveAttribute('open', '');
 
+            if (!profile.desktop) {
+                const menu = page.locator('.chat-composer-more-actions');
+                const closedHeight = (await bounds(page, '.chat-composer')).height;
+                for (let repeat = 0; repeat < 3; repeat++) {
+                    await summary.tap();
+                    await expect(menu).toHaveAttribute('open', '');
+                    await expect(summary).toHaveAccessibleName('Close actions');
+                    await summary.tap();
+                    await expect(menu).not.toHaveAttribute('open', '');
+                    await expect(summary).toHaveAccessibleName('More actions');
+                }
+                await summary.tap();
+                await input.tap();
+                await expect(menu).not.toHaveAttribute('open', '');
+                await expect(input).toBeFocused();
+                await expect(input).toHaveValue('Draft for the interaction check');
+                await summary.tap();
+                await page.locator('#uploadFileButton').focus();
+                await page.keyboard.press('Escape');
+                await expect(menu).not.toHaveAttribute('open', '');
+                await expect(summary).toBeFocused();
+                await page.evaluate(() => {
+                    window.fixtureSubmissions = [];
+                    document.querySelector('#sendButton').addEventListener('click', () => {
+                        window.fixtureSubmissions.push(document.querySelector('#promptInput').value);
+                    });
+                });
+                await summary.tap();
+                await send.tap();
+                assert.deepEqual(await page.evaluate(() => window.fixtureSubmissions), ['Draft for the interaction check']);
+                await expect(menu).not.toHaveAttribute('open', '');
+                assert.equal((await bounds(page, '.chat-composer')).height, closedHeight, 'dismissal restores compact layout');
+                if (evidence) await page.screenshot({ path: path.join(evidence, `${profile.name}-dismissed.png`) });
+            }
+
             // Bind the production dictation controller with a fake recorder.
             await page.evaluate(async () => {
                 const { createDictationController } = await import('/static/js/dictation.js');

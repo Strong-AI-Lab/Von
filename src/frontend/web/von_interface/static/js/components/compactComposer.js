@@ -34,6 +34,42 @@ export function initialiseCompactChatComposer(composer, resizeDraft = resizeComp
     const menu = composer.querySelector('.chat-composer-more-actions');
     const panel = menu?.querySelector('.button-row');
     if (!panel) return;
+    const summary = menu.querySelector('summary');
+    const label = summary?.querySelector('.composer-more-label');
+    let closeWatcher;
+    function dismiss(restoreFocus = false) {
+        if (!menu.open) return;
+        const focusWasInPanel = panel.contains(document.activeElement);
+        menu.open = false;
+        if (restoreFocus || focusWasInPanel) summary?.focus();
+        updateDisclosure();
+    }
+    function updateDisclosure() {
+        const name = menu.open ? 'Close actions' : 'More actions';
+        if (label) label.textContent = name;
+        if (summary) summary.title = name;
+        // Use the browser's close-request stack (including Android Back where
+        // supported), without adding synthetic entries to conversation history.
+        if (menu.open && isCompactComposer() && menu.isConnected) {
+            if (!closeWatcher && typeof window.CloseWatcher === 'function') {
+                closeWatcher = new window.CloseWatcher();
+                closeWatcher.addEventListener('close', () => dismiss(true));
+            }
+        } else {
+            closeWatcher?.destroy();
+            closeWatcher = undefined;
+        }
+    }
+    menu.addEventListener('toggle', updateDisclosure);
+    // Wait for the completed click: collapsing during pointer/focus events can
+    // move Send before touch activation reaches it.
+    document.addEventListener('click', event => {
+        if (menu.isConnected && isCompactComposer() && !menu.contains(event.target)) dismiss();
+    });
+    // Keyboard activation also dismisses before the existing submission handler.
+    composer.querySelector('#sendButton')?.addEventListener('click', () => {
+        if (isCompactComposer()) dismiss();
+    }, { capture: true });
     const active = document.createElement('div');
     active.className = 'compact-composer-active';
     composer.append(active);
@@ -74,6 +110,7 @@ export function initialiseCompactChatComposer(composer, resizeDraft = resizeComp
                 }
             }
         }
+        updateDisclosure();
         resizeDraft(input);
     }
     const observer = new MutationObserver(update);
@@ -84,15 +121,14 @@ export function initialiseCompactChatComposer(composer, resizeDraft = resizeComp
     }
     menu.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
-            menu.open = false;
-            menu.querySelector('summary').focus();
+            event.preventDefault();
+            dismiss(true);
         }
     });
     menu.addEventListener('click', event => {
         if (isCompactComposer() && event.target.closest('#dictateButton, #voiceConversationButton, #uploadFileButton')) {
-            menu.open = false;
             // Recording controls become visible on the controller's next render.
-            menu.querySelector('summary').focus();
+            dismiss(true);
         }
     });
     window.matchMedia?.(COMPACT_COMPOSER_QUERY).addEventListener?.('change', update);

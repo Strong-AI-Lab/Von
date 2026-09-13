@@ -553,3 +553,24 @@ def test_authenticated_search_cursor_trash_restore_replay(monkeypatch, app_clien
         "/von/api/session/conversation_search?q=Search+fixture&page_size=10"
     ).get_json()
     assert target in {row["session_id"] for row in rediscovered["results"]}
+
+
+def test_search_api_returns_topic_only_match_after_title(monkeypatch, app_client):
+    service = von_routes.conversation_search_service
+    monkeypatch.setattr(von_routes, "get_effective_context", _effective_context)
+    monkeypatch.setattr(service, "list_actor_conversations", lambda **kw: {
+        "conversations": [
+            {"session_id": "title", "session_name": "Cooling buildings"},
+            {"session_id": "topic", "session_name": "Design"},
+        ], "coverage_complete": True,
+    })
+    monkeypatch.setattr(service, "_lexical_candidates", lambda **kw: ([], {"status": "valid_empty"}))
+    monkeypatch.setattr(service, "search_conversation_preference_session_ids", lambda **kw: [])
+    monkeypatch.setattr(service, "get_rag_service", lambda: types.SimpleNamespace(query=lambda *args, **kw: [
+        {"score": 100, "text": "Passive ventilation reduces indoor temperatures", "metadata": {"session_id": "topic", "role": "user"}},
+    ]))
+    response = app_client.get("/von/api/session/conversation_search?q=cooling+buildings&match_mode=hybrid")
+    assert response.status_code == 200
+    rows = response.get_json()["results"]
+    assert [row["session_id"] for row in rows] == ["title", "topic"]
+    assert rows[1]["match"]["fields"] == ["semantic_content"]

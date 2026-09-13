@@ -36,6 +36,7 @@ from ..services.text_value_service import (
 from ..utils.concept_id_utils import (
     ensure_v_concept_prefix,
 )
+from ..utils.task_execution_preferences import normalise_task_execution_preference
 from .effort_unit_ontology_service import (
     ensure_effort_unit_ontology,
     extract_effort_unit_type_ids,
@@ -223,6 +224,8 @@ JIRA_MIGRATION_LABEL_CANDIDATES = ("migrated", "jira-migration", "jira_migration
 TASK_STATUS_PENDING = "pending"
 TASK_STATUS_IN_PROGRESS = "in_progress"
 TASK_STATUS_COMPLETED = "completed"
+# Finished work is completed; deployed additionally records runtime delivery.
+TASK_STATUS_DEPLOYED = "deployed"
 TASK_STATUS_CANCELLED = "cancelled"
 TASK_STATUS_BLOCKED = "blocked"
 
@@ -230,6 +233,7 @@ VALID_TASK_STATUSES = {
     TASK_STATUS_PENDING,
     TASK_STATUS_IN_PROGRESS,
     TASK_STATUS_COMPLETED,
+    TASK_STATUS_DEPLOYED,
     TASK_STATUS_CANCELLED,
     TASK_STATUS_BLOCKED,
 }
@@ -301,7 +305,29 @@ TASK_TRANSITION_DEFINITIONS: Dict[str, List[Dict[str, str]]] = {
             "to_status": TASK_STATUS_CANCELLED,
         },
     ],
+    TASK_STATUS_DEPLOYED: [
+        {
+            "transition_id": "mark_completed",
+            "name": "Return to completed",
+            "to_status": TASK_STATUS_COMPLETED,
+        },
+        {
+            "transition_id": "reopen_pending",
+            "name": "Reopen to pending",
+            "to_status": TASK_STATUS_PENDING,
+        },
+        {
+            "transition_id": "reopen_in_progress",
+            "name": "Reopen to in progress",
+            "to_status": TASK_STATUS_IN_PROGRESS,
+        },
+    ],
     TASK_STATUS_COMPLETED: [
+        {
+            "transition_id": "deploy",
+            "name": "Mark deployed",
+            "to_status": TASK_STATUS_DEPLOYED,
+        },
         {
             "transition_id": "reopen_pending",
             "name": "Reopen to pending",
@@ -425,6 +451,13 @@ def _relationship_id_list(value: Any) -> list[str]:
         seen.add(candidate)
         ordered.append(candidate)
     return ordered
+
+
+def _normalise_execution_preference(value: Any, *, field_name: str) -> str | None:
+    try:
+        return normalise_task_execution_preference(value, field_name=field_name)
+    except ValueError as exc:
+        raise InvalidTaskDataError(str(exc)) from exc
 
 
 def _normalise_optional_text(value: Any, *, field_name: str) -> str | None:
@@ -1398,10 +1431,10 @@ def create_task(
         reference_code,
         field_name="reference_code",
     )
-    requested_model = _normalise_optional_text(
+    requested_model = _normalise_execution_preference(
         requested_model, field_name="requested_model"
     )
-    requested_reasoning_effort = _normalise_optional_text(
+    requested_reasoning_effort = _normalise_execution_preference(
         requested_reasoning_effort, field_name="requested_reasoning_effort"
     )
     agent_creation_fingerprint = _normalise_optional_text(
@@ -2209,7 +2242,7 @@ def update_task_status(
 
     Args:
         task_concept_id: The task's concept_id
-        status: New status (pending, in_progress, completed, cancelled, blocked)
+        status: New status (pending, in_progress, completed, deployed, cancelled, blocked)
         actor_concept_id: Trusted actor performing the transition, when available
 
     Returns:
@@ -3373,6 +3406,21 @@ def _actor_scoped_task_query_candidates(
 
 
 def search_tasks(
+    *, query: str | None = None, search_mode: str = "lexical", **filters
+) -> Dict[str, Any]:
+    """Search canonical tasks lexically or by actor-scoped semantic relevance."""
+    if any(key.startswith("_") for key in filters):
+        raise InvalidTaskDataError("Internal search parameters are not accepted")
+    if search_mode == "semantic":
+        from .task_semantic_index_service import search_semantic_tasks
+
+        return search_semantic_tasks(query=query, filters=filters)
+    if search_mode != "lexical":
+        raise InvalidTaskDataError("search_mode must be lexical or semantic")
+    return _search_tasks(query=query, **filters)
+
+
+def _search_tasks(
     *,
     query: str | None = None,
     project_concept_id: str | None = None,
@@ -3410,6 +3458,7 @@ def search_tasks(
     bulk_collection_ids: list[str] | str | None = None,
     limit: int = 50,
     offset: int = 0,
+    _semantic_query: str | None = None,
 ) -> Dict[str, Any]:
     """Search tasks with Jira-style filters over Vontology-backed task concepts."""
 
@@ -3489,6 +3538,11 @@ def search_tasks(
                 query_filter,
                 sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
             )
+        )
+    if _semantic_query is not None:
+        # Do not index placeholder text after a failed canonical text read.
+        query_texts_by_task = get_texts_for_concepts(
+            [doc["concept_id"] for doc in docs]
         )
     tasks = _build_task_responses(docs, texts_by_task=query_texts_by_task)
 
@@ -3826,8 +3880,20 @@ def search_tasks(
         bulk_collection_ids=bulk_collection_ids,
     )
     tasks = visibility_payload["tasks"]
+    semantic_diagnostics = None
+    if _semantic_query is not None:
+        from .task_semantic_index_service import assemble_task_context, rank_tasks
+
+        tasks, semantic_diagnostics = rank_tasks(tasks, _semantic_query)
     total = len(tasks)
     paged = tasks[offset : offset + limit]
+    rag_context = None
+    if semantic_diagnostics is not None:
+        rag_context = assemble_task_context(paged)
+        paged = [
+            {key: value for key, value in task.items() if key != "retrieval_text"}
+            for task in paged
+        ]
     return {
         "tasks": paged,
         "total": total,
@@ -3843,6 +3909,14 @@ def search_tasks(
         "query_candidate_prefilter": query_candidate_prefilter,
         "total_is_exhaustive": bool(
             query_candidate_prefilter.get("total_is_exhaustive", True)
+        ),
+        **(
+            {
+                "semantic_retrieval": semantic_diagnostics,
+                "rag_context": rag_context,
+            }
+            if semantic_diagnostics is not None
+            else {}
         ),
     }
 
@@ -4760,7 +4834,7 @@ def update_task_fields(
     existing_task = _build_task_response(task_doc)
     # Validate these settings before changing any of the requested task fields.
     execution_settings = {
-        key: _normalise_optional_text(fields[key], field_name=key)
+        key: _normalise_execution_preference(fields[key], field_name=key)
         for key in ("requested_model", "requested_reasoning_effort")
         if key in fields
     }
@@ -5851,6 +5925,7 @@ __all__ = [
     "TASK_STATUS_PENDING",
     "TASK_STATUS_IN_PROGRESS",
     "TASK_STATUS_COMPLETED",
+    "TASK_STATUS_DEPLOYED",
     "TASK_STATUS_CANCELLED",
     "TASK_STATUS_BLOCKED",
     "VALID_TASK_STATUSES",
