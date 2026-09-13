@@ -310,8 +310,21 @@ organisation at or before the source timestamp, then presents them chronological
 The context records its time boundary and whether older messages were omitted.
 Other conversation readers retain their existing pagination. Coding context now
 includes canonical notes, checkpoints, progress, evidence, priority, task links,
-project/collection provenance and up to 50 attachment metadata records. Attachment
-bytes are not supplied by those references. Other authors' comments remain
+project/collection provenance and up to 50 attachment metadata records, enumerated
+even when a cached attachment count is zero. Enumeration failures are explicit.
+Both inbox and coding contexts resolve explicit native task IDs in supplied text
+through canonical point reads, independently of thread/task list projections.
+`task_lookup` preserves assignment, evidence, source scope, failures and omissions;
+these reads do not pick up the referenced task. The existing configured native
+assignment boundary remains in force. Actor-scoped not-found is not global absence.
+The controller stages up to 20 explicitly referenced file copies (5 MB each) using
+the canonical actor-scoped byte reader. `file_copy_evidence` records identity,
+actual SHA-256, canonical checksum verification when available, and a local path
+only after a successful read without checksum mismatch. No blob URL or credential
+is projected. File-copy references do not establish native attachment membership.
+These files remain in the run's `evidence/` directory; the archive's existing file
+allowlist does not include their bytes. Activation and live evidence access must
+be verified separately from source publication. Other authors' comments remain
 explicitly omitted; the existing delegator-comment and follow-up continuity is
 preserved. Runtime capabilities distinguish configured launch arguments and
 controller revision evidence from unobserved public revision or device access.

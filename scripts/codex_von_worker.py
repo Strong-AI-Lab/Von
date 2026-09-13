@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -164,6 +165,119 @@ def authorised_task(task, config):
         and task.get("created_by_concept_id") == config["delegator_id"]
         and task.get("report_to_concept_id") in (None, config["delegator_id"])
     )
+
+
+def referenced_tasks(config, api, supplied, task_ids=()):
+    """Resolve explicit references, independently of a bounded task projection.
+
+    This does not pick up tasks or enlarge the controller's assignment scope.
+    Canonical not-found is actor-scoped and is not proof of global absence.
+    """
+    ids = set(task_ids) | set(
+        re.findall(r"#V#task_agent_[A-Za-z0-9_]+", json.dumps(supplied, default=str))
+    )
+    results = []
+    for task_id in sorted(ids - {None, ""})[:50]:
+        item = {
+            "task_id": task_id,
+            "source": "canonical task service.get_task",
+            "scope": "configured worker native assignments",
+        }
+        try:
+            row = api.task(task_id)
+            if not authorised_task(row, config) or not api.native_writer(row):
+                item["status"] = "outside_assignment_scope"
+            else:
+                item.update(status="found", task=row)
+        except api.tasks.TaskNotFoundError:
+            item["status"] = "not_found_in_actor_scope"
+        except Exception as exc:
+            item.update(status="lookup_failed", error_type=type(exc).__name__)
+        results.append(item)
+    return {
+        "results": results,
+        "omitted": max(0, len(ids - {None, ""}) - 50),
+        "absence_semantics": "An omitted or unprojected reference is not a canonical not-found result.",
+    }
+
+
+def stage_file_copy_evidence(config, supplied, run_dir):
+    """Controller-only authorised byte reads; expose local copies, never blob URLs."""
+    from src.backend.services.computer_file_copy_service import (
+        build_file_copy_artifact_record,
+        fetch_file_copy_bytes,
+    )
+    from src.backend.services.file_copy_reference_service import (
+        extract_file_copy_concept_ids_from_text,
+    )
+
+    ids = extract_file_copy_concept_ids_from_text(json.dumps(supplied, default=str))
+    results = []
+    for concept_id in ids[:20]:
+        item = {
+            "file_copy_concept_id": concept_id,
+            "source": "referenced file copy",
+            "native_attachment_asserted": False,
+            "content_available": False,
+            "scope": "configured worker actor and organisation",
+        }
+        try:
+            result = fetch_file_copy_bytes(
+                file_copy_concept_id=concept_id,
+                user_concept_id=config["agent_id"],
+                organisation_concept_id=config["organisation_id"],
+                max_bytes=5_000_000,
+            )
+            if not result.get("success"):
+                item["error_code"] = result.get("error")
+                item["status"] = (
+                    "not_found_in_actor_scope"
+                    if result.get("error") == "not_found"
+                    else "content_unavailable"
+                )
+            else:
+                data = result["data"]
+                digest = hashlib.sha256(data).hexdigest()
+                record = (
+                    build_file_copy_artifact_record(file_copy_concept_id=concept_id)
+                    or {}
+                )
+                expected = record.get("sha256")
+                item.update(
+                    sha256=digest,
+                    canonical_sha256=expected,
+                    size_bytes=len(data),
+                    original_filename=result["info"].original_filename,
+                    content_type=result["info"].content_type,
+                )
+                if expected and expected.lower() != digest:
+                    item["status"] = "checksum_mismatch"
+                else:
+                    suffix = {
+                        "image/png": ".png",
+                        "image/jpeg": ".jpg",
+                        "image/webp": ".webp",
+                    }.get(result["info"].content_type, ".bin")
+                    destination = (
+                        Path(run_dir) / "evidence" / (fingerprint(concept_id) + suffix)
+                    )
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(data)
+                    destination.chmod(0o600)
+                    item.update(
+                        status="available",
+                        content_available=True,
+                        local_path=str(destination),
+                        checksum_verified=bool(expected),
+                    )
+        except Exception as exc:
+            item.update(status="lookup_failed", error_type=type(exc).__name__)
+        results.append(item)
+    return {
+        "results": results,
+        "omitted": max(0, len(ids) - 20),
+        "source": "canonical actor-scoped file-copy service",
+    }
 
 
 def runtime_evidence(backend_root, api):
@@ -324,14 +438,24 @@ class Von:
             offset += len(rows)
             if len(rows) < 100:
                 break
-        attachments = {"attachments": [], "total": 0}
-        if task.get("attachments_count"):
-            attachments = self.tasks.list_task_attachments(task_id, limit=50)
+        try:
+            attachments = {
+                **self.tasks.list_task_attachments(task_id, limit=50),
+                "status": "enumerated",
+            }
+        except Exception as exc:
+            attachments = {
+                "attachments": [],
+                "total": None,
+                "status": "lookup_failed",
+                "error_type": type(exc).__name__,
+            }
         return {
             **{
                 key: task.get(key)
                 for key in (
                     "status",
+                    "assignee_concept_id",
                     "notes",
                     "next_checkpoint",
                     "progress_signal",
@@ -358,10 +482,13 @@ class Von:
             },
             "attachments": {
                 **attachments,
+                "source": "canonical task service.list_task_attachments",
                 "content_available": False,
-                "reason": "Metadata references only; no attachment bytes supplied to this run.",
-                "omitted": max(
-                    0, attachments["total"] - len(attachments["attachments"])
+                "reason": "Metadata only here; inspect file_copy_evidence for separately staged bytes.",
+                "omitted": (
+                    None
+                    if attachments["total"] is None
+                    else max(0, attachments["total"] - len(attachments["attachments"]))
                 ),
             },
             "title": task["title"],
@@ -653,6 +780,18 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         "worker_identity": config["agent_id"],
         "capabilities": capability_context(config, read_only=False, worktree=worktree),
     }
+    api = Von(config)
+    context["task_lookup"] = referenced_tasks(config, api, [inputs, conversation])
+    for item in context["task_lookup"]["results"]:
+        if item["status"] == "found":
+            try:
+                item["assignment_context"] = api.inputs(item["task"])
+            except Exception as exc:
+                item["evidence_lookup"] = {
+                    "status": "lookup_failed",
+                    "error_type": type(exc).__name__,
+                }
+    context["file_copy_evidence"] = stage_file_copy_evidence(config, context, run_dir)
     context_path = run_dir / "context.json"
     write_json(context_path, context)
     prompt = Path(__file__).with_name("codex_von_worker_prompt.md").read_text()
