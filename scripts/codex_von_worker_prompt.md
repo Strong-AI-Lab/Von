@@ -76,7 +76,7 @@ include `blocker`: key (stable dependency name), kind (dependency or transient),
 owner, recovery, scope_json (JSON object of relevant revision/profile/scope),
 required_observations_json (JSON object of exact observations that demonstrate
 repair), and probe_key (null unless an applicable operator probe is supplied).
-Use null or omit blocker otherwise. Report observed facts, not an inferred ready
+Use null for blocker otherwise. Report observed facts, not an inferred ready
 flag; authentication/profile prerequisites must include their actual observations.
 The controller adds the task/actor/organisation and failed-attempt binding.
 Do not classify code you can safely repair as a controller dependency. Continue
