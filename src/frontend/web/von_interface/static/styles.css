@@ -18690,3 +18690,27 @@ html[data-footer-diagnostics="false"] .footer-container #serverPidFooter { displ
 html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-build="false"] #serverUptimeFooter { display: none; }
 
 .footer-container [hidden] { display: none !important; }
+
+/* Compact status details expand in the row, preserving its scroll behaviour.
+   Keep clipped text available to assistive technology even before expansion. */
+.footer-container .db-conn-badge:not(:hover):not(:focus-within) .footer-quiet-metric,
+.footer-container :is(.conversation-model-controls, .footer-user-segment, .footer-org-switcher):not(:hover):not(:focus-within) > .footer-label-inline {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+.footer-container :is(.conversation-model-controls, .footer-user-segment, .footer-org-switcher):not(:hover):not(:focus-within) .concept-footer-button {
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.footer-container .db-conn-badge:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+}
