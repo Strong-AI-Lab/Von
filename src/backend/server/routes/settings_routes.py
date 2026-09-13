@@ -962,24 +962,18 @@ def get_llm_info():
 def execution_cost_display():
     """Read viewer-scoped thresholds or replace the authenticated user's pair."""
     from ...services.execution_cost_display_service import (
-        PREDICATE,
-        resolve_preferences,
-        validate_preferences,
+        PREDICATE, resolve_preferences, validate_preferences,
     )
 
     actor = get_effective_user_concept_id()
     if not actor:
         return _jsonify_no_store({"error": "authenticated_actor_context_required"}, 401)
     effective = get_effective_context(
-        request.headers.get("X-Von-Window-Session"),
-        dict(session),
-        actor,
+        request.headers.get("X-Von-Window-Session"), dict(session), actor,
     )
     if request.method == "PUT":
         import json
-        from ...services.ontology_mutation_command_service import (
-            execute_governed_ontology_method,
-        )
+        from ...services.ontology_mutation_command_service import execute_governed_ontology_method
         from ...services.text_value_service import upsert_singleton_text_relation
 
         try:
@@ -987,32 +981,19 @@ def execution_cost_display():
         except ValueError as exc:
             return _jsonify_no_store({"error": str(exc)}, 400)
         text = json.dumps(value, sort_keys=True)
-        provenance = {
-            "source": "execution_cost_display_preferences",
-            "actor_concept_id": actor,
-        }
+        provenance = {"source": "execution_cost_display_preferences", "actor_concept_id": actor}
         result = execute_governed_ontology_method(
             method_name="upsert_singleton_text_relation",
-            arguments={
-                "concept_id": actor,
-                "predicate": PREDICATE,
-                "text": text,
-                "language": "en-NZ",
-                "provenance": provenance,
-            },
+            arguments={"concept_id": actor, "predicate": PREDICATE, "text": text,
+                       "language": "en-NZ", "provenance": provenance},
             mutate=lambda: upsert_singleton_text_relation(
-                subject_concept_id=actor,
-                predicate=PREDICATE,
-                text=text,
-                lang="en-NZ",
-                provenance=provenance,
+                subject_concept_id=actor, predicate=PREDICATE, text=text,
+                lang="en-NZ", provenance=provenance,
             ),
         )
         if result.get("success") is False:
             return _jsonify_no_store(result, 503)
-    return _jsonify_no_store(
-        resolve_preferences(actor, effective.get("organisation_id"))
-    )
+    return _jsonify_no_store(resolve_preferences(actor, effective.get("organisation_id")))
 
 
 @settings_bp.route("/llm/cost_summary", methods=["GET"])
@@ -1033,7 +1014,9 @@ def get_llm_cost_summary():
             {"error": "An authenticated actor and namespace are required."}, 401
         )
     if not provider or not model:
-        return _jsonify_no_store({"error": "provider and model are required."}, 400)
+        return _jsonify_no_store(
+            {"error": "provider and model are required."}, 400
+        )
     try:
         limit = int(request.args.get("limit") or 200)
         window_days = int(request.args.get("window_days") or 30)
@@ -2066,7 +2049,11 @@ def _settings_key_presence(env_var_name: str) -> tuple[bool, str | None]:
         if read_secret_file(os.getenv(f"{name}_FILE")):
             return True, "secret_file"
 
-    dotenv_keys = tuple(key for name in candidates for key in (name, f"{name}_FILE"))
+    dotenv_keys = tuple(
+        key
+        for name in candidates
+        for key in (name, f"{name}_FILE")
+    )
     dotenv_values = read_repo_dotenv_values(dotenv_keys)
     for name in candidates:
         if dotenv_values.get(name):
@@ -2122,11 +2109,7 @@ def get_openai_models(*, include_all=False):
 
         # Create a direct OpenAIClient instance to get models
         client = OpenAIClient(api_key_env_var=api_key_env_var)
-        models = (
-            client.list_models(include_all=True)
-            if include_all
-            else client.list_models()
-        )
+        models = client.list_models(include_all=True) if include_all else client.list_models()
 
         if models:
             current_app.logger.info(f"Retrieved {len(models)} OpenAI models")
@@ -2432,14 +2415,10 @@ def get_user_prefs(user_concept_id: str):
                 preferred_language = language_rows[0].get("text")
         # Legacy member_of_organisation describes membership, not preference.
         # Never choose the first membership as a landing context.
-        from ...services.login_organisation_preference_service import (
-            initialise_login_context,
-        )
-
+        from ...services.login_organisation_preference_service import initialise_login_context
         organisation_concept_id = (
             initialise_login_context(session)["organisation_concept_id"]
-            if session.get("user_email") and session.get("user_concept_id")
-            else None
+            if session.get("user_email") and session.get("user_concept_id") else None
         )
         return (
             jsonify(
@@ -2755,9 +2734,9 @@ def verify_gemini_api_key():
         )
     api_key = _resolve_settings_api_key(
         api_key_env_var,
-        fallback_env_vars=(
-            ("GOOGLE_API_KEY",) if api_key_env_var == "GEMINI_API_KEY" else ()
-        ),
+        fallback_env_vars=("GOOGLE_API_KEY",)
+        if api_key_env_var == "GEMINI_API_KEY"
+        else (),
     )
     if not api_key:
         return _jsonify_no_store(
@@ -2861,10 +2840,7 @@ def verify_openrouter_api_key():
     """Verify the fixed OpenRouter key source by listing its current catalogue."""
 
     payload = request.get_json(silent=True) or {}
-    if (
-        str(payload.get("api_key_env_var") or "OPENROUTER_API_KEY").strip()
-        != "OPENROUTER_API_KEY"
-    ):
+    if str(payload.get("api_key_env_var") or "OPENROUTER_API_KEY").strip() != "OPENROUTER_API_KEY":
         return _jsonify_no_store(
             {
                 "success": False,
@@ -4369,9 +4345,9 @@ def test_gemini_model():
 
     api_key = _resolve_settings_api_key(
         api_key_env_var,
-        fallback_env_vars=(
-            ("GOOGLE_API_KEY",) if api_key_env_var == "GEMINI_API_KEY" else ()
-        ),
+        fallback_env_vars=("GOOGLE_API_KEY",)
+        if api_key_env_var == "GEMINI_API_KEY"
+        else (),
     )
     if not api_key:
         return _jsonify_no_store(
@@ -4504,8 +4480,13 @@ def test_meta_model():
             400,
         )
 
-    actor_user_concept_id, actor_source = get_effective_user_concept_id_with_source()
-    if not actor_user_concept_id or actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE:
+    actor_user_concept_id, actor_source = (
+        get_effective_user_concept_id_with_source()
+    )
+    if (
+        not actor_user_concept_id
+        or actor_source == LEGACY_IDENTITY_HEADER_ACTOR_SOURCE
+    ):
         return _jsonify_no_store(
             {
                 "success": False,
@@ -4736,25 +4717,13 @@ def test_openrouter_model():
         failure_kind = "unexpected_error"
         reason = "Unexpected OpenRouter model probe failure."
         if status_code == 401 or "auth" in lowered or "api key" in lowered:
-            failure_kind, reason = (
-                "authentication_error",
-                "OpenRouter authentication failed.",
-            )
+            failure_kind, reason = "authentication_error", "OpenRouter authentication failed."
         elif status_code == 403 or "permission" in lowered:
-            failure_kind, reason = (
-                "permission_denied",
-                "OpenRouter access was denied for this model.",
-            )
+            failure_kind, reason = "permission_denied", "OpenRouter access was denied for this model."
         elif status_code == 404 or "not found" in lowered:
-            failure_kind, reason = (
-                "model_not_found",
-                "The selected OpenRouter model was not found.",
-            )
+            failure_kind, reason = "model_not_found", "The selected OpenRouter model was not found."
         elif status_code == 429 or "rate limit" in lowered or "quota" in lowered:
-            failure_kind, reason = (
-                "rate_limited",
-                "OpenRouter rate or quota limit was reached.",
-            )
+            failure_kind, reason = "rate_limited", "OpenRouter rate or quota limit was reached."
         elif "connect" in lowered or "network" in lowered:
             failure_kind, reason = "connection_error", "Could not reach OpenRouter."
         current_app.logger.warning(

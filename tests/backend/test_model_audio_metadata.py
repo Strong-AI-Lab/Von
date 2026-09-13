@@ -96,3 +96,16 @@ def test_disabled_provider_has_actionable_failure_and_no_available_models(monkey
     assert "openai" in data["error"] and "check" in data["error"]
     assert "private provider details" not in data["error"]
     assert not any(model["available"] for model in data["models"])
+
+
+def test_openai_inventory_includes_non_gpt_ids_without_changing_chat_catalogue(monkeypatch):
+    from types import SimpleNamespace
+    from src.backend.languagemodels import llm_interface
+    monkeypatch.setattr(llm_interface, '_MODEL_CACHE', {})
+    monkeypatch.setattr(llm_interface, '_MODEL_FAIL_BACKOFF', {})
+    client = object.__new__(llm_interface.OpenAIClient)
+    client.client = SimpleNamespace(models=SimpleNamespace(list=lambda: SimpleNamespace(data=[
+        SimpleNamespace(id='gpt-chat'), SimpleNamespace(id='whisper-1'), SimpleNamespace(id='embedding-model')
+    ])))
+    assert client.list_models(include_all=True) == ['embedding-model', 'gpt-chat', 'whisper-1']
+    assert client.list_models() == ['gpt-chat']
