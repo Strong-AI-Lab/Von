@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 ACTIVITY_CHECKPOINT_SECONDS = 15
+INSTANCE_PROTOCOL_VERSION = 1
 
 ACTIVE = {"pending", "in_progress", "blocked"}
 RESULT_SCHEMA = {
@@ -75,6 +76,7 @@ def capability_context(config, *, read_only, worktree=None):
         "delegator_id": config["delegator_id"],
         "organisation_id": config["organisation_id"],
         "source_repo": config.get("source_repo"),
+        "approved_repository_roots": config.get("approved_repository_roots", []),
         "worktree": str(worktree) if worktree else None,
         "controller_runtime": config.get("runtime_evidence", {"available": False}),
         "public_served_revision": {"available": False, "reason": "Not probed here"},
@@ -711,9 +713,9 @@ class Von:
             recipient_ids=[c["delegator_id"]],
             organisation_concept_id=c["organisation_id"],
             thread_id=task["task_concept_id"],
-            subject=f"Codex DGX: {task['title']}",
+            subject=f"{c.get('agent_name', c['agent_id'])}: {task['title']}",
             content=content,
-            metadata={"attribution": "Sent by the Codex DGX coding worker"},
+            metadata={"attribution": "Sent by " + c["agent_id"]},
         )
         message_id = receipt.message["concept_id"]
         readback = self.messages.get_message_for_user(message_id, c["agent_id"])
@@ -741,7 +743,7 @@ class Von:
         content = (
             f"{result['summary']}\n\n{result['evidence']}\n\n"
             f"{result['question']}\n\nTask: {state['task_id']}\n"
-            f"DGX worktree: {state.get('worktree', 'not started')}\n"
+            f"Coding worktree: {state.get('worktree', 'not started')}\n"
             f"Run: {state['attempt']}"
         ).strip()
         if state.get("execution_settings"):
@@ -776,7 +778,7 @@ class Von:
             evidence_addition = (
                 f"{result['evidence']}\nVon result: {message_id}\n"
                 f"Execution archive: {capture.get('archive_url', 'unavailable')}\n"
-                f"DGX worktree: {state.get('worktree', 'not started')}"
+                f"Coding worktree: {state.get('worktree', 'not started')}"
             )
             evidence = task.get("evidence") or ""
             if evidence_addition not in evidence:
@@ -1030,7 +1032,7 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
             env=environment,
             stdout=events,
             stderr=errors,
-            pass_fds=(lock_fd,),
+            pass_fds=(lock_fd, *config.get("_capacity_fds", ())),
         ) as process:
             process.stdin.write(prompt)
             process.stdin.close()
@@ -1136,9 +1138,9 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         receipt
     )
     if success:
-        result[
-            "summary"
-        ] += f" Deployed and verified the public server at {commit[:12]}."
+        result["summary"] += (
+            f" Deployed and verified the public server at {commit[:12]}."
+        )
     else:
         result["status"] = "blocked"
         result["summary"] += (
@@ -1149,9 +1151,9 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         )
     if recover_only:
         result["status"] = "blocked"
-        result[
-            "summary"
-        ] += " The task changed; only the interrupted deployment was reconciled."
+        result["summary"] += (
+            " The task changed; only the interrupted deployment was reconciled."
+        )
     write_json(state_path, state)
 
 
@@ -1249,7 +1251,7 @@ def tick(config, api, lock_fd):
         api.send(
             task,
             fingerprint([task_id, input_fingerprint(inputs)]) + ":started",
-            f"I am picking up this task on the DGX: {task['title']}.\nTask: {task_id}\n"
+            f"I am picking up this assigned coding task: {task['title']}.\nTask: {task_id}\n"
             "I will send the result or a question here. Reply in this task thread or add a task comment.",
         )
         api.tasks.update_task_status(
@@ -1269,9 +1271,9 @@ def tick(config, api, lock_fd):
                 state["result"]["summary"] = (
                     "Coding execution settings rejected: " + str(exc)
                 )
-                state["result"][
-                    "question"
-                ] = "Correct this task's model or reasoning setting, then requeue it."
+                state["result"]["question"] = (
+                    "Correct this task's model or reasoning setting, then requeue it."
+                )
             write_json(path, state)
         apply_deployment(config, api, state, path, lock_fd)
         finish_captured(config, api, state, path)
@@ -1313,12 +1315,33 @@ def main():
     config = json.loads(Path(options.config).read_text())
     state_root = Path(config["state_root"])
     state_root.mkdir(parents=True, exist_ok=True)
-    with (state_root / "worker.lock").open("a") as lock:
+    with (state_root / "worker.lock").open("a") as lock, ExitStack() as admission_stack:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             print('{"outcome":"already_running"}')
             return
+        if config.get("instance_state_path"):
+            instance = json.loads(Path(config["instance_state_path"]).read_text())
+            if any(
+                instance.get(key) != config[key]
+                for key in ("agent_id", "delegator_id", "organisation_id")
+            ):
+                raise PermissionError(
+                    "Instance scope differs from worker configuration"
+                )
+            if instance.get("desired_state") != "running" and not options.check_task:
+                print('{"outcome":"paused"}')
+                return
+        try:
+            from .codex_von_capacity import admission
+        except ImportError:
+            from codex_von_capacity import admission
+        capacity_fds = admission_stack.enter_context(admission(config))
+        if capacity_fds is None:
+            print(json.dumps({"outcome": "waiting_for_capacity"}), flush=True)
+            return
+        config["_capacity_fds"] = capacity_fds
         backend_root = bind_backend_root(options.backend_root)
         resolve_execution_settings(config, {})
         from src.backend.integrations.internal_mcp.gateway import (

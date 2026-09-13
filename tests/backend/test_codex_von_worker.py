@@ -69,6 +69,22 @@ def test_empty_poll_has_no_model_or_message(config, monkeypatch):
     worker.tick(config, SimpleNamespace(pending=list), 0)
 
 
+def test_paused_instance_stops_before_loading_backend(config, monkeypatch, capsys):
+    config_path = Path(config["state_root"]) / "config.json"
+    state_path = Path(config["state_root"]) / "instance.json"
+    config["instance_state_path"] = str(state_path)
+    state_path.write_text(json.dumps({**config, "desired_state": "paused"}))
+    config_path.write_text(json.dumps(config))
+    monkeypatch.setattr(sys, "argv", ["worker", "--config", str(config_path)])
+    monkeypatch.setattr(
+        worker,
+        "bind_backend_root",
+        lambda *_: pytest.fail("Paused worker loaded backend"),
+    )
+    worker.main()
+    assert json.loads(capsys.readouterr().out)["outcome"] == "paused"
+
+
 @pytest.mark.parametrize(
     "requested,expected",
     [
@@ -420,7 +436,9 @@ def test_interrupted_clone_recovers_with_independent_metadata_and_no_service_sec
     )
     run(["git", "-C", str(source), "remote", "add", "origin", str(source)])
     fake = tmp_path / "fake-codex"
-    fake.write_text(f"#!{sys.executable}\n" + """import json, os, sys
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        + """import json, os, sys
 from pathlib import Path
 assert 'OPENAI_API_KEY' not in os.environ
 assert 'MONGO_URI' not in os.environ
@@ -430,7 +448,8 @@ assert sys.argv[sys.argv.index('--model') + 1] == 'gpt-6-astra'
 assert 'model_reasoning_effort="high"' in sys.argv
 result = Path(sys.argv[sys.argv.index('--output-last-message') + 1])
 result.write_text(json.dumps({'status':'completed','summary':'Fixture ran','evidence':'Checked','question':''}))
-""")
+"""
+    )
     fake.chmod(0o700)
     monkeypatch.setenv("OPENAI_API_KEY", "test-sentinel")
     monkeypatch.setenv("MONGO_URI", "test-sentinel")

@@ -47,6 +47,7 @@ from . import crossref_metadata as crossref, dynamic_tool_loader
 from .gateway import MethodCatalogue, MethodDefinition
 from .schemas import Schema, make_error_response
 from .spreadsheet_record_tools import build_spreadsheet_record_tool_definitions
+from .coding_agent_instance_tools import build_coding_agent_instance_tools
 from .workflow_surface_capabilities import (
     build_workflow_surface_capability_matrix,
 )
@@ -40706,6 +40707,7 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             ),
         ),
         *build_spreadsheet_record_tool_definitions(),
+        *build_coding_agent_instance_tools(),
         MethodDefinition(
             name="extract_annotations",
             handler=_extract_annotations,
