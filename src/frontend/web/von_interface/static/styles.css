@@ -9034,6 +9034,11 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     margin: 0;
     font-size: 20px;
     line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+.chat-reference-inspector-header > div:first-child {
+    min-width: 0;
 }
 
 .chat-reference-inspector-actions {
@@ -9089,6 +9094,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 .chat-reference-statement {
     color: #111827;
     font-size: 16px;
+    overflow-wrap: anywhere;
 }
 
 .chat-reference-notice {
