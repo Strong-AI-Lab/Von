@@ -122,7 +122,10 @@ def openai_visible_parts(response: Mapping[str, Any]) -> list[LLMContentPart]:
 def without_image_bytes(value: Any) -> Any:
     """Keep the private provider trace useful without retaining base64 duplicates."""
     if isinstance(value, Mapping):
-        media = value.get("type") in {
+        # Provider responses also echo JSON Schemas whose type may be a list.
+        # Only a string discriminator identifies a media item.
+        item_type = value.get("type")
+        media = isinstance(item_type, str) and item_type in {
             "image_generation_call",
             "image",
             "input_image",

@@ -3182,6 +3182,60 @@ def test_completed_native_image_is_visible_not_a_function_call(monkeypatch):
     assert len(calls['responses']) == 1
 
 
+@pytest.mark.parametrize("with_image", [False, True])
+def test_sdk_response_with_union_tool_schema_preserves_completed_output(
+    monkeypatch, with_image
+):
+    import base64
+    import io
+
+    from openai.types.responses import Response
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (16, 12), "navy").save(buffer, "PNG")
+    data = buffer.getvalue()
+    payload = _text_response(model="test-model")
+    if with_image:
+        payload["output"] = [{
+            "type": "image_generation_call", "id": "ig-fixture",
+            "status": "completed", "result": base64.b64encode(data).decode(),
+        }]
+    # Responses echoes tool definitions. Ordinary adaptive evidence tools use
+    # union-valued JSON Schema types; these are not media discriminators.
+    payload["tools"] = [{
+        "type": "function", "name": "lookup", "parameters": {
+            "type": "object", "properties": {
+                "field_equals": {"type": "object", "additionalProperties": {
+                    "type": ["string", "number", "boolean", "null"],
+                }},
+            },
+        },
+    }]
+    response = Response.model_construct(**payload)
+    _install_profiles(monkeypatch, _registry_profiles(_responses_profile()))
+    calls = _install_fake_openai(monkeypatch, responses=[response])
+    client = OpenAIClient(LLMClientConfig(
+        model="test-model", provider="openai", api_key="test-key", temperature=None,
+    ))
+
+    result = asyncio.run(client.generate_with_tools(
+        prompt="Useful reply", available_tools=[_tool()],
+    ))
+
+    assert result.has_visible_content()
+    assert result.raw_response["tools"][0]["parameters"] == payload["tools"][0]["parameters"]
+    assert result.transport_metadata["response_id"] == "resp_1"
+    assert result.usage["total_tokens"] == 6
+    assert len(calls["responses"]) == 1
+    if with_image:
+        assert result.content_parts[0].image_data == data
+        assert result.raw_response["output"][0]["result"] == "[image bytes omitted]"
+        assert base64.b64encode(data).decode() not in json.dumps(result.raw_response)
+    else:
+        assert result.text_response == "ok"
+
+
 def test_profile_enabled_native_tool_is_separate_and_does_not_retry(monkeypatch):
     from src.backend.services import model_registry_service
     profile = {**_responses_profile(), 'image_generation': {'enabled': True, 'model': 'fixture-image-model', 'output_format': 'png'}}
