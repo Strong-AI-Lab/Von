@@ -30,6 +30,9 @@ let _filterTaskSourceId = 'all';
 let _isGlobalTabMode = false;  // True when rendering into global tasks tab
 let _taskDetailState = {};  // taskId -> detail panel state
 let _selectedTaskId = '';
+let _pendingTaskNavigation = null;
+let _referencedGlobalTaskId = '';
+let _panelReturnFocus = null;
 let _panelTaskIds = null;
 let _panelLoadGeneration = 0;
 let _bulkTaskVisibility = 'exclude';
@@ -182,6 +185,8 @@ function resetTaskPanelScopedState(activeOrganisationConceptId, { actorChanged =
     _taskQueueActivityGeneration += 1;
     stopTaskQueueActivityPolling();
     _taskQueueActivityLoadPromise = null;
+    _pendingTaskNavigation = null;
+    _referencedGlobalTaskId = '';
     _activeOrganisationConceptId = activeOrganisationConceptId;
     _globalTaskLoadGeneration += 1;
     _isLoading = false;
@@ -757,6 +762,20 @@ export function initializeTaskPanel() {
     ensureTaskPanelAuthStatusListener();
     renderTaskGroupFilterControls();
 
+    _panelEl.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            hideTaskPanel();
+        }
+    });
+    document.addEventListener('pointerdown', (event) => {
+        if (_isVisible && !_panelEl.contains(event.target)
+            && !event.target.closest('#taskPanelToggleBtn')) {
+            hideTaskPanel({ restoreFocus: false });
+        }
+    });
+
     // Set up close button
     const closeBtn = document.getElementById('closeTaskPanel');
     if (closeBtn) {
@@ -823,12 +842,14 @@ export function showTaskPanel(options = {}) {
         _isGlobalTabMode = false;
         syncTaskQueueActivityPolling();
         _taskListEl = document.getElementById('taskList') || _taskListEl;
+        if (!_isVisible) _panelReturnFocus = document.activeElement;
         _panelEl.classList.remove('hidden');
         _panelEl.setAttribute('aria-hidden', 'false');
         _panelEl.querySelectorAll('.task-create-form, .task-filter-row').forEach(element => {
             element.classList.toggle('hidden', _panelTaskIds !== null);
         });
         _isVisible = true;
+        document.getElementById('closeTaskPanel')?.focus();
         // Auto-refresh tasks when panel becomes visible
         return refreshTasks();
     }
@@ -870,11 +891,12 @@ async function loadReferencedPanelTasks() {
 /**
  * Hide the task panel.
  */
-export function hideTaskPanel() {
+export function hideTaskPanel({ restoreFocus = true } = {}) {
     if (_panelEl) {
         _panelEl.classList.add('hidden');
         _panelEl.setAttribute('aria-hidden', 'true');
         _isVisible = false;
+        if (restoreFocus && _panelReturnFocus?.isConnected) _panelReturnFocus.focus();
     }
 }
 
@@ -909,6 +931,7 @@ async function openGlobalTasks() {
     _tasks = [];
     _taskDetailState = {};
     _selectedTaskId = '';
+    _referencedGlobalTaskId = '';
     ensureTaskPanelOrganisationSwitchListener();
     ensureTaskPanelAuthStatusListener();
     ensureTaskQueueActivityPollingListeners();
@@ -939,6 +962,17 @@ async function openGlobalTasks() {
         loadGlobalTasks({ telemetry }),
         loadTaskQueueActivity(),
     ]);
+    if (_pendingTaskNavigation) {
+        const task = _pendingTaskNavigation;
+        _pendingTaskNavigation = null;
+        const taskId = getTaskId(task);
+        if (!_tasks.some(item => getTaskId(item) === taskId)) _tasks.push(task);
+        _referencedGlobalTaskId = taskId;
+        await selectTask(taskId);
+        const inspector = _globalTasksContainer.querySelector('#globalTaskInspector');
+        inspector?.setAttribute('tabindex', '-1');
+        inspector?.focus();
+    }
     syncTaskQueueActivityPolling();
 }
 
@@ -1508,6 +1542,7 @@ function getFilteredTasks() {
     // Exact references remain reachable regardless of saved list filters.
     if (!_isGlobalTabMode && _panelTaskIds !== null) return _tasks;
     return _tasks.filter((task) => {
+        if (_isGlobalTabMode && getTaskId(task) === _referencedGlobalTaskId) return true;
         if (!taskMatchesGlobalScope(task)) {
             return false;
         }
@@ -3440,9 +3475,10 @@ function renderTaskItem(task) {
                 <div class="task-actions">
                     ${renderTaskExecuteWithVonButton(task)}
                     ${renderTaskDiscussButton(task)}
-                    <button class="task-detail-toggle-btn" data-task-id="${taskId}" title="${_isGlobalTabMode ? 'Inspect task details' : 'Show task details'}">
-                        ${_isGlobalTabMode ? 'Inspect' : (detailState.expanded ? 'Hide details' : 'Details')}
+                    <button type="button" class="task-detail-toggle-btn" data-task-id="${taskId}" ${!_isGlobalTabMode ? `aria-expanded="${detailState.expanded}"` : ''} title="${_isGlobalTabMode ? 'Inspect task details' : (detailState.expanded ? 'Hide task details' : 'Show task details')}">
+                        ${_isGlobalTabMode ? 'Inspect' : (detailState.expanded ? 'Hide details' : 'Show details')}
                     </button>
+                    ${!_isGlobalTabMode ? `<button type="button" class="task-open-in-tab-btn btn-mini" data-task-id="${taskId}">Open in Tasks</button>` : ''}
                     <select class="task-status-select" data-task-id="${taskId}" title="Change status">
                         ${TASK_STATUS_OPTIONS.map(opt => `
                             <option value="${opt.value}" ${task.status === opt.value ? 'selected' : ''}>
@@ -3739,6 +3775,18 @@ function attachTaskEventListeners() {
             });
         });
 
+        root.querySelectorAll('.task-open-in-tab-btn').forEach((button) => {
+            button.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const task = _tasks.find(item => getTaskId(item) === button.dataset.taskId);
+                if (!task) return;
+                _pendingTaskNavigation = task;
+                hideTaskPanel({ restoreFocus: false });
+                activateTab('globalTasksTab');
+                void showGlobalTasks();
+            });
+        });
+
         root.querySelectorAll('.task-detail-toggle-btn').forEach((btn) => {
             btn.addEventListener('click', async (e) => {
                 e.stopPropagation();
@@ -3748,6 +3796,8 @@ function attachTaskEventListeners() {
                     await selectTask(taskId);
                 } else {
                     await toggleTaskDetails(taskId);
+                    Array.from(_panelEl.querySelectorAll('.task-detail-toggle-btn'))
+                        .find(button => button.dataset.taskId === taskId)?.focus();
                 }
             });
         });
