@@ -40,6 +40,19 @@
         <div id="settingsConcernSummary" class="settings-concern-summary" aria-live="polite"></div>
         <nav id="settingsSectionRail" class="settings-section-rail" aria-label="Sections in this settings concern"></nav>
 
+        <section id="pushNotificationSettings" data-settings-concern="conversations">
+            <h2>Mobile notifications</h2>
+            <p>Receive private alerts for direct Von messages, including coding-agent reports.
+                Enable for the current organisation context on this device. Other devices have their own opt-in.</p>
+            <p data-push-status role="status" aria-live="polite">Checking notification support…</p>
+            <button type="button" data-push-enable disabled>Enable notifications</button>
+            <button type="button" data-push-test disabled>Send test notification</button>
+            <button type="button" data-push-disable disabled>Disable on this device</button>
+            <button type="button" data-push-refresh>Refresh status</button>
+            <p>On iPhone or iPad, open Von from the Home Screen. System Focus and battery settings
+                can delay alerts. Logging out disables this device; already displayed alerts may remain in system history.</p>
+        </section>
+
         <section id="current-user-settings" data-settings-concern="identity">
             <h2>Signed-in Identity</h2>
             <div id="participantProfileSettings"></div>
@@ -1541,6 +1554,14 @@
                 if (response.ok) {
                     console.log('Logout successful');
 
+                    try {
+                        const notifications = await import({{ url_for('static', filename='js/pushNotifications.js') | tojson }});
+                        await notifications.clearLocalNotifications();
+                    } catch (_) {
+                        // Server revocation already succeeded; the worker also
+                        // rechecks the active account before any queued alert.
+                    }
+
                     const logoutResult = await response.json();
                     if (logoutResult.redirect_url === '/cdn-cgi/access/logout') {
                         clearIdentityScopeMirrors();
@@ -1820,6 +1841,7 @@
         window.initializeSettingsAuthentication = initializeSettingsAuthentication;
     </script>
     <script type="module" src="{{ url_for('static', filename='js/settingsPage.js') }}"></script>
+    <script type="module" src="{{ url_for('static', filename='js/pushNotifications.js') }}"></script>
     <script src="{{ url_for('static', filename='js/settings-frame-resize.js') }}"></script>
 </body>
 
