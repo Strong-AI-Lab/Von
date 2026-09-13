@@ -814,10 +814,15 @@ def get_conversation_between_users(
     user_id_2: str,
     limit: int = 50,
     skip: int = 0,
+    *,
+    organisation_concept_id: Optional[str] = None,
+    as_of: Optional[datetime] = None,
+    newest_first: bool = False,
 ) -> List[Dict[str, Any]]:
     """Get all messages between two users (direct conversation).
 
-    Returns messages in both directions, sorted by time.
+    Returns messages in both directions, sorted by time. Existing UI pagination
+    remains oldest-first; bounded agent context may select recent scoped rows.
     """
     if not user_id_1 or not user_id_2:
         return []
@@ -843,11 +848,19 @@ def get_conversation_between_users(
         ],
     }
 
+    if organisation_concept_id is not None:
+        base_filter["concept_data.organisation_concept_id"] = organisation_concept_id
+    if as_of is not None:
+        base_filter["created_at"] = {"$lte": as_of}
     query = apply_concept_query_filter(base_filter)
 
     cursor = (
         coll.find(query)
-        .sort("created_at", 1)  # Chronological for conversations
+        .sort(
+            [("created_at", -1), ("concept_id", -1)]
+            if newest_first
+            else [("created_at", 1)]
+        )
         .skip(skip)
         .limit(limit)
     )

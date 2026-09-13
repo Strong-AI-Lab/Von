@@ -62,8 +62,8 @@ body {
     color: #333;
     padding-top: 0;
     /* Dynamic layout offsets the fixed header and tab container. */
-    padding-bottom: 60px;
-    /* ADDED: Space for the fixed footer */
+    padding-bottom: var(--von-fixed-footer-clearance, 64px);
+    /* Reserve the measured fixed footer height as its contents reflow. */
 }
 
 body.von-auth-pending,
@@ -3536,6 +3536,7 @@ button.unified-search-conversation-main {
     min-height: 40px;
     padding: 6px 12px;
     background: #fff;
+    color: #0f172a;
     border: 1px solid #cbd5e1;
     border-radius: 10px;
     cursor: pointer;
@@ -3606,6 +3607,9 @@ button.unified-search-conversation-main {
 
 .global-task-main {
     min-width: 0;
+    align-self: stretch;
+    display: flex;
+    flex-direction: column;
 }
 
 .task-board-scroll-hint {
@@ -3625,7 +3629,10 @@ button.unified-search-conversation-main {
 
 .task-list[data-view-mode="board"] {
     max-width: 100%;
-    max-height: clamp(420px, 68dvh, 760px);
+    /* Fill the space beside the inspector without sizing to every loaded card. */
+    flex: 1 1 0;
+    min-height: max(420px, 68dvh);
+    height: 0;
     overflow: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
@@ -3647,6 +3654,8 @@ button.unified-search-conversation-main {
 
 .task-pagination-control {
     display: flex;
+    flex-wrap: wrap;
+    flex-shrink: 0;
     align-items: center;
     justify-content: center;
     gap: 12px;
@@ -6571,6 +6580,8 @@ footer {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 16px;
     padding: 8px 16px;
     background-color: rgba(255, 255, 255, 0.95);
     border-top: 1px solid #e5e7eb;
@@ -6937,6 +6948,8 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 }
 
 .language-indicator {
+    flex-shrink: 0;
+    white-space: nowrap;
     margin: 0;
     font-size: 0.75rem;
     color: #6b7280;
@@ -7249,7 +7262,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     overflow-y: visible;
     /* Allow body scrolling so content is never clipped */
     padding: 0 20px;
-    padding-bottom: 64px;
+    padding-bottom: var(--von-fixed-footer-clearance, 64px);
     /* Reserve space so content isn't hidden behind footer */
     box-sizing: border-box;
     width: 100% !important;
@@ -8686,6 +8699,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 /* The same session list serves horizontal navigation, the docked tray and peek. */
 .chat-conversation-nav { display: contents; }
 .conversation-tray-header,
+.conversation-tray-context,
 .conversation-tray-resize { display: none; }
 
 .conversation-workspace[data-effective-tabs-layout="vertical"] {
@@ -8878,6 +8892,40 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 @media (prefers-reduced-motion: reduce) {
     .conversation-workspace[data-effective-tabs-layout="vertical"], .conversation-tray-toggle span { transition: none; }
 }
+
+/* Keep current context above the mobile list without moving any conversation. */
+.conversation-workspace[data-tray-mobile="true"] .chat-session-tabs-row {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    gap: 4px;
+}
+.conversation-workspace[data-tray-mobile="true"] .conversation-tray-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.conversation-workspace[data-tray-mobile="true"] .conversation-tray-heading { display: none; }
+.conversation-workspace[data-tray-mobile="true"] .conversation-tray-context {
+    display: block;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: 13px;
+    font-weight: 600;
+}
+.conversation-workspace[data-tray-mobile="true"] .conversation-tray-toggle {
+    flex-basis: 44px;
+    width: 44px;
+    height: 44px;
+}
+.conversation-workspace[data-tray-mobile="true"] .chat-session-tabs {
+    width: 100%;
+    flex: 0 1 auto;
+}
+.conversation-workspace[data-tray-mobile="true"][data-tray-collapsed="true"] .chat-session-tabs,
+.conversation-workspace[data-tray-mobile="true"][data-tray-collapsed="true"] .chat-session-history-summary,
+.conversation-workspace[data-tray-mobile="true"][data-tray-collapsed="true"] .catalogue-filters { display: none; }
 
 .chat-situation-toggle {
     min-height: 32px;
@@ -11614,7 +11662,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 
 .chat-composer {
     position: sticky;
-    bottom: 42px;
+    bottom: calc(var(--von-fixed-footer-clearance, 64px) + 8px);
     z-index: 30;
     display: grid;
     gap: 8px;
@@ -12010,12 +12058,6 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 .chat-task-queue-delete:hover,
 .chat-task-queue-dismiss:hover {
     background: #ffe4e6;
-}
-
-@media (max-height: 700px) {
-    .chat-composer {
-        bottom: 36px;
-    }
 }
 
 /* When inside the tab-content-area, make the tab content flex to propagate height */
@@ -18492,6 +18534,7 @@ body.settings-body {
     }
     .composer-more-icon { display: none; }
     .composer-add-icon { display: inline; font-size: 24px; font-weight: 400; }
+    .chat-composer-more-actions[open] > summary .composer-add-icon { transform: rotate(45deg); }
     .chat-composer-more-actions:not([open]) > .button-row { display: none; }
     .chat-composer-more-actions[open] > .button-row {
         grid-column: 1 / -1; grid-row: 2;

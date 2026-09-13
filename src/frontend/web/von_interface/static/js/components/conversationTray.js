@@ -1,6 +1,8 @@
 import {
     clampConversationTrayWidth,
     CONVERSATION_TRAY_COLLAPSED_KEY,
+    CONVERSATION_MOBILE_TRAY_COLLAPSED_KEY,
+    CONVERSATION_NARROW_QUERY,
     CONVERSATION_TRAY_WIDTH_KEY,
     saveConversationLayoutPreference
 } from '../utils/conversationLayoutPreferences.js';
@@ -12,6 +14,8 @@ export function createConversationTray(workspace) {
     const toggle = workspace.querySelector('#conversationTrayToggle');
     const resize = workspace.querySelector('#conversationTrayResize');
     const tabs = workspace.querySelector('#chatSessionTabs');
+    const context = workspace.querySelector('#conversationTrayContext');
+    const narrow = window.matchMedia?.(CONVERSATION_NARROW_QUERY);
     let preferences = { width: 260, collapsed: false, expandOnHover: true };
     let peek = false;
     let enterTimer;
@@ -26,15 +30,32 @@ export function createConversationTray(workspace) {
         cleanup.push(() => target.removeEventListener(event, callback));
     };
     const isVertical = () => workspace.dataset.effectiveTabsLayout === 'vertical';
+    const isMobile = () => !isVertical() && !!narrow?.matches;
+    const isCollapsed = () => isMobile() ? !!preferences.mobileCollapsed : isVertical() && preferences.collapsed;
     const isMenuOpen = () => !!document.querySelector('.chat-session-menu.open');
     const maxWidth = () => Math.max(220, Math.min(400, (workspace.clientWidth || window.innerWidth) - 420));
     const effectiveWidth = () => Math.min(preferences.width, maxWidth());
     const clearTimers = () => { clearTimeout(enterTimer); clearTimeout(leaveTimer); };
 
+    function updateContext(reveal = false) {
+        const active = tabs?.querySelector('[role="tab"][aria-selected="true"]');
+        const label = (active?.querySelector('.chat-session-tab-label') || active)?.textContent.trim();
+        const text = label ? `Current: ${label}` : 'Conversations';
+        if (context && context.textContent !== text) context.textContent = text;
+        if (reveal && active && isMobile() && !isCollapsed()) {
+            // Scroll only the list: scrollIntoView could displace the transcript.
+            const bounds = tabs.getBoundingClientRect();
+            const row = active.getBoundingClientRect();
+            if (row.left < bounds.left) tabs.scrollLeft += row.left - bounds.left;
+            else if (row.right > bounds.right) tabs.scrollLeft += Math.min(row.left - bounds.left, row.right - bounds.right);
+        }
+    }
+
     function render() {
-        const collapsed = isVertical() && preferences.collapsed;
-        if (!collapsed) peek = false;
-        const nextPresentation = !isVertical() ? 'horizontal' : collapsed && !peek ? 'rail' : 'expanded';
+        const collapsed = isCollapsed();
+        workspace.dataset.trayMobile = String(isMobile());
+        if (!collapsed || !isVertical()) peek = false;
+        const nextPresentation = isMobile() && collapsed ? 'mobile-closed' : !isVertical() ? 'horizontal' : collapsed && !peek ? 'rail' : 'expanded';
         const presentationChanged = presentation !== nextPresentation;
         if (tabs && presentationChanged && presentation) {
             scrollPositions.set(presentation, { top: tabs.scrollTop, left: tabs.scrollLeft });
@@ -58,14 +79,19 @@ export function createConversationTray(workspace) {
             resize.setAttribute('aria-valuenow', String(effectiveWidth()));
             resize.setAttribute('aria-valuemax', String(maxWidth()));
         }
+        if (isMobile() && collapsed && document.activeElement !== toggle && navigation?.contains(document.activeElement)) {
+            toggle?.focus({ preventScroll: true });
+        }
+        updateContext(true);
     }
 
     function setCollapsed(value) {
         clearTimers();
-        preferences.collapsed = value;
+        if (isMobile()) preferences.mobileCollapsed = value;
+        else preferences.collapsed = value;
         peek = false;
         render();
-        saveConversationLayoutPreference(CONVERSATION_TRAY_COLLAPSED_KEY, value);
+        saveConversationLayoutPreference(isMobile() ? CONVERSATION_MOBILE_TRAY_COLLAPSED_KEY : CONVERSATION_TRAY_COLLAPSED_KEY, value);
     }
 
     function closePeek() {
@@ -75,7 +101,7 @@ export function createConversationTray(workspace) {
         render();
     }
 
-    listen(toggle, 'click', () => setCollapsed(!preferences.collapsed));
+    listen(toggle, 'click', () => setCollapsed(!isCollapsed()));
     listen(navigation, 'pointerenter', (event) => {
         clearTimers();
         if (event.pointerType === 'touch' || !preferences.expandOnHover || !preferences.collapsed || !isVertical()) return;
@@ -104,8 +130,8 @@ export function createConversationTray(workspace) {
         }
     });
     listen(document, 'keydown', (event) => {
-        if (event.key === 'Escape' && isVertical() && !isMenuOpen()
-            && (peek || (!preferences.collapsed && navigation?.contains(event.target)))) {
+        if (event.key === 'Escape' && (isVertical() || isMobile()) && !isMenuOpen()
+            && (peek || (!isCollapsed() && navigation?.contains(event.target)))) {
             event.preventDefault();
             clearTimers();
             if (peek) {
@@ -170,6 +196,10 @@ export function createConversationTray(workspace) {
     listen(window, 'resize', render);
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(render) : null;
     observer?.observe(workspace);
+    // Session rendering replaces rows asynchronously, including catalogue selection.
+    const tabObserver = new MutationObserver(() => updateContext(true));
+    if (tabs) tabObserver.observe(tabs, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['aria-selected'] });
+    listen(narrow, 'change', render);
 
     return {
         workspace,
@@ -186,6 +216,7 @@ export function createConversationTray(workspace) {
             clearTimers();
             finishDrag(true);
             observer?.disconnect();
+            tabObserver.disconnect();
             cleanup.forEach(fn => fn());
         }
     };

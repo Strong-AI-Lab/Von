@@ -140,7 +140,7 @@
                         Expand collapsed conversation tray on hover
                     </label>
                 </div>
-                <small class="settings-note">Mobile and narrow windows keep the horizontal list. Layout, tray width and collapsed state are remembered in this browser.</small>
+                <small class="settings-note">Mobile and narrow windows start with the horizontal list open and keep the current conversation name above it. Collapse or reopen it using the list button. Layout, tray width and separate mobile/desktop collapsed states are remembered in this browser, across sign-ins; if storage is unavailable, choices last for this page only.</small>
                 <div class="speech-settings-row">
                     <label class="speech-settings-label" for="settingsConversationRecentLimitInput">Max recent
                         conversations (N)</label>
@@ -349,8 +349,10 @@
                     title="When enabled, this browser requests the selected premium provider and model for chat, provided the exact pair is allowed for the selected scope. When disabled, it requests the selected Ollama model.">Use
                     selected allowed premium model for chat in this browser</label>
             </div>
-            <small class="settings-note">First allow the exact provider and model for this scope and save. Turn this off
-                to use the selected Ollama model for browser chat. Editing or testing a model does not allow it.</small>
+            <small class="settings-note">Already allowed models need no additional save to use in this browser.
+                Selecting another allowed model on the active provider updates the browser choice. An unallowed draft
+                leaves that choice unchanged. Turn this off to explicitly use the selected Ollama model.
+                Editing or testing a model does not add it to the scoped allowed models.</small>
 
             <div id="openaiProviderSettings">
                 <label for="openaiApiKeyEnvVar">OpenAI API key environment variable:</label>
