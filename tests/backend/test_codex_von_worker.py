@@ -809,3 +809,92 @@ def test_file_copy_staging_preserves_identity_and_verified_bytes(
         assert item["status"] == (
             "checksum_mismatch" if outcome == "mismatch" else "not_found_in_actor_scope"
         )
+
+
+@pytest.mark.parametrize(
+    "case,owner_read,available",
+    [
+        ("allowed", True, True),
+        ("disabled", False, False),
+        ("no_grant", False, False),
+        ("reassigned", False, False),
+        ("other_creator", False, False),
+        ("other_org", False, False),
+        ("cancelled", False, False),
+        ("external_writer", False, False),
+        ("context_only", False, False),
+        ("other_author", False, False),
+        ("not_image", True, False),
+        ("checksum_mismatch", True, False),
+    ],
+)
+def test_source_images_require_explicit_current_task_delegation(
+    config, tmp_path, monkeypatch, case, owner_read, available
+):
+    import hashlib
+    from src.backend.services import computer_file_copy_service as files
+
+    config["delegated_task_images"] = {
+        "enabled": case != "disabled",
+        "authorisation_reference": "" if case == "no_grant" else "operator-grant",
+    }
+    current = task(config, description=FILE_COPY)
+    if case == "reassigned":
+        current["assignee_concept_id"] = "#V#other"
+    if case == "other_creator":
+        current["created_by_concept_id"] = "#V#other"
+    if case == "other_org":
+        current["organisation_concept_id"] = "#V#other"
+    if case == "cancelled":
+        current["status"] = "cancelled"
+    if case in {"context_only", "other_author"}:
+        current["description"] = "A task with no image reference"
+    comments = [{"author_concept_id": "#V#other", "body": FILE_COPY}]
+    api = SimpleNamespace(
+        task=lambda _: current,
+        native_writer=lambda _: case != "external_writer",
+        inputs=lambda _: {"comments": comments},
+    )
+    monkeypatch.setattr(worker, "Von", lambda _: api)
+    calls = []
+    data = b"private task screenshot fixture"
+    digest = hashlib.sha256(data).hexdigest()
+
+    def fetch(**kwargs):
+        calls.append(kwargs["user_concept_id"])
+        if kwargs["user_concept_id"] == config["agent_id"]:
+            return {"success": False, "error": "not_found"}
+        return {
+            "success": True,
+            "data": data,
+            "info": SimpleNamespace(
+                original_filename="screenshot.png",
+                content_type="text/plain" if case == "not_image" else "image/png",
+            ),
+        }
+
+    monkeypatch.setattr(files, "fetch_file_copy_bytes", fetch)
+    monkeypatch.setattr(
+        files,
+        "build_file_copy_artifact_record",
+        lambda **_: {
+            "sha256": "0" * 64 if case == "checksum_mismatch" else digest,
+        },
+    )
+    output = worker.stage_file_copy_evidence(
+        config,
+        {"task_id": current["task_concept_id"], "prior_result": FILE_COPY},
+        tmp_path,
+    )
+    item = output["results"][0]
+    assert (config["delegator_id"] in calls) is owner_read
+    assert item["content_available"] is available
+    if available:
+        assert Path(item["local_path"]).read_bytes() == data
+        assert Path(item["local_path"]).stat().st_mode & 0o777 == 0o600
+        assert item["sha256"] == digest
+        assert item["source_actor"] == config["delegator_id"]
+        assert item["delegated_task_id"] == current["task_concept_id"]
+        assert item["authorisation_reference"] == "operator-grant"
+    else:
+        assert "local_path" not in item

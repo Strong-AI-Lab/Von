@@ -186,6 +186,31 @@ and five-minute schedule. A selected release is not evidence of actual pickup.
 Local installation and public deployment remain distinct effects; both need
 applicable task or standing authority.
 
+### Task-delegated source images
+
+An operator may explicitly authorise the controller to retrieve task-referenced
+images using the delegator's access when the coding agent cannot read the upload
+directly. Enable `delegated_task_images` in the private worker configuration with
+`enabled: true` and an `authorisation_reference` pointing to the operator's grant.
+This setting defaults off. It applies to any configured coding-agent identity;
+interactive delivery adapters must use the same staging function and copy its
+private files to the executing host before advertising local paths.
+
+Before this handoff, the controller re-reads the canonical native task and checks
+its active status, creator, assignee, report recipient and organisation. Only file
+references in that task's description/evidence/notes, attachment metadata and
+delegator-authored task comments/replies qualify. Other conversation context and
+prior model output cannot extend the eligible set. The existing canonical source
+read still checks the delegator's image access. The coding process receives
+bounded image copies and a manifest with original concept IDs, SHA-256, source
+actor, task and authorisation reference; it receives no owner credentials.
+Reassignment or cancellation prevents a new handoff. Previously staged bytes
+are retained as execution evidence; this does not promise retroactive revocation.
+
+Conversation-image uploader checks remain unchanged. An invitation to the source
+conversation alone is not this delegation. Polling alone does not prove that a
+new run consumed its staged images: verify local copies and the actual run result.
+
 ### Coherent worker/backend releases
 
 `scripts/codex_von_release.py` prepares a complete detached checkout of one
