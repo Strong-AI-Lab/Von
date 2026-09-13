@@ -224,6 +224,8 @@ JIRA_MIGRATION_LABEL_CANDIDATES = ("migrated", "jira-migration", "jira_migration
 TASK_STATUS_PENDING = "pending"
 TASK_STATUS_IN_PROGRESS = "in_progress"
 TASK_STATUS_COMPLETED = "completed"
+# Finished work is completed; deployed additionally records runtime delivery.
+TASK_STATUS_DEPLOYED = "deployed"
 TASK_STATUS_CANCELLED = "cancelled"
 TASK_STATUS_BLOCKED = "blocked"
 
@@ -231,6 +233,7 @@ VALID_TASK_STATUSES = {
     TASK_STATUS_PENDING,
     TASK_STATUS_IN_PROGRESS,
     TASK_STATUS_COMPLETED,
+    TASK_STATUS_DEPLOYED,
     TASK_STATUS_CANCELLED,
     TASK_STATUS_BLOCKED,
 }
@@ -302,7 +305,29 @@ TASK_TRANSITION_DEFINITIONS: Dict[str, List[Dict[str, str]]] = {
             "to_status": TASK_STATUS_CANCELLED,
         },
     ],
+    TASK_STATUS_DEPLOYED: [
+        {
+            "transition_id": "mark_completed",
+            "name": "Return to completed",
+            "to_status": TASK_STATUS_COMPLETED,
+        },
+        {
+            "transition_id": "reopen_pending",
+            "name": "Reopen to pending",
+            "to_status": TASK_STATUS_PENDING,
+        },
+        {
+            "transition_id": "reopen_in_progress",
+            "name": "Reopen to in progress",
+            "to_status": TASK_STATUS_IN_PROGRESS,
+        },
+    ],
     TASK_STATUS_COMPLETED: [
+        {
+            "transition_id": "deploy",
+            "name": "Mark deployed",
+            "to_status": TASK_STATUS_DEPLOYED,
+        },
         {
             "transition_id": "reopen_pending",
             "name": "Reopen to pending",
@@ -2217,7 +2242,7 @@ def update_task_status(
 
     Args:
         task_concept_id: The task's concept_id
-        status: New status (pending, in_progress, completed, cancelled, blocked)
+        status: New status (pending, in_progress, completed, deployed, cancelled, blocked)
         actor_concept_id: Trusted actor performing the transition, when available
 
     Returns:
@@ -5859,6 +5884,7 @@ __all__ = [
     "TASK_STATUS_PENDING",
     "TASK_STATUS_IN_PROGRESS",
     "TASK_STATUS_COMPLETED",
+    "TASK_STATUS_DEPLOYED",
     "TASK_STATUS_CANCELLED",
     "TASK_STATUS_BLOCKED",
     "VALID_TASK_STATUSES",

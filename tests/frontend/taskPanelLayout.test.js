@@ -49,6 +49,7 @@ function buildTasks() {
             title: 'Pending layout check',
             description: 'A task with ordinary content.',
             status: 'pending',
+            assignee_concept_id: '#V#codex_dgx',
             priority: 'medium',
             task_type_ids: ['#V#one_off_task_specification'],
             task_source_id: '#V#von_native_task_source',
@@ -124,13 +125,67 @@ describe('global task board layout', () => {
         expect(taskList.getAttribute('aria-label')).toBe('Task board');
         expect(taskList.getAttribute('aria-describedby')).toBe('globalTaskBoardScrollHint');
         expect(scrollHint.classList.contains('hidden')).toBe(false);
-        expect(document.querySelectorAll('.task-board-view .task-group')).toHaveLength(5);
+        expect(document.querySelectorAll('.task-board-view .task-group')).toHaveLength(6);
 
         taskList.scrollLeft = 320;
         taskList.scrollTop = 180;
         document.querySelector('[data-task-id="#V#task_layout_pending"]').click();
         expect(taskList.scrollLeft).toBe(320);
         expect(taskList.scrollTop).toBe(180);
+    });
+
+    test('labels delegated work and clears selection with focus restoration, including Escape', async () => {
+        const { showGlobalTasks } = require(taskPanelModulePath);
+        await showGlobalTasks();
+        await flushRenderQueue();
+        const card = () => document.querySelector('.task-item[data-task-id="#V#task_layout_pending"]');
+        expect(card().textContent).toContain('Delegated to Codex DGX');
+        expect(document.querySelectorAll('.task-item .task-delegation-chip')).toHaveLength(1);
+        card().click();
+        await flushRenderQueue();
+        expect(document.querySelector('#globalTaskInspector').textContent).toContain('Delegated to Codex DGX');
+        document.querySelector('.task-clear-selection-btn').click();
+        expect(document.querySelector('#globalTaskInspector').textContent).toContain('Select a task');
+        expect(document.querySelector('.task-item.is-selected')).toBeNull();
+        expect(document.activeElement).toBe(card());
+        const viewMode = document.querySelector('#globalTaskViewMode');
+        viewMode.value = 'list';
+        viewMode.dispatchEvent(new Event('change', { bubbles: true }));
+        expect(document.querySelector('.task-item.is-selected')).toBeNull();
+        card().click();
+        await flushRenderQueue();
+        const close = document.querySelector('.task-clear-selection-btn');
+        close.focus();
+        close.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        expect(document.querySelector('.task-item.is-selected')).toBeNull();
+        expect(document.activeElement).toBe(card());
+    });
+
+    test('renders and filters deployed work without counting it as active or overdue', async () => {
+        const { getJson } = require(apiServiceModulePath);
+        const original = getJson.getMockImplementation();
+        getJson.mockImplementation((url) => {
+            if (typeof url === 'string' && url.startsWith('/api/tasks/?')) {
+                return Promise.resolve({ tasks: [{ ...buildTasks()[0], status: 'deployed', due_date: '2020-01-01' }] });
+            }
+            return original(url);
+        });
+        const { showGlobalTasks } = require(taskPanelModulePath);
+        await showGlobalTasks();
+        await flushRenderQueue();
+        const card = document.querySelector('.task-item');
+        expect(card.querySelector('.task-status-badge').textContent).toContain('Deployed');
+        expect(card.querySelector('.overdue')).toBeNull();
+        expect(document.querySelector('#globalTaskSummary').textContent).toMatch(/0 active/);
+        expect(card.querySelector('option[value="deployed"]').selected).toBe(true);
+        expect(document.querySelectorAll('option[value="deployed"]').length).toBeGreaterThan(1);
+        const filter = document.querySelector('#globalTaskStatusFilter');
+        filter.value = 'pending';
+        filter.dispatchEvent(new Event('change', { bubbles: true }));
+        expect(document.querySelector('.task-item')).toBeNull();
+        filter.value = 'deployed';
+        filter.dispatchEvent(new Event('change', { bubbles: true }));
+        expect(document.querySelectorAll('.task-item')).toHaveLength(1);
     });
 
     test('removes the nested scrolling affordance in list mode', async () => {

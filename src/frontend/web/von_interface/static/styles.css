@@ -3687,7 +3687,7 @@ button.unified-search-conversation-main {
 
 .task-board-view {
     display: grid;
-    grid-template-columns: repeat(5, minmax(240px, 1fr));
+    grid-template-columns: repeat(6, minmax(240px, 1fr));
     gap: 16px;
     align-items: start;
     min-width: 1280px;

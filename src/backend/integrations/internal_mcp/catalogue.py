@@ -45101,7 +45101,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 "List Von tasks. Filter by user (assignee), status, priority, task category, "
                 "task source, or organisation. "
                 "If user_concept_id is provided, returns tasks assigned to that user. "
-                "Valid statuses: pending, in_progress, completed, cancelled, blocked."
+                "Valid statuses: pending, in_progress, completed, deployed, cancelled, blocked."
             ),
         ),
         MethodDefinition(
