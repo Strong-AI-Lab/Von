@@ -1,3 +1,4 @@
+import './utils/footerPreferences.js';
 import { openSettingsTabAndFocus } from './utils/settingsNavigation.js';
 import { parseStoredContextValue } from './utils/runtimeIdentityBootstrap.js';
 import { applyLocalModelPreferenceOverlay, getEffectiveLocalModelPreference } from './utils/localModelPreferences.js';
