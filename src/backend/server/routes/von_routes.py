@@ -6008,6 +6008,49 @@ def _load_authorised_file_copy_concept_doc(
 
 @von_bp.route("/api/files/<path:file_copy_concept_id>/download", methods=["GET"])
 def download_file_copy(file_copy_concept_id: str):
+    return _serve_file_copy(file_copy_concept_id)
+
+
+@von_bp.route("/api/files/<path:file_copy_concept_id>/preview", methods=["GET"])
+def preview_file_copy(file_copy_concept_id: str):
+    """Render a file through the same actor-authorised read as download."""
+    response = make_response(_serve_file_copy(file_copy_concept_id, preview=True))
+    if response.is_json:
+        error = (response.get_json() or {}).get("error")
+        messages = {
+            "missing_user_context": "Sign in to Von, then reload this preview.",
+            "unsupported_preview": "Preview is currently available for Markdown files only. Download this file to open it.",
+            "invalid_text_encoding": "This file is not UTF-8 Markdown. Download it to open it.",
+            "file_too_large": "This file is too large to preview. Download it to open it.",
+        }
+        response.set_data(
+            render_template(
+                "file_preview.html",
+                title="File preview",
+                body=None,
+                error=messages.get(
+                    error, "This file is unavailable or you do not have access."
+                ),
+                download_url=url_for(
+                    "von.download_file_copy", file_copy_concept_id=file_copy_concept_id
+                ),
+            )
+        )
+        response.content_type = "text/html; charset=utf-8"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    # Files are untrusted documents, never application code. No scripts,
+    # embedded resources or forms; ordinary links and downloads still work.
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'; "
+        "base-uri 'none'; form-action 'none'; "
+        "sandbox allow-popups allow-popups-to-escape-sandbox allow-downloads"
+    )
+    return response
+
+
+def _serve_file_copy(file_copy_concept_id: str, *, preview: bool = False):
     """Download an uploaded file-copy by its Vontology concept id.
 
     Security: user identity is derived server-side via get_effective_user_concept_id().
@@ -6033,7 +6076,11 @@ def download_file_copy(file_copy_concept_id: str):
         )
 
     # Allow query-parameter override so callers don't need to place the full id in the path.
-    concept_id = request.args.get("concept_id") or file_copy_concept_id
+    concept_id = (
+        file_copy_concept_id
+        if preview
+        else (request.args.get("concept_id") or file_copy_concept_id)
+    )
     concept_id = unquote(str(concept_id or ""))
     concept_id = str(concept_id or "").strip()
     if not concept_id:
@@ -6053,7 +6100,8 @@ def download_file_copy(file_copy_concept_id: str):
     result = fetch_file_copy_bytes(
         file_copy_concept_id=concept_id,
         user_concept_id=user_concept_id,
-        allow_large=True,
+        allow_large=not preview,
+        max_bytes=2 * 1024 * 1024 if preview else None,
         logger=current_app.logger,
     )
     if not isinstance(result, dict) or result.get("success") is not True:
@@ -6084,6 +6132,28 @@ def download_file_copy(file_copy_concept_id: str):
     mimetype = "application/octet-stream"
     if info is not None and getattr(info, "content_type", None):
         mimetype = str(info.content_type)
+    if preview:
+        if not (
+            download_name.lower().endswith((".md", ".markdown", ".mdown"))
+            or mimetype.split(";", 1)[0].strip().lower()
+            in {"text/markdown", "text/x-markdown"}
+        ):
+            return jsonify({"error": "unsupported_preview"}), 415
+        try:
+            text = data_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return jsonify({"error": "invalid_text_encoding"}), 415
+        from ...services.markdown_render_service import render_markdown_to_safe_html
+
+        return render_template(
+            "file_preview.html",
+            title=download_name,
+            body=render_markdown_to_safe_html(text),
+            error=None,
+            download_url=url_for(
+                "von.download_file_copy", file_copy_concept_id=concept_id
+            ),
+        )
     resp = send_file(
         io.BytesIO(data_bytes),
         mimetype=mimetype,
