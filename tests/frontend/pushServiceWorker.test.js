@@ -24,6 +24,11 @@ function worker() {
     cache.match = async key => data.get(key)?.clone();
     const context = vm.createContext({ self, fetch, URL, Response,
         caches: { open: async () => cache, delete: async () => data.clear() } });
+    context.importScripts = url => {
+        expect(url).toBe('/von/outage-worker.js');
+        vm.runInContext(fs.readFileSync(path.join(__dirname,
+            '../../src/frontend/web/von_interface/static/outage/service-worker.js'), 'utf8'), context);
+    };
     vm.runInContext(fs.readFileSync(path.join(__dirname,
         '../../src/frontend/web/von_interface/static/service-worker.js'), 'utf8'), context);
     async function event(type, props) {

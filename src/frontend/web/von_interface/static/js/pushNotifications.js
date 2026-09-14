@@ -16,7 +16,7 @@ export function notificationSupport() {
 }
 
 async function registration() {
-    const reg = await navigator.serviceWorker.register('/von/service-worker.js', { scope: '/von/' });
+    const reg = await navigator.serviceWorker.register('/von/service-worker.js', { scope: '/von/', updateViaCache: 'none' });
     // Settings lives in /settings iframe, outside the /von/ worker scope.
     // navigator.serviceWorker.ready would wait forever for that frame to be
     // controlled. Wait for this registration's activation instead.

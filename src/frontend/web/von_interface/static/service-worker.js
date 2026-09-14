@@ -1,4 +1,5 @@
-/* Push only: do not cache authenticated pages or intercept application fetches. */
+/* One registration owns push and the public-only outage fallback. */
+importScripts('/von/outage-worker.js');
 const STATE_CACHE = 'von-push-state-v1';
 const STATE_URL = new URL('/von/.push-binding', self.location.origin).href;
 
