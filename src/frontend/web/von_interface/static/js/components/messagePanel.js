@@ -317,6 +317,7 @@ const NEW_MESSAGE_DELIVERY_ATTEMPT_SCHEMA_VERSION = 'direct_message_new_delivery
 const MESSAGE_THREAD_PREDICATE_ID = '#V#is_part_of_thread';
 
 const MESSAGE_PANEL_ICONS = Object.freeze({
+    copy: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2"/></svg>',
     chat: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3v-6.2A7.8 7.8 0 0 1 5 4.8 8 8 0 0 1 13 4a8 8 0 0 1 8 8Z"/><path d="M8 10h8"/><path d="M8 14h5"/></svg>',
     compose: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
     mail: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m4 7 8 6 8-6"/></svg>',
@@ -1157,7 +1158,8 @@ async function renderMessages() {
                 ` : ''}
                 <div class="message-meta">
                     <span class="message-time">${timestamp ? formatTime(timestamp) : ''}</span>
-                    <button type="button" class="message-copy-markdown" data-message-id="${escapeHtml(msg.concept_id || '')}" aria-label="Copy message as Markdown">Copy</button>
+                    <button type="button" class="message-copy-markdown" data-message-id="${escapeHtml(msg.concept_id || '')}" aria-label="Copy message as Markdown" title="Copy message as Markdown">${renderMessagePanelIcon('copy')}<span class="message-copy-label">Copy</span></button>
+                    <span class="message-copy-status" role="status"></span>
                     ${msg.concept_id ? `<button type="button" class="message-discuss-btn"
                         data-concept-id="${escapeHtml(msg.concept_id)}"
                         title="Discuss this message with Von">Discuss with Von</button>` : ''}
@@ -1197,7 +1199,16 @@ async function renderMessages() {
             }
         });
     });
-    contentEl.querySelectorAll('.message-copy-markdown').forEach(button => { button.onclick = async () => { const message = _currentMessages.find(m => m.concept_id === button.dataset.messageId); if (message) { const copied = await copyTextWithClipboardFallback(message.concept_data?.content_fallback || ''); button.textContent = copied ? 'Copied' : 'Copy failed'; } }; });
+    contentEl.querySelectorAll('.message-copy-markdown').forEach(button => {
+        button.onclick = async () => {
+            const message = _currentMessages.find(m => m.concept_id === button.dataset.messageId);
+            if (!message) return;
+            const status = button.parentElement.querySelector('.message-copy-status');
+            status.textContent = '';
+            const copied = await copyTextWithClipboardFallback(message.concept_data?.content_fallback || '');
+            status.textContent = copied ? 'Copied' : 'Copy failed';
+        };
+    });
     contentEl.querySelectorAll('.message-discuss-btn').forEach((button) => {
         button.addEventListener('click', (event) => {
             event.preventDefault();
