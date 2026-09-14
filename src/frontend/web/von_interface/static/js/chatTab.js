@@ -14,7 +14,7 @@ import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_NARROW_
 import { createVoiceConversation } from './voiceConversation.js';
 import { getClientContext } from './clientContext.js';
 import { createDictationController } from './dictation.js';
-import { renderImageAttachments, renderImageComposer, uploadConversationImage, imagesBlocked, imageItems, takeImages, restoreImages, descriptorsForIds } from "./utils/conversationImages.js";
+import { initialiseImagePicker, renderImageAttachments, renderImageComposer, uploadConversationImage, imagesBlocked, imageItems, takeImages, restoreImages, descriptorsForIds } from "./utils/conversationImages.js";
 // Chat Tab Module
 import { annotateTurn, fetchWithTimeout, getJsonDetailed, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import {
@@ -6667,7 +6667,7 @@ function updateExternalConversationUi() {
                 : promptInput.dataset.nativePlaceholder
         );
     }
-    [resetButton, uploadButton, dictateButton].forEach((button) => {
+    [resetButton, uploadButton, dictateButton, document.getElementById('attachImageButton'), document.getElementById('pasteImageButton')].forEach((button) => {
         if (button) {
             button.disabled = readOnly;
         }
@@ -34019,6 +34019,8 @@ export function initializeChatTab() {
             }
         });
     }
+
+    initialiseImagePicker(uploadFilesToVon, renderUploadStatus);
 
     if (uploadFileButton && uploadFileInput) {
         uploadFileButton.addEventListener('click', () => {
