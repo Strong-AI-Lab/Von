@@ -20,7 +20,8 @@ reload and draft recovery now pass (14 September continuation below). The
 remaining dependency is the operator-bound independently served production
 maintenance record and controller publisher configuration. The coding sandbox
 cannot inspect controller configuration or change live ingress. No merge or
-public deployment has occurred.
+public deployment has occurred. Required GitHub syntax and secret-scanning
+checks passed for the published continuation.
 
 ## Candidate behaviour
 
@@ -131,7 +132,10 @@ return time unknown, rather than inventing an estimate.
 The old authentication/setup blocker is resolved. Do not prepare another login
 fixture or ask Michael to sign in. The fixture proxy launcher encountered a
 read-only host log path; its existing foreground `serve` mode worked without
-changing its bindings. Task-owned servers are stopped after acceptance.
+changing its bindings. Candidate ports 5087 and 5088 are confirmed closed after acceptance. The
+foreground proxy session ended on interrupt, but port 5091 still listens. The
+operator must identify and stop only this fixture proxy; its retained status
+command reports PID 3158922, which is not proof of current process ownership.
 
 The current remaining dependency is **production independent status binding**:
 
