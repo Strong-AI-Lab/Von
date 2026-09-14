@@ -31005,7 +31005,22 @@ function ensureScrollToEndButton(scrollableField = null) {
     }
 
     const wrapper = targetField.closest('.content-wrapper') || targetField.parentElement;
-    const controlHost = wrapper?.querySelector('.chat-composer') || wrapper;
+    let controlHost = wrapper?.querySelector('.chat-composer') || wrapper;
+    if (!isCompactComposer()) {
+        controlHost = wrapper?.querySelector('.chat-transcript-navigation');
+        if (!controlHost && wrapper) {
+            controlHost = document.createElement('nav');
+            controlHost.className = 'chat-transcript-navigation';
+            controlHost.setAttribute('aria-label', 'Conversation navigation');
+            targetField.after(controlHost);
+            if (typeof ResizeObserver === 'function') {
+                const observer = new ResizeObserver(() => updateScrollToEndButtonVisibility(targetField));
+                observer.observe(targetField);
+                const composer = wrapper.querySelector('.chat-composer');
+                if (composer) observer.observe(composer);
+            }
+        }
+    }
     if (!(controlHost instanceof HTMLElement)) {
         return null;
     }
@@ -31039,8 +31054,24 @@ function isScrollableFieldNearBottom(scrollableField, thresholdPx = CHAT_SCROLL_
     const clientHeight = getConversationPageViewportHeight();
     const scrollHeight = getConversationPageScrollHeight();
     const scrollTop = getConversationPageScrollTop();
+    if (!isCompactComposer()) {
+        return Math.abs(getDesktopConversationEndScrollTop(scrollableField) - scrollTop)
+            <= Math.max(0, Number(thresholdPx) || 0);
+    }
     const distanceToBottom = scrollHeight - (scrollTop + clientHeight);
     return distanceToBottom <= Math.max(0, Number(thresholdPx) || 0);
+}
+
+// Account for the sticky draft and footer instead of scrolling into the page's
+// trailing layout space below the conversation.
+function getDesktopConversationEndScrollTop(scrollableField) {
+    const viewport = getConversationPageViewportHeight();
+    const composer = scrollableField.closest('.content-wrapper')?.querySelector('.chat-composer');
+    const draftSpace = (composer?.getBoundingClientRect().height || 0)
+        + (composer ? parseFloat(getComputedStyle(composer).bottom) || 0 : 0);
+    const transcriptEnd = scrollableField.getBoundingClientRect().bottom + getConversationPageScrollTop();
+    const desiredTop = transcriptEnd + draftSpace + 24 - viewport;
+    return Math.max(0, Math.min(desiredTop, getConversationPageScrollHeight() - viewport));
 }
 
 function getConversationPageScrollTop() {
@@ -31079,7 +31110,9 @@ function scrollConversationToEnd(scrollableField, options = {}) {
     }
 
     const smooth = options?.smooth !== false;
-    const top = getConversationPageScrollHeight();
+    const top = isCompactComposer()
+        ? getConversationPageScrollHeight()
+        : getDesktopConversationEndScrollTop(scrollableField);
     scrollConversationPageTo(top, { smooth });
 
     const schedule = (typeof window !== 'undefined' && typeof window.setTimeout === 'function')
@@ -31106,6 +31139,14 @@ function updateScrollToEndButtonVisibility(scrollableField = null) {
     const button = ensureScrollToEndButton(targetField);
     if (!(button instanceof HTMLButtonElement)) {
         return;
+    }
+
+    if (!isCompactComposer()) {
+        const composer = targetField.closest('.content-wrapper')?.querySelector('.chat-composer');
+        const clearance = composer
+            ? getConversationPageViewportHeight() - composer.getBoundingClientRect().top + 12
+            : 16;
+        button.parentElement.style.bottom = `${Math.max(16, clearance)}px`;
     }
 
     const hasOverflow = (getConversationPageScrollHeight() - getConversationPageViewportHeight()) > 1;
