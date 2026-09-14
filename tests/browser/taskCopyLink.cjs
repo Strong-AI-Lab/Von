@@ -99,6 +99,7 @@ const server = http.createServer((req, res) => {
             const pageCopy = inspector.getByRole('button', { name: 'Copy link', exact: true });
             await pageCopy.click();
             await expect(inspector.getByRole('status')).toHaveText('Link copied to clipboard');
+            assert.equal(await pageCopy.evaluate(el => getComputedStyle(el).backgroundColor), 'rgba(0, 0, 0, 0)');
             assert.equal(await page.evaluate(() => navigator.clipboard.readText()), copiedUrl);
             await page.evaluate(() => {
                 window.originalWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
