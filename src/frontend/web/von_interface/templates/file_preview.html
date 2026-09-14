@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en-NZ">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} — Von preview</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0 auto; max-width: 960px; padding: 24px; line-height: 1.6; overflow-wrap: anywhere; }
+    header { border-bottom: 1px solid #8886; padding-bottom: 16px; margin-bottom: 24px; }
+    h1 { font-size: 1.6rem; } header h1 { margin: 0 0 8px; font-size: 1.2rem; }
+    a { color: light-dark(#1859a8, #9ecbff); }
+    pre { overflow: auto; padding: 12px; background: #8882; }
+    code { font-size: .9em; } table { display: block; overflow: auto; border-collapse: collapse; }
+    th, td { border: 1px solid #8886; padding: 8px; min-width: 120px; }
+    blockquote { border-left: 3px solid #8886; margin-left: 0; padding-left: 16px; }
+    @media (max-width: 600px) { body { padding: 16px; } }
+  </style>
+</head>
+<body>
+  <header><h1>{{ title }}</h1><a href="{{ download_url }}" target="_blank" rel="noopener noreferrer">Download original</a></header>
+  <main>{% if error %}<p role="alert">{{ error }}</p>{% elif body %}{{ body | safe }}{% else %}<p>This file is empty.</p>{% endif %}</main>
+</body>
+</html>

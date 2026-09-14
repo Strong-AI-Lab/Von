@@ -2115,6 +2115,50 @@ function closeDynamicAnnotationTab(tabId) {
     }
 }
 
+const filePreviewTabs = new Map();
+let filePreviewCounter = 0;
+
+export function filePreviewUrl(conceptId) {
+    return `/von/api/files/${encodeURIComponent(conceptId)}/preview`;
+}
+
+export function openFilePreviewTab(conceptId, name = 'File') {
+    const existing = filePreviewTabs.get(conceptId);
+    if (existing) {
+        activateTab(existing.content.id);
+        return existing.content.id;
+    }
+    const tabId = `filePreviewTab_${++filePreviewCounter}`;
+    const previousTabId = document.querySelector('.tab-button.active')?.dataset.tab || 'chatTab';
+    const button = document.createElement('div');
+    button.className = 'tab-button closable';
+    button.dataset.tab = tabId;
+    button.appendChild(document.createTextNode(`Preview: ${name}`));
+    const content = document.createElement('div');
+    content.id = tabId;
+    content.className = 'tab-content file-preview-tab';
+    const frame = document.createElement('iframe');
+    frame.title = `File preview: ${name}`;
+    frame.src = filePreviewUrl(conceptId);
+    frame.setAttribute('sandbox', 'allow-popups allow-popups-to-escape-sandbox allow-downloads');
+    frame.style.cssText = 'width:100%;height:100%;min-height:60vh;border:0;display:block';
+    content.appendChild(frame);
+    const close = () => {
+        const wasActive = button.classList.contains('active');
+        frame.src = 'about:blank';
+        removeTabElements(button, content, { animate: false });
+        filePreviewTabs.delete(conceptId);
+        if (wasActive) activateTab(document.getElementById(previousTabId) ? previousTabId : 'chatTab');
+    };
+    button.appendChild(createCloseTabButton('Close file preview', close));
+    button.addEventListener('click', () => activateTab(tabId));
+    filePreviewTabs.set(conceptId, { content, close });
+    insertTabButton(button);
+    insertTabContent(content);
+    activateTab(tabId);
+    return tabId;
+}
+
 // Create and load a dynamic annotation tab
 function createAnnotationTab(text, conceptName, source) {
     if (!annotationEnabled) {
@@ -3100,6 +3144,14 @@ async function initializeDynamicConceptTab(conceptId, uniqueIdSuffix) {
  */
 export function initializeDynamicTabs() {
     console.log('[dynamicTabs] Initializing dynamic tabs functionality');
+
+    document.addEventListener('authStatusChanged', () => {
+        for (const preview of filePreviewTabs.values()) preview.close();
+    });
+    document.addEventListener('open-file-preview', (event) => {
+        const { conceptId, name } = event.detail || {};
+        if (conceptId) openFilePreviewTab(conceptId, name);
+    });
 
     // Static concept-tab markup is needed on every concept open. Begin its
     // retryable preload while the rest of the application initialises.
@@ -7880,6 +7932,7 @@ export function deriveFileCopyActionState(nodePayload = null) {
 
     return {
         isFileCopyConcept: looksLikeFileCopyType || hasResolvableBlobRef,
+        displayName: attributes.original_filename || rawDoc.name || 'File',
         hasResolvableBlobRef,
         showFileActions: hasResolvableBlobRef && (looksLikeFileCopyType || hasResolvableBlobRef),
     };
@@ -7987,6 +8040,25 @@ function attachDeleteConceptButton(headerDiv, conceptId, kind, fileCopyActionSta
         if (!headerDiv || !conceptId) return;
         if (headerDiv.querySelector('.delete-concept-button')) return; // already added
         const fileActionsEnabled = !!(fileCopyActionState && fileCopyActionState.showFileActions);
+
+        if (fileActionsEnabled && !headerDiv.querySelector('.preview-file-copy-button')) {
+            const previewButton = document.createElement('button');
+            previewButton.className = 'preview-file-copy-button';
+            previewButton.textContent = 'Preview in Von';
+            previewButton.addEventListener('click', (event) => {
+                event.stopPropagation();
+                openFilePreviewTab(conceptId, fileCopyActionState.displayName);
+            });
+            const browserLink = document.createElement('a');
+            browserLink.className = 'preview-file-copy-browser-link';
+            browserLink.textContent = 'Preview in browser tab';
+            browserLink.href = filePreviewUrl(conceptId);
+            browserLink.target = '_blank';
+            browserLink.rel = 'noopener noreferrer';
+            browserLink.style.marginLeft = '8px';
+            browserLink.addEventListener('click', (event) => event.stopPropagation());
+            headerDiv.append(previewButton, browserLink);
+        }
 
         if (fileActionsEnabled && !headerDiv.querySelector('.download-file-copy-button')) {
             const downloadBtn = document.createElement('button');
