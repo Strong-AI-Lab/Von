@@ -36,6 +36,11 @@ def isolate_dispatcher_queue_reconciliation(monkeypatch):
     )
     monkeypatch.setattr(
         dispatch_service.chat_prompt_queue_service,
+        "terminalise_one_stopped_server_attempt",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        dispatch_service.chat_prompt_queue_service,
         "terminalise_one_interrupted_cancellation",
         lambda **_kwargs: None,
     )
@@ -99,6 +104,11 @@ def test_dispatcher_terminalises_requested_cancellation_before_new_work(
         "queue_id": "queue-cancelled",
         "status": "cancelled",
     }
+    monkeypatch.setattr(
+        dispatch_service.chat_prompt_queue_service,
+        "terminalise_one_stopped_server_attempt",
+        lambda **_kwargs: None,
+    )
     monkeypatch.setattr(
         dispatch_service.chat_prompt_queue_service,
         "terminalise_one_interrupted_cancellation",

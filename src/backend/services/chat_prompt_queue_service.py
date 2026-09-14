@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import socket
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
@@ -3780,6 +3781,108 @@ def is_prompt_cancellation_requested(
     return _collection().find_one(query, {"_id": 1}) is not None
 
 
+def terminalise_one_stopped_server_attempt(
+    *,
+    current_server_instance_id: str,
+) -> dict[str, Any] | None:
+    """Release a dead local process's fence without replaying uncertain effects.
+
+    Lease age alone is insufficient. A missing local PID proves this execution
+    process has stopped; other hosts, live/reused PIDs and permission failures
+    remain for explicit reconciliation. Terminal history wins over interruption.
+    """
+    host = socket.gethostname()
+    coll = _collection()
+    candidates = (
+        coll.find(
+            {
+                "status": STATUS_IN_PROGRESS,
+                "dispatch_mode": DISPATCH_MODE_SERVER,
+                "server_instance_id": {"$regex": "^" + re.escape(host) + ":"},
+                "lease_expires_at": {"$lte": _now()},
+                "attempt_id": {"$type": "string", "$ne": ""},
+            }
+        )
+        .sort("lease_expires_at", ASCENDING)
+        .limit(50)
+    )
+    for row in candidates:
+        owner = row.get("server_instance_id")
+        if owner == current_server_instance_id:
+            continue
+        parts = str(owner).split(":")
+        if len(parts) != 3 or not parts[1].isdigit() or int(parts[1]) <= 0:
+            continue
+        try:
+            os.kill(int(parts[1]), 0)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            continue
+        else:
+            continue
+
+        from .chat_history_service import (
+            build_chat_history_query,
+            get_chat_history_collection_service,
+        )
+
+        history = get_chat_history_collection_service(read_only=True)
+        if history is None:
+            raise ChatPromptQueueUnavailable("History reconciliation is unavailable")
+        request_id = row.get("client_request_id")
+        completed = request_id and history.find_one(
+            {
+                **build_chat_history_query(
+                    user_id=row["user_concept_id"],
+                    session_id=row.get("session_id"),
+                    namespace=row.get("namespace"),
+                    include_legacy=False,
+                ),
+                "history": {
+                    "$elemMatch": {
+                        "role": "assistant",
+                        "llm_debug_data.request_id": request_id,
+                    }
+                },
+            },
+            {"_id": 1},
+        )
+        from .turn_execution_record_service import get_turn_execution_record_projection
+
+        receipt = get_turn_execution_record_projection(
+            request_id=request_id,
+            namespace=row.get("namespace"),
+        )
+        completed = bool(
+            completed
+            and isinstance(receipt, Mapping)
+            and receipt.get("user_id") == row["user_concept_id"]
+            and receipt.get("session_id") == row.get("session_id")
+            and receipt.get("execution_terminal_status") == STATUS_COMPLETED
+        )
+        # This is an execution failure, not a verdict that external effects
+        # failed. Keep the original prompt and request locator for recovery;
+        # do not resubmit a potentially state-changing request automatically.
+        return finish_prompt_record(
+            scope=_queue_scope_values(row),
+            queue_id=row["queue_id"],
+            attempt_id=row["attempt_id"],
+            expected_server_instance_id=owner,
+            status=STATUS_COMPLETED if completed else STATUS_FAILED,
+            error=(
+                None
+                if completed
+                else (
+                    "Execution interrupted: owning server process stopped before a "
+                    "terminal response was persisted. Effect outcomes may be unknown; "
+                    f"reconcile exact turn {request_id} before continuing. No automatic replay."
+                )
+            ),
+        )
+    return None
+
+
 def terminalise_one_interrupted_cancellation(
     *,
     current_server_instance_id: str,
@@ -3818,6 +3921,7 @@ def finish_prompt_record(
     status: str = STATUS_COMPLETED,
     error: str | None = None,
     attempt_id: str | None = None,
+    expected_server_instance_id: str | None = None,
 ) -> dict[str, Any]:
     if status not in TERMINAL_STATUSES:
         raise InvalidChatPromptQueueInput("status must be a terminal queue status")
@@ -3841,6 +3945,9 @@ def finish_prompt_record(
         "status": {"$in": ACTIVE_STATUSES},
         **ownership_guard,
     }
+    if expected_server_instance_id is not None:
+        transition_query["server_instance_id"] = expected_server_instance_id
+        transition_query["lease_expires_at"] = {"$lte": now}
     existing_for_terminal = coll.find_one(transition_query)
     if not attempt_id_clean:
         existing = existing_for_terminal
