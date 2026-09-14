@@ -95,7 +95,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     applyHomeAuthUnavailable(new Error(`Organisation context could not be confirmed. ${error.message}`));
     return;
   }
-  preserveOutageDraft(getCurrentNamespace);
+  let releaseOutageDraft = preserveOutageDraft(getCurrentNamespace);
+  document.addEventListener('orgSwitched', () => {
+    releaseOutageDraft?.();
+    releaseOutageDraft = preserveOutageDraft(getCurrentNamespace);
+  });
   loadDeferredSettingsFrame();
 
   // JVNAUTOSCI-954: report bounded, client-reported capability hints (speech/audio)

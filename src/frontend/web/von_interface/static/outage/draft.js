@@ -30,9 +30,10 @@ export function preserveOutageDraft(getNamespace) {
     recovery.append(title, message, text, discard);
     input.parentElement.before(recovery);
   }
-  document.addEventListener('orgSwitchStarted', () => {
+  const hideRecovery = () => {
     document.getElementById('vonRecoveredDraft')?.remove();
-  }, { once: true });
+  };
+  document.addEventListener('orgSwitchStarted', hideRecovery);
   const saveDraft = () => {
     // Programmatic clearing after send is observed here too. Never restore it as
     // an unsent prompt or automatically replay an uncertain effect.
@@ -44,5 +45,9 @@ export function preserveOutageDraft(getNamespace) {
     } catch { /* The open page still keeps its draft if storage is unavailable. */ }
   };
   window.addEventListener('pagehide', saveDraft);
-  return () => window.removeEventListener('pagehide', saveDraft);
+  return () => {
+    window.removeEventListener('pagehide', saveDraft);
+    document.removeEventListener('orgSwitchStarted', hideRecovery);
+    hideRecovery();
+  };
 }

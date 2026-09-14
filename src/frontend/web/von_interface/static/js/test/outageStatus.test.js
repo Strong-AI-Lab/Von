@@ -62,3 +62,25 @@ test('reload recovery is namespace-bound and never fills or sends the composer',
   expect(sessionStorage.getItem('von:unsentReloadDraft:v1:alice@org')).not.toContain('Other organisation');
   reloadCleanup();
 });
+
+test('confirmed organisation rebind saves new drafts without exposing the previous scope', () => {
+  sessionStorage.clear();
+  document.body.innerHTML = '<main><div><textarea id="promptInput"></textarea></div></main>';
+  let namespace = 'alice@first';
+  let cleanup = preserveOutageDraft(() => namespace);
+  document.getElementById('promptInput').value = 'First draft';
+  window.dispatchEvent(new Event('pagehide'));
+  document.dispatchEvent(new Event('orgSwitchStarted'));
+  namespace = 'alice@second';
+  cleanup();
+  cleanup = preserveOutageDraft(() => namespace);
+  expect(document.getElementById('vonRecoveredDraft')).toBeNull();
+  document.getElementById('promptInput').value = 'Second draft';
+  window.dispatchEvent(new Event('pagehide'));
+  cleanup();
+  document.getElementById('promptInput').value = '';
+  cleanup = preserveOutageDraft(() => namespace);
+  expect(document.querySelector('#vonRecoveredDraft textarea').value).toBe('Second draft');
+  expect(sessionStorage.getItem('von:unsentReloadDraft:v1:alice@first')).toContain('First draft');
+  cleanup();
+});
