@@ -18802,3 +18802,36 @@ html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-bu
 #chatSubmitModeHelp { display: block; flex-basis: 100%; font-size: 12px; margin: 0; }
 
 .unified-message-content .message-view-header { flex-wrap: nowrap; }
+
+/* Keep the concept copy glyph tiny, with a usable task-detail hit target. */
+.task-copy-link-btn {
+    min-width: 32px;
+    min-height: 32px;
+    font-size: 14px;
+    vertical-align: middle;
+}
+
+.task-copy-link-btn,
+.task-copy-link-btn:hover {
+    color: inherit;
+    background: transparent;
+    transform: none;
+}
+
+.task-copy-link-btn:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+}
+
+.task-copy-link-control {
+    display: inline-flex;
+    flex-shrink: 0;
+    vertical-align: middle;
+}
+
+@media (pointer: coarse) {
+    .task-copy-link-btn {
+        min-width: 44px;
+        min-height: 44px;
+    }
+}
