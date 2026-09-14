@@ -348,40 +348,24 @@ describe('chat session agent-created filtering', () => {
         expect(document.activeElement).toBe(newChatButton);
     });
 
-    test('describes a left-rail preference truthfully when the narrow layout stays horizontal', async () => {
+    test('mobile uses the tray without offering a desktop layout command', async () => {
         window.matchMedia = jest.fn(() => ({
             matches: true,
             addEventListener: jest.fn(),
             removeEventListener: jest.fn()
         }));
-        require(chatTabModulePath);
+        const chatTab = require(chatTabModulePath);
+        chatTab.__testOnly_loadChatSessionTabsLayoutPreference();
         await window.refreshChatSessionTabsForOrgSwitch();
-
-        const newChatButton = document.querySelector('#chatSessionTabs .chat-session-tab-new');
-        newChatButton.dispatchEvent(new MouseEvent('contextmenu', {
-            bubbles: true,
-            clientX: 18,
-            clientY: 18
-        }));
-
-        const chooseLeftButton = Array.from(document.querySelectorAll('.chat-session-menu button'))
-            .find((button) => button.textContent === 'Use conversation tabs on left on wider screens');
-        expect(chooseLeftButton).toBeTruthy();
-        chooseLeftButton.click();
-
+        document.querySelector('#chatSessionTabs .chat-session-tab-new')
+            .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 18, clientY: 18 }));
+        const menu = document.querySelector('.chat-session-menu');
+        expect(menu.classList.contains('open')).toBe(true);
+        expect(menu.textContent).toContain('New conversation');
+        expect(menu.textContent).not.toMatch(/wider screens|Move conversation tabs/);
         const workspace = document.getElementById('conversationWorkspace');
-        expect(workspace.dataset.tabsLayout).toBe('vertical');
-        expect(workspace.dataset.effectiveTabsLayout).toBe('horizontal');
-        expect(document.querySelector('.toast')?.textContent)
-            .toBe('Left conversation tabs saved for wider screens.');
-
-        newChatButton.dispatchEvent(new MouseEvent('contextmenu', {
-            bubbles: true,
-            clientX: 22,
-            clientY: 22
-        }));
-        expect(Array.from(document.querySelectorAll('.chat-session-menu button'))
-            .some((button) => button.textContent === 'Use conversation tabs across top on wider screens'))
-            .toBe(true);
+        expect(workspace.dataset.tabsLayout).toBe('horizontal');
+        expect(workspace.dataset.effectiveTabsLayout).toBe('vertical');
+        expect(localStorage.getItem('von:chatSessionTabsLayout')).toBe('horizontal');
     });
 });
