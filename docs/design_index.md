@@ -80,6 +80,7 @@ live.
 |---|---|
 | Every task | [`AGENTS.md`](../AGENTS.md) |
 | Substantial, architecture-sensitive, or older-doc-dependent work | This index, then the applicable sections below |
+| Build/deployment receipts and task work products | [Build and deployment evidence](engineering/deployment_evidence.md) |
 | Task product selection and continuing a responsibility from Tasks | [Task responsibility continuation](engineering/task_responsibility_continuation.md) |
 | Subscription-backed coding task pickup on the DGX | [Codex DGX worker pilot](engineering/codex_dgx_worker.md) |
 | Coding-agent progress and completion messages in Von | [Interactive coding-agent messages](engineering/codex_dgx_worker.md#interactive-coding-agent-messages); operator-specific delivery configuration in personal `AGENTS.md` |
@@ -89,8 +90,11 @@ live.
 | Workflow or orchestration | Relevant vocabulary/semantics in the [VWL manual](engineering/von_workflow_language_manual.md); domain examples and appendices are reference material |
 | Prompts, models, routing, optimisation, or fine-tuning | [prompt programmes and model routing](engineering/prompt_programs_and_model_routing_playbook.md) |
 | Retrieval, memory, RAG, KB growth, or long-horizon state | [agent memory and enduring knowledge](engineering/agent_memory_and_enduring_knowledge.md) |
+| Semantic task search, task embeddings and task RAG context | [Task semantic retrieval](engineering/task_semantic_retrieval.md) |
 | Represented, experience- or discussion-derived learning for role, capability, workflow, tool, acquisition, introspection, message, or task decisions | Draft [represented advice design](engineering/represented_advice_design.md), including Phase 0 subtraction, Phase 0.5 non-active candidates, and the [completed bounded negative learning cycle](engineering/jvnautosci_2720_learning_cycle_2026-09-05.md) under JVNAUTOSCI-2720; then the applicable prompt, memory, evaluation, workflow, or security guidance. The cycle links source-derived formation, experimental exposure, outcome evidence, rejection and subsequent verified absence. It does not establish positive advice efficacy, an ordinary runtime consumer, production activation, represented Arm C or autonomous promotion. |
 | Private Otter archive access, conversation images or research-slide reading | [Private Otter archive and conversation images](engineering/otter_archive_and_conversation_images.md) |
+| Authenticated Figma access through coding agents; native-backend prerequisites | [Figma authenticated access](engineering/figma_authenticated_access.md) |
+| Conversational diagrams, equations, generated/tool images or visual format extension | [Conversational visual output](engineering/conversational_visual_output.md) |
 | Reusing external ontology concepts with source identity and attribution | [KnowKat ontology sources and governed adoption](engineering/knowkat_ontology_sources.md) |
 | Importing external human/agent transcripts into conversation carriers | [External conversation import](engineering/external_conversation_import.md) |
 | Unified conversation discovery, message exchanges, read state or participant avatars | [Unified conversations and participant profiles](engineering/unified_conversations_and_participant_profiles.md) |
@@ -151,6 +155,7 @@ human acceptance and promotion into a current public authority surface.
 | Private research syntheses | Advisory material retained outside the public repository | Public coding agents must not depend on private notes; promote approved decisions into the applicable public canonical guide |
 | [Represented advice](engineering/represented_advice_design.md) | Draft proposal with completed subtraction, non-active candidate storage and a [bounded negative learning-cycle dossier](engineering/jvnautosci_2720_learning_cycle_2026-09-05.md); live ontology state remains evidence, not a design assumption | Use for experience- and discussion-derived candidate learning, soft-guidance semantics, possible federated projection/lifecycle convergence, bounded autonomous maintenance, ratchet tests, and distinguishing evaluation. Candidate learning, content efficacy, represented-layer value, and production activation are separate claims; no general runtime advice layer is established. |
 | [Automated policy learning](engineering/automated_policy_learning_design.md) | Design with partial substrate | Use as a proposed learning architecture, not proof of a closed operational loop |
+| [Proactive clarification and conversational role learning](engineering/proactive_clarification_and_role_learning.md) | Draft, source-grounded design proposal | Use for material referent questions, alias/role learning, short-reply continuation, recovery and staged evaluation. It builds on existing ordinary-turn support; no runtime behaviour, represented fact or policy activation is established. |
 | [Testing workflows and ephemeral theories](engineering/testing_workflows_ephemeral_theories_design.md) | Research/design proposal with partial substrate | Use for design intent and explicit hypotheses; verify implemented surfaces |
 | [Reliability Ratchet articles and case log](engineering/reliability_ratchet_articles_and_cases.md) | Active advisory source copy and evidence log | Use as a revisable diagnostic lens and dated case record; not as standing policy, repair authority, or proof of current behaviour |
 | [Ontology repair plans](engineering/ontology_repair_plan_design.md) | Design with implemented substrate | Use for the plan/approve/execute shape and its affordance argument; it adds no authority route, and agent-reachable ontology mutation remains an open decision |
@@ -158,6 +163,10 @@ human acceptance and promotion into a current public authority surface.
 | [Vontology tooling from KA/KR literature](engineering/vontology_tooling_from_ka_kcap_kr_literature.md) | Research-backed advisory roadmap | Use for alternatives and research uptake, not present capability claims |
 
 ## 7. Dated snapshots, diagnostics, and proposals
+
+- [Mobile Web Push candidate and operator handoff](engineering/mobile_web_push.md)
+  records the bounded JVNAUTOSCI-2757 implementation and unfulfilled browser
+  transport acceptance; it does not establish a deployed notification service.
 
 These files retain evidence and rationale, but must not drive current task
 ordering or implementation without live revalidation:

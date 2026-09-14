@@ -165,7 +165,7 @@ separate. The launcher should unset `OPENAI_API_KEY` and `CODEX_API_KEY`, set
 the dedicated `CODEX_HOME`, and execute the installed official Codex CLI.
 Validate an actual agent-issued shell command before enabling polling.
 
-Install the worker, `codex_von_inbox.py`, and both adjacent `_prompt.md` files
+Install the worker, `codex_von_inbox.py`, `codex_von_retry.py`, and both adjacent `_prompt.md` files
 from the same reviewed revision. Run them with the project's PDM-managed Python environment.
 When these scripts are copied into a release bundle outside a complete checkout,
 pass `--backend-root /path/to/reviewed/Von` to the worker. This selects the
@@ -178,6 +178,104 @@ point and list reads. The adapter requires `requested_model` and
 `requested_reasoning_effort` keys even when their values are null. An older reader
 that omits them fails visibly before pickup instead of silently choosing defaults.
 Installing only a newer worker script cannot repair an older canonical reader.
+
+### Waiting for a coding dependency
+
+The retry policy in `scripts/codex_von_retry.py` separates task context from
+permission to spend another coding attempt. After `blocked` or `needs_input`,
+the existing task state retains the result, failed attempt, recovery owner and
+expectation. Archive attachments, evidence/checkpoint updates, self-reports,
+unrelated comments, CI, a pending status and elapsed time cannot admit a retry.
+The task checkpoint and one idempotent message explain the wait. Other eligible
+tasks continue, including when one retained report cannot be delivered.
+
+A coding result may provide an optional `blocker` with `key`, `kind`
+(`dependency` or `transient`), `owner`, `recovery`, `scope_json`,
+`required_observations_json` and `probe_key` (usually null). The two JSON strings
+hold objects describing the relevant candidate/profile and exact observations,
+for example `{"authenticated":true,"profile_bound":true}`. The controller binds
+the task, coding actor, organisation, failed attempt and observation time. This
+describes an external prerequisite; code the assigned agent can safely repair
+and independently useful work should be handled before returning a blocker.
+
+There are three supported continuation routes:
+
+- The delegator can write a task comment beginning exactly
+  `/retry-coding <failed-attempt> <reason>`. This is an explicit one-attempt
+  retry after review, not a claim that the dependency was repaired. Quoted
+  commands and other authors' comments do not qualify.
+- For natural-language repair, answers or changed scope, use the existing inbox
+  reply route. Its bounded interpretation receives the retained result and
+  supplied receipt bytes. It must distinguish relevant recovery, explicit retry
+  and independently useful scope from a status report. The controller binds a
+  `resume_task` decision to that failed attempt and source message. This path
+  uses one ordinary inbox interpretation per new message; polling does not
+  repeatedly ask a model to reinterpret an unchanged failure.
+- A delegator-authored canonical task comment may carry `source.coding_retry`,
+  an operator-verified repair receipt. Required fields are `attempt`,
+  `blocker_key`, `binding` (`task_id`, `agent_id`, `organisation_id`), `scope`
+  (matching the blocker's JSON object), `observed_at`, `observations`,
+  `evidence_reference` and `reason`. Observations must include every required
+  value with its exact JSON type, and be observed after the failed attempt.
+  Use the linked file-copy concept and checksum as the evidence reference when
+  applicable. The trusted producer must actually inspect/read back the repair;
+  a filename, receipt metadata or a top-level ready flag is insufficient. The
+  comparator does not discover or execute arbitrary evidence files. It rejects
+  wrong-task/actor/org, wrong-revision, stale, future and contradictory receipts.
+
+Older text-only results are retained as **unclassified**, not silently inferred
+to have machine-checkable recovery conditions. They can use explicit retry or
+the contextual inbox route. Ordinary free-text task comments remain context;
+they do not automatically constitute repair. The visible wait supplies the
+supported continuation route, so a repair outside Git or with different wording
+does not require changing a classifier or a filename convention. Missing local
+state for a canonical blocked/in-progress task requires reconciliation instead
+of assuming earlier effects never happened.
+
+For known transient dependencies, the operator can register `retry_probes` in
+private controller configuration, keyed by `probe_key`. Each entry contains an
+`argv` list for an existing cheap read-only helper, `timeout_seconds`,
+`interval_seconds` and `max_interval_seconds`. Choose bounds from that helper's
+declared/observed duration with headroom; the subprocess timeout protects the
+controller queue's liveness, independently of coding-run duration. The helper
+receives the retained blocker JSON on stdin and returns the repair receipt
+above on stdout. No task/model-supplied command, URL or executable is run. Failed
+or unknown probes back off exponentially to the configured maximum, with the
+next check persisted before execution; they never launch a coding model. No
+probe is registered by default. Unknown coding-process outcomes always retain
+their work/effects for reconciliation, rather than treating them as a cheap
+transient failure.
+
+The source token is consumed in the same durable write that marks the new
+attempt running, before the subprocess starts. Restart first reconciles an
+existing run/report/archive. A replayed inbox acknowledgement cannot bind the
+old message to a newer failure or reopen a task whose retry already ran. Task
+cancellation, reassignment, project writer and current authority are rechecked
+before the admitted continuation. Model preferences still come from the
+canonical task.
+
+### DGX and Mac retry-policy handoff
+
+Source merge and installation are distinct. Use the existing coherent release
+procedure below at an idle controller boundary; retain the previous release,
+state, worktrees, schedule, lock and configured model preferences. Do not run a
+second worker to activate or test the upgrade. `--check-task` and the next
+scheduled runtime receipt must identify the selected module paths/revision.
+This change does not request a public web deployment.
+
+The Mac bridge is operator-owned and is not source-controlled in this repository.
+Its operator must import the same `codex_von_retry` module, map its retained
+attempt/result and canonical inputs to `retain_blocker`/`admission`, and persist
+`consume` with the running checkpoint before its existing launch call under its
+existing lock. Bind config identity locally; never trust a comment's claimed
+author or scope instead of the canonical author and current assignment. Keep
+the same inbox source authorisation, repair producer verification, current-task
+recheck, cheap-probe backoff and result/effect reconciliation boundaries as the
+DGX adapter. Run the shared tests plus an isolated replay of that installed
+bridge and record canonical wait/recovery read-back and zero duplicate launches.
+An import test or a DGX replay alone is not evidence of Mac integration or
+activation. Return the Mac adapter diff and both hosts' installation/runtime
+receipts through the coordinating operator before claiming both are active.
 Do not change global model defaults to compensate for a mismatched installation.
 
 For an authorised upgrade, use the coherent installation below. Preserve the
@@ -185,6 +283,31 @@ existing worker lock, state directory, identities, memberships, task selectors
 and five-minute schedule. A selected release is not evidence of actual pickup.
 Local installation and public deployment remain distinct effects; both need
 applicable task or standing authority.
+
+### Task-delegated source images
+
+An operator may explicitly authorise the controller to retrieve task-referenced
+images using the delegator's access when the coding agent cannot read the upload
+directly. Enable `delegated_task_images` in the private worker configuration with
+`enabled: true` and an `authorisation_reference` pointing to the operator's grant.
+This setting defaults off. It applies to any configured coding-agent identity;
+interactive delivery adapters must use the same staging function and copy its
+private files to the executing host before advertising local paths.
+
+Before this handoff, the controller re-reads the canonical native task and checks
+its active status, creator, assignee, report recipient and organisation. Only file
+references in that task's description/evidence/notes, attachment metadata and
+delegator-authored task comments/replies qualify. Other conversation context and
+prior model output cannot extend the eligible set. The existing canonical source
+read still checks the delegator's image access. The coding process receives
+bounded image copies and a manifest with original concept IDs, SHA-256, source
+actor, task and authorisation reference; it receives no owner credentials.
+Reassignment or cancellation prevents a new handoff. Previously staged bytes
+are retained as execution evidence; this does not promise retroactive revocation.
+
+Conversation-image uploader checks remain unchanged. An invitation to the source
+conversation alone is not this delegation. Polling alone does not prove that a
+new run consumed its staged images: verify local copies and the actual run result.
 
 ### Coherent worker/backend releases
 
@@ -310,8 +433,21 @@ organisation at or before the source timestamp, then presents them chronological
 The context records its time boundary and whether older messages were omitted.
 Other conversation readers retain their existing pagination. Coding context now
 includes canonical notes, checkpoints, progress, evidence, priority, task links,
-project/collection provenance and up to 50 attachment metadata records. Attachment
-bytes are not supplied by those references. Other authors' comments remain
+project/collection provenance and up to 50 attachment metadata records, enumerated
+even when a cached attachment count is zero. Enumeration failures are explicit.
+Both inbox and coding contexts resolve explicit native task IDs in supplied text
+through canonical point reads, independently of thread/task list projections.
+`task_lookup` preserves assignment, evidence, source scope, failures and omissions;
+these reads do not pick up the referenced task. The existing configured native
+assignment boundary remains in force. Actor-scoped not-found is not global absence.
+The controller stages up to 20 explicitly referenced file copies (5 MB each) using
+the canonical actor-scoped byte reader. `file_copy_evidence` records identity,
+actual SHA-256, canonical checksum verification when available, and a local path
+only after a successful read without checksum mismatch. No blob URL or credential
+is projected. File-copy references do not establish native attachment membership.
+These files remain in the run's `evidence/` directory; the archive's existing file
+allowlist does not include their bytes. Activation and live evidence access must
+be verified separately from source publication. Other authors' comments remain
 explicitly omitted; the existing delegator-comment and follow-up continuity is
 preserved. Runtime capabilities distinguish configured launch arguments and
 controller revision evidence from unobserved public revision or device access.
@@ -536,3 +672,57 @@ writes (registration, one batch, final reference), independently of event count.
 text, refresh, scoped download and clearing on scope change using an isolated
 browser fixture. These tests do not prove live scheduler activation, public
 OAuth, actual provider summaries, or production historical backfill.
+
+### Supervisor repair tasks
+
+An operator-owned `supervision_enabled: true` enables repair-task handoffs in
+an existing controller. It adds no schedule or model poll. Instantiate additional
+agents with that optional flag and their existing agent, delegator and organisation
+bindings; configure the ontology relation through canonical relationship services.
+Do not copy credentials or infer delegation from a supervisor relation.
+
+`report_to_concept_id` is the task override (`#V#reportsto`). When unset,
+`#V#has_supervisor` on the assignee supplies the default for people and agents.
+Canonical task point reads and creation responses expose `reporting_resolution`
+with the selected concept, source and resolution status. Defaults are not copied
+into the explicit field. An ambiguous, inaccessible or cyclic route is reported
+without admitting another coding run. Existing controllers keep their prior
+eligibility policy unless supervision is enabled; enabled controllers still
+require the configured creator/delegator, assignee, organisation and native writer.
+Reporting responsibility no longer substitutes for those execution checks.
+
+Under its existing lock, the controller retains an episode fingerprint before
+creating a canonical repair on behalf of the existing delegator. The repair
+records that attribution, source task, blocker and agent chain in
+`external_references.coding_supervision`, inherits explicit execution preferences,
+and links back with `blocks`/`blocked_by`. The controller reconciles the deterministic
+creation fingerprint after an interrupted acknowledgement. A same-blocker manual
+retry retains the repair episode and refreshes its attempt context; a verified
+recovery followed by a new failure starts a new episode. Self-reports, archives,
+status resets and elapsed time do not supply recovery evidence. Cancelled or
+reassigned repair tasks require reconciliation, not automatic duplication.
+
+The supervisor inspects retained work, repairs within the original scope, and
+returns `repair_receipt_json` containing exact fresh observations. The finishing
+controller checks the current source instructions, scope and assignment, then
+records a canonical attestation. The source admits that attempt-bound receipt once
+through the shared retry policy. A completed repair status alone is insufficient.
+Legacy unclassified failures remain reviewable but require an explicit reviewed
+continuation; the controller does not invent their missing observation contract.
+A human supervisor receives a native task and Von notification, never a coding
+process in the human's identity. Supervisor chains reject repeated identities.
+
+For an upgrade, install the coherent release and update a private Mac adapter
+under its existing lock. The Mac adapter calls `api.reconcile_supervision` for
+waiting attempts and `api.record_supervisor_repair` before applying a successful
+result. Carry `supervision` state to a reserved continuation alongside consumed
+retry tokens. Exclude derived reporting projections and controller-verified repair
+comments from the Mac instruction fingerprint; recheck retry admission at begin.
+Keep old retained results readable when nullable result fields are added.
+
+Before clearing legacy generated `report_to_concept_id` defaults, retain an exact
+review manifest: task ID, old value, original creation provenance, later reporting
+changes and source instruction. Preserve deliberate choices and ambiguous cases.
+Apply only reviewed entries after the eligibility fix is installed, through
+canonical task updates, and read back the effective ontology default. Do not use
+a blanket rewrite based solely on the current field matching the delegator.

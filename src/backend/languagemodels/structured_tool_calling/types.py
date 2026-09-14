@@ -69,6 +69,12 @@ class StructuredToolContextLimitError(StructuredToolTransportError):
     requires_material_context_change = True
 
 
+class ImageGenerationOutcomeUnknownError(StructuredToolTransportError):
+    """A potentially paid native request lost transport after submission."""
+
+    failure_kind = "image_generation_outcome_unknown"
+
+
 @dataclass(frozen=True)
 class ToolDefinition:
     """Definition of a tool available to the LLM.
@@ -226,6 +232,24 @@ class LLMContinuation:
 
 
 @dataclass(frozen=True)
+class LLMContentPart:
+    """Ordered public output, separate from opaque provider continuation.
+
+    Bytes are transient and excluded from repr. Do not serialise this transport
+    object directly. The conversational
+    boundary replaces them with an actor-owned asset before history or telemetry.
+    Text-only consumers keep using LLMResponse.text_response as their projection.
+    """
+
+    kind: str
+    part_id: str
+    text: str = ""
+    image_data: bytes | None = field(default=None, repr=False)
+    mime_type: str | None = None
+    provenance: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class LLMResponse:
     """Response from an LLM with optional tool calls.
 
@@ -253,6 +277,10 @@ class LLMResponse:
     tool_call_diagnostics: List[Dict[str, Any]] = field(default_factory=list)
     continuation: Optional[LLMContinuation] = None
     transport_metadata: Dict[str, Any] = field(default_factory=dict)
+    content_parts: List[LLMContentPart] = field(default_factory=list)
+
+    def has_visible_content(self) -> bool:
+        return bool(self.text_response.strip() or self.content_parts)
 
     def has_tool_calls(self) -> bool:
         """Return True if this response contains tool calls."""

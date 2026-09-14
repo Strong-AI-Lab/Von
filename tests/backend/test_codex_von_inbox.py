@@ -550,3 +550,22 @@ def test_membership_revocation_denies_new_assignment(fixture):
             config, api, state, inbox.state_path(config, message["message_id"])
         )
     assert not comments and not sent and not transitions
+
+
+def test_exact_task_in_message_resolves_without_thread_projection(fixture):
+    config, api, message, task, *_ = fixture
+    parent_id = "#V#task_agent_5e35622e9d063ef435abd262bbbc81c2"
+    message["content"] = f"Investigate unread indicators in {parent_id}"
+    message["thread_id"] = None
+    task["task_concept_id"] = parent_id
+    api.messages.get_conversation_between_users = lambda *a, **kw: [message]
+    api.inputs = lambda _: {
+        "attachments": {"attachments": [], "total": 0},
+        "evidence": "file-copy reference",
+    }
+    context = inbox.context_for(config, api, message)
+    assert context["tasks"][0]["task_concept_id"] == parent_id
+    assert context["tasks"][0]["assignee_concept_id"] == config["agent_id"]
+    lookup = context["task_lookup"]["results"][0]
+    assert lookup["status"] == "found"
+    assert lookup["assignment_context"]["evidence"] == "file-copy reference"

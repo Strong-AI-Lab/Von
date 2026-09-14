@@ -6,6 +6,7 @@ import {
   openReferenceInspector,
 } from '../components/referenceInspector.js';
 import { getJsonDetailed } from '../apiService.js';
+import { copyTextWithClipboardFallback } from '../utils/copyJsonButtonState.js';
 
 jest.mock('../apiService.js', () => ({
   getJsonDetailed: jest.fn(),
@@ -142,7 +143,52 @@ describe('conversation reference inspector', () => {
     expect(panel.textContent).toContain('Robust multimodal learning');
     expect(panel.textContent).toContain('NeurIPS');
     expect(panel.textContent).toContain('Organisation — Strong AI Lab');
+    expect(document.getElementById('conversationReferenceInspectorTitle').textContent)
+      .toBe('Student A has paper matching profile');
+    expect(document.getElementById('conversationReferenceInspectorExplanation').textContent)
+      .toBe('ska_profile_1234');
     expect(document.getElementById('conversationSituationPanel').classList.contains('hidden')).toBe(true);
+  });
+
+  test('repeated labels remain distinguishable and copy and lookup use the full ID', async () => {
+    for (const id of ['ska_a3dfb82ac552fccaf6f95aa231eb133a', 'ska_a3dfb82ac552fccaf6f95aa231eb133b']) {
+      getJsonDetailed.mockResolvedValue({ data: { assertion: { human_statement: 'Ada studies learning.' } } });
+      await openReferenceInspector({ reference_id: id, reference_type: 'scoped_assertion', label: 'Assertion' });
+      expect(document.getElementById('conversationReferenceInspectorTitle').textContent).toBe('Ada studies learning.');
+      expect(document.getElementById('conversationReferenceInspectorExplanation').textContent).toBe(id);
+      expect(getJsonDetailed).toHaveBeenLastCalledWith(`/api/concepts/assertions/${id}`, { cache: 'no-store' });
+      document.getElementById('conversationReferenceInspectorCopyBtn').click();
+      expect(copyTextWithClipboardFallback).toHaveBeenLastCalledWith(id);
+    }
+  });
+
+  test.each([undefined, '', '  \n  '])('falls back to Assertion with its ID when the statement is %p', async (statement) => {
+    getJsonDetailed.mockResolvedValue({ data: { assertion: { human_statement: statement } } });
+    await openReferenceInspector({ reference_id: 'ska_fallback', reference_type: 'scoped_assertion', label: 'Assertion' });
+    expect(document.getElementById('conversationReferenceInspectorTitle').textContent).toBe('Assertion');
+    expect(document.getElementById('conversationReferenceInspectorExplanation').textContent).toBe('ska_fallback');
+  });
+
+  test('bounds a long label, normalises whitespace and preserves the complete statement as text', async () => {
+    const statement = '<img src=x onerror=alert(1)>\n  ' + '🧠 Research interests in learning. '.repeat(8);
+    getJsonDetailed.mockResolvedValue({ data: { assertion: { human_statement: statement } } });
+    await openReferenceInspector({ reference_id: 'ska_long', reference_type: 'scoped_assertion', label: 'Assertion' });
+    const title = document.getElementById('conversationReferenceInspectorTitle');
+    expect(Array.from(title.textContent).length).toBeLessThanOrEqual(96);
+    expect(title.textContent).toMatch(/…$/);
+    expect(title.textContent).not.toMatch(/\s{2}/);
+    expect(document.querySelector('.chat-reference-statement').textContent).toBe(statement.trim());
+    expect(document.querySelector('#conversationReferenceInspector img')).toBeNull();
+  });
+
+  test('a failed refresh removes the previously loaded label', async () => {
+    getJsonDetailed.mockResolvedValueOnce({ data: { assertion: { human_statement: 'Old statement' } } });
+    await openReferenceInspector({ reference_id: 'ska_refresh', reference_type: 'scoped_assertion', label: 'Assertion' });
+    getJsonDetailed.mockRejectedValueOnce({ status: 404 });
+    document.getElementById('conversationReferenceInspectorRefreshBtn').click();
+    await Promise.resolve();
+    expect(document.getElementById('conversationReferenceInspectorTitle').textContent).toBe('Assertion');
+    expect(document.getElementById('conversationReferenceInspectorStatus').textContent).toContain('not available');
   });
 
   test('renders persisted turn evidence without fetching or calling it a durable receipt', async () => {

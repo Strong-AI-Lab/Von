@@ -5,6 +5,8 @@
  * Tasks are stored as Vontology concepts and accessed via REST API.
  */
 
+import { copyJsonTextWithButtonFeedback } from '../utils/copyJsonButtonState.js';
+import { buildTaskLink, readTaskLink } from '../utils/taskLinks.js';
 import { openTaskRunActivity } from './taskRunActivity.js';
 import { deleteJson, getJson, patchJson, postJson, getUserContext, ensureUniqueWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
 import { activateTab } from '../tabNavigation.js';
@@ -30,6 +32,11 @@ let _filterTaskSourceId = 'all';
 let _isGlobalTabMode = false;  // True when rendering into global tasks tab
 let _taskDetailState = {};  // taskId -> detail panel state
 let _selectedTaskId = '';
+let _selectionCleared = false;
+let _pendingTaskNavigation = null;
+let _taskLinkConsumed = false;
+let _referencedGlobalTaskId = '';
+let _panelReturnFocus = null;
 let _panelTaskIds = null;
 let _panelLoadGeneration = 0;
 let _bulkTaskVisibility = 'exclude';
@@ -83,7 +90,8 @@ const TASK_EXTERNAL_RESOURCE_ACTION_HREF_PATTERN = /^\/api\/tasks\/[A-Za-z0-9%_-
 const TASK_STATUS_OPTIONS = [
     { value: 'pending', label: 'Pending', icon: '⏳' },
     { value: 'in_progress', label: 'In Progress', icon: '🔄' },
-    { value: 'completed', label: 'Completed', icon: '✅' },
+    { value: 'completed', label: 'Completed', icon: '✅', description: 'Work finished; not necessarily deployed' },
+    { value: 'deployed', label: 'Deployed', icon: '🚀', description: 'Work deployed to its target runtime' },
     { value: 'cancelled', label: 'Cancelled', icon: '❌' },
     { value: 'blocked', label: 'Blocked', icon: '🚫' },
 ];
@@ -182,6 +190,8 @@ function resetTaskPanelScopedState(activeOrganisationConceptId, { actorChanged =
     _taskQueueActivityGeneration += 1;
     stopTaskQueueActivityPolling();
     _taskQueueActivityLoadPromise = null;
+    _pendingTaskNavigation = null;
+    _referencedGlobalTaskId = '';
     _activeOrganisationConceptId = activeOrganisationConceptId;
     _globalTaskLoadGeneration += 1;
     _isLoading = false;
@@ -757,6 +767,20 @@ export function initializeTaskPanel() {
     ensureTaskPanelAuthStatusListener();
     renderTaskGroupFilterControls();
 
+    _panelEl.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            hideTaskPanel();
+        }
+    });
+    document.addEventListener('pointerdown', (event) => {
+        if (_isVisible && !_panelEl.contains(event.target)
+            && !event.target.closest('#taskPanelToggleBtn')) {
+            hideTaskPanel({ restoreFocus: false });
+        }
+    });
+
     // Set up close button
     const closeBtn = document.getElementById('closeTaskPanel');
     if (closeBtn) {
@@ -823,12 +847,14 @@ export function showTaskPanel(options = {}) {
         _isGlobalTabMode = false;
         syncTaskQueueActivityPolling();
         _taskListEl = document.getElementById('taskList') || _taskListEl;
+        if (!_isVisible) _panelReturnFocus = document.activeElement;
         _panelEl.classList.remove('hidden');
         _panelEl.setAttribute('aria-hidden', 'false');
         _panelEl.querySelectorAll('.task-create-form, .task-filter-row').forEach(element => {
             element.classList.toggle('hidden', _panelTaskIds !== null);
         });
         _isVisible = true;
+        document.getElementById('closeTaskPanel')?.focus();
         // Auto-refresh tasks when panel becomes visible
         return refreshTasks();
     }
@@ -870,11 +896,12 @@ async function loadReferencedPanelTasks() {
 /**
  * Hide the task panel.
  */
-export function hideTaskPanel() {
+export function hideTaskPanel({ restoreFocus = true } = {}) {
     if (_panelEl) {
         _panelEl.classList.add('hidden');
         _panelEl.setAttribute('aria-hidden', 'true');
         _isVisible = false;
+        if (restoreFocus && _panelReturnFocus?.isConnected) _panelReturnFocus.focus();
     }
 }
 
@@ -909,6 +936,7 @@ async function openGlobalTasks() {
     _tasks = [];
     _taskDetailState = {};
     _selectedTaskId = '';
+    _referencedGlobalTaskId = '';
     ensureTaskPanelOrganisationSwitchListener();
     ensureTaskPanelAuthStatusListener();
     ensureTaskQueueActivityPollingListeners();
@@ -939,6 +967,33 @@ async function openGlobalTasks() {
         loadGlobalTasks({ telemetry }),
         loadTaskQueueActivity(),
     ]);
+    const linkedTaskId = !_taskLinkConsumed && readTaskLink();
+    if (!_pendingTaskNavigation && linkedTaskId) {
+        _taskLinkConsumed = true;
+        const scopeGeneration = _taskQueueActivityGeneration;
+        const loadGeneration = _globalTaskLoadGeneration;
+        try {
+            const task = await getJson(`/api/tasks/${encodeURIComponent(linkedTaskId)}`);
+            if (scopeGeneration !== _taskQueueActivityGeneration || loadGeneration !== _globalTaskLoadGeneration) return;
+            if (getTaskId(task) !== linkedTaskId) throw new Error('Task link target mismatch');
+            _pendingTaskNavigation = task;
+        } catch (_) {
+            if (scopeGeneration !== _taskQueueActivityGeneration || loadGeneration !== _globalTaskLoadGeneration) return;
+            clearTaskSelection();
+            showToast('Could not open linked task', 'error');
+        }
+    }
+    if (_pendingTaskNavigation) {
+        const task = _pendingTaskNavigation;
+        _pendingTaskNavigation = null;
+        const taskId = getTaskId(task);
+        if (!_tasks.some(item => getTaskId(item) === taskId)) _tasks.push(task);
+        _referencedGlobalTaskId = taskId;
+        await selectTask(taskId);
+        const inspector = _globalTasksContainer.querySelector('#globalTaskInspector');
+        inspector?.setAttribute('tabindex', '-1');
+        inspector?.focus();
+    }
     syncTaskQueueActivityPolling();
 }
 
@@ -990,6 +1045,7 @@ function renderGlobalTasksTabContent() {
                     <option value="pending">Pending</option>
                     <option value="in_progress">In Progress</option>
                     <option value="completed">Completed</option>
+                    <option value="deployed">Deployed</option>
                     <option value="cancelled">Cancelled</option>
                     <option value="blocked">Blocked</option>
                 </select>
@@ -1258,7 +1314,7 @@ export async function setCurrentSession(sessionId) {
  * Get the current task count for badge display.
  */
 export function getTaskCount() {
-    return _tasks.filter(t => t.status !== 'completed' && t.status !== 'cancelled').length;
+    return _tasks.filter(t => !['completed', 'deployed', 'cancelled'].includes(t.status)).length;
 }
 
 /**
@@ -1508,6 +1564,7 @@ function getFilteredTasks() {
     // Exact references remain reachable regardless of saved list filters.
     if (!_isGlobalTabMode && _panelTaskIds !== null) return _tasks;
     return _tasks.filter((task) => {
+        if (_isGlobalTabMode && getTaskId(task) === _referencedGlobalTaskId) return true;
         if (!taskMatchesGlobalScope(task)) {
             return false;
         }
@@ -1540,6 +1597,7 @@ function getFilteredTasks() {
 }
 
 function ensureSelectedTaskStillValid(filteredTasks = null) {
+    if (_selectionCleared) return;
     const visibleTasks = Array.isArray(filteredTasks) ? filteredTasks : getFilteredTasks();
     if (visibleTasks.length === 0) {
         _selectedTaskId = '';
@@ -1555,7 +1613,7 @@ function renderGlobalTaskSummary(filteredTasks = getFilteredTasks()) {
     const summaryEl = _globalTasksContainer?.querySelector('#globalTaskSummary');
     if (!summaryEl) return;
 
-    const activeCount = filteredTasks.filter((task) => !['completed', 'cancelled'].includes(task.status)).length;
+    const activeCount = filteredTasks.filter((task) => !['completed', 'deployed', 'cancelled'].includes(task.status)).length;
     const sourcedCount = filteredTasks.filter((task) => task.task_source_id).length;
     const typedCount = filteredTasks.filter((task) => Array.isArray(task.task_type_ids) && task.task_type_ids.length > 0).length;
     const selectedTask = filteredTasks.find((task) => getTaskId(task) === _selectedTaskId) || null;
@@ -1881,7 +1939,7 @@ function renderTaskList() {
         html += '</div>';
     } else {
         const grouped = groupTasksByStatus(filteredTasks);
-        const boardStatuses = ['in_progress', 'pending', 'blocked', 'completed', 'cancelled'];
+        const boardStatuses = ['in_progress', 'pending', 'blocked', 'completed', 'deployed', 'cancelled'];
         html = '<div class="task-board-view">';
         boardStatuses.forEach((status) => {
             html += renderTaskGroup(status, grouped[status] || []);
@@ -1925,7 +1983,7 @@ function renderTaskGroup(status, tasks) {
         <div class="task-group" data-status="${status}">
             <div class="task-group-header">
                 <span class="task-group-icon">${statusInfo.icon}</span>
-                <span class="task-group-label">${statusInfo.label}</span>
+                <span class="task-group-label" title="${escapeHtml(statusInfo.description || statusInfo.label)}">${statusInfo.label}</span>
                 <span class="task-group-count">(${tasks.length})</span>
             </div>
             <div class="task-group-body">
@@ -2710,6 +2768,21 @@ function renderTaskOrganisationField(task) {
     `;
 }
 
+function renderTaskDeployments(task) {
+    const deployments = task.deployments || [];
+    if (!deployments.length) return '';
+    return `<section aria-label="Builds and deployments"><h4>Builds and deployments</h4>
+      ${deployments.map(deployment => `<article class="task-deployment">
+        <button type="button" class="task-concept-link" data-concept-id="${escapeHtml(deployment.concept_id)}" data-concept-name="${escapeHtml(deployment.deployment_id)}">${escapeHtml(deployment.deployment_id)}</button>
+        <p>${escapeHtml(deployment.environment)} · ${escapeHtml(deployment.status)} · ${escapeHtml(deployment.target || 'Target not recorded')}</p>
+        <p>Build: ${escapeHtml(deployment.build?.build_id || '')}<br>Source revision: ${escapeHtml(deployment.build?.source_revision || '')}<br>Deployed: ${escapeHtml(deployment.deployed_at || 'Not recorded')}</p>
+        ${deployment.status !== 'verified' ? '<p>This deployment is not currently verified.</p>' : ''}
+        <details><summary>Deployment evidence and history</summary><pre>${escapeHtml(JSON.stringify(deployment.observations || [], null, 2))}</pre></details>
+        ${deployment.status === 'verified' ? `<button type="button" class="task-select-deployment-btn" data-task-id="${escapeHtml(getTaskId(task))}" data-concept-id="${escapeHtml(deployment.concept_id)}">Use as current work product</button>` : ''}
+      </article>`).join('')}
+    </section>`;
+}
+
 function renderTaskWorkProduct(task, detailState) {
     const product = detailState?.product || task.current_work_product;
     const messages = {
@@ -2723,8 +2796,9 @@ function renderTaskWorkProduct(task, detailState) {
     const productId = product?.concept_id || '';
     const execute = canExecuteTaskWithVon(task);
     const active = isTaskExecutionLaunchSuppressed(taskId);
-    return `<section class="task-work-product" aria-label="Current work product">
+    return `${renderTaskDeployments(task)}<section class="task-work-product" aria-label="Current work product">
         <h4>Current work product</h4>
+        ${product?.kind === 'deployment' ? `<p>Deployment: ${escapeHtml(product.deployment?.status || 'unreported')} (${escapeHtml(product.deployment?.environment || '')})</p>` : ''}
         <p>${product?.status === 'ready' ? escapeHtml(productId) : escapeHtml(messages[product?.status] || 'Open task details to check its current product.')}</p>
         ${product?.status === 'ready' ? `<button type="button" class="task-open-product-btn" data-task-id="${escapeHtml(taskId)}" ${detailState.productLoading ? 'disabled' : ''}>${detailState.productLoading ? 'Opening…' : 'Open current work product'}</button>` : ''}
         ${productId ? `<button type="button" class="task-concept-link" data-concept-id="${escapeHtml(productId)}" data-concept-name="${escapeHtml(productId)}">Inspect product concept</button>` : ''}
@@ -2766,6 +2840,12 @@ async function openTaskWorkProduct(taskId) {
     }
 }
 
+function renderTaskCopyLink(taskId) {
+    return `<span class="task-copy-link-control"><button type="button" class="copy-id-button task-copy-link-btn"
+        data-task-id="${escapeHtml(taskId)}" title="Copy link" aria-label="Copy link">📋</button>
+        <span class="sr-only" role="status" aria-live="polite"></span></span>`;
+}
+
 function renderTaskDetailsPanel(task, detailState) {
     const taskId = getTaskId(task);
     const detailTask = detailState.task || task;
@@ -2799,6 +2879,7 @@ function renderTaskDetailsPanel(task, detailState) {
 
     return `
         <div class="task-detail-panel" data-task-id="${escapeHtml(taskId)}">
+            ${renderTaskDelegation(detailTask)}
             ${renderTaskWorkProduct(detailTask, detailState)}
             <div class="task-detail-section">
                 <h4>Editable task context</h4>
@@ -3074,11 +3155,12 @@ function renderTaskInspector(task, detailState) {
             <div class="task-inspector-header">
                 <div class="task-inspector-heading">
                     <div class="task-inspector-eyebrow">${escapeHtml(detailTask.reference_code || taskId)}</div>
-                    <h3>${escapeHtml(detailTask.title || 'Untitled task')}</h3>
+                    <h3>${escapeHtml(detailTask.title || 'Untitled task')} ${renderTaskCopyLink(taskId)}</h3>
                     <p>${escapeHtml(detailTask.description || 'No description yet.')}</p>
                 </div>
                 <div class="task-inspector-badges">
-                    <span class="task-status-badge">${escapeHtml(getStatusInfo(detailTask.status).label)}</span>
+                    ${renderTaskDelegation(detailTask)}
+                    <span class="task-status-badge" title="${escapeHtml(getStatusInfo(detailTask.status).description || getStatusInfo(detailTask.status).label)}">${escapeHtml(getStatusInfo(detailTask.status).label)}</span>
                     <span class="task-priority-chip">${escapeHtml(getPriorityInfo(detailTask.priority).label)}</span>
                     ${renderTaskExecuteWithVonButton(detailTask, 'task-inspector-execute-btn')}
                     ${renderTaskDiscussButton(detailTask, 'task-inspector-discuss-btn')}
@@ -3289,11 +3371,35 @@ function renderGlobalTaskInspector() {
     }
 
     const detailState = getTaskDetailState(_selectedTaskId);
-    inspectorEl.innerHTML = renderTaskInspector(selectedTask, detailState);
+    inspectorEl.innerHTML = `<button type="button" class="task-clear-selection-btn" aria-label="Close task details">Close task details ×</button>${renderTaskInspector(selectedTask, detailState)}`;
+    inspectorEl.querySelector('.task-clear-selection-btn').addEventListener('click', clearTaskSelection);
+    _globalTasksContainer.onkeydown = (event) => {
+        if (!_selectedTaskId || event.key !== 'Escape' || event.defaultPrevented
+            || event.target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
+        event.preventDefault();
+        clearTaskSelection();
+    };
+}
+
+function clearTaskSelection() {
+    const previousId = _selectedTaskId;
+    _selectionCleared = true;
+    _selectedTaskId = '';
+    renderTaskList();
+    const previousCard = [...(_taskListEl?.querySelectorAll('.task-item') || [])]
+        .find((item) => item.dataset.taskId === previousId);
+    (previousCard || _taskListEl)?.focus({ preventScroll: true });
+}
+
+function renderTaskDelegation(task) {
+    return task?.assignee_concept_id === '#V#codex_dgx'
+        ? '<span class="task-source-chip task-delegation-chip" title="Assigned to Codex DGX; execution has not necessarily started">Delegated to Codex DGX</span>'
+        : '';
 }
 
 async function selectTask(taskId, { loadDetails = true } = {}) {
     if (!taskId) return;
+    _selectionCleared = false;
     _selectedTaskId = taskId;
     renderTaskList();
     if (!loadDetails) return;
@@ -3348,7 +3454,7 @@ function renderTaskItem(task) {
     let dueDateHtml = '';
     if (task.due_date) {
         const dueDate = new Date(task.due_date);
-        const isOverdue = dueDate < new Date() && task.status !== 'completed' && task.status !== 'cancelled';
+        const isOverdue = dueDate < new Date() && !['completed', 'deployed', 'cancelled'].includes(task.status);
         dueDateHtml = `
             <span class="task-due-date ${isOverdue ? 'overdue' : ''}" title="Due date">
                 📅 ${dueDate.toLocaleDateString()}
@@ -3416,12 +3522,14 @@ function renderTaskItem(task) {
                 <span class="task-priority" title="Priority: ${priorityInfo.label}">${priorityInfo.icon}</span>
                 ${referenceCodeHtml}
                 ${titleHtml}
-                <span class="task-status-badge" title="Status">${statusInfo.icon} ${escapeHtml(statusInfo.label)}</span>
+                ${!_isGlobalTabMode ? renderTaskCopyLink(taskId) : ''}
+                <span class="task-status-badge" title="${escapeHtml(statusInfo.description || statusInfo.label)}">${statusInfo.icon} ${escapeHtml(statusInfo.label)}</span>
             </div>
             <div class="task-item-body">
                 <p class="task-description">${truncatedDescription}</p>
                 ${typeChipsHtml}
                 ${organisationChipHtml}
+                ${renderTaskDelegation(task)}
                 ${bulkCollectionChipsHtml}
                 ${labelsHtml}
                 ${componentsHtml}
@@ -3440,9 +3548,10 @@ function renderTaskItem(task) {
                 <div class="task-actions">
                     ${renderTaskExecuteWithVonButton(task)}
                     ${renderTaskDiscussButton(task)}
-                    <button class="task-detail-toggle-btn" data-task-id="${taskId}" title="${_isGlobalTabMode ? 'Inspect task details' : 'Show task details'}">
-                        ${_isGlobalTabMode ? 'Inspect' : (detailState.expanded ? 'Hide details' : 'Details')}
+                    <button type="button" class="task-detail-toggle-btn" data-task-id="${taskId}" ${!_isGlobalTabMode ? `aria-expanded="${detailState.expanded}"` : ''} title="${_isGlobalTabMode ? 'Inspect task details' : (detailState.expanded ? 'Hide task details' : 'Show task details')}">
+                        ${_isGlobalTabMode ? 'Inspect' : (detailState.expanded ? 'Hide details' : 'Show details')}
                     </button>
+                    ${!_isGlobalTabMode ? `<button type="button" class="task-open-in-tab-btn btn-mini" data-task-id="${taskId}">Open in Tasks</button>` : ''}
                     <select class="task-status-select" data-task-id="${taskId}" title="Change status">
                         ${TASK_STATUS_OPTIONS.map(opt => `
                             <option value="${opt.value}" ${task.status === opt.value ? 'selected' : ''}>
@@ -3705,6 +3814,19 @@ function attachTaskEventListeners() {
             });
         });
 
+        root.querySelectorAll('.task-copy-link-btn').forEach((button) => {
+            button.addEventListener('click', async (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const copied = await copyJsonTextWithButtonFeedback(button, buildTaskLink(button.dataset.taskId), {
+                    successLabel: '✔', errorLabel: '✕', fallbackLabel: '📋',
+                });
+                button.parentElement.querySelector('[role="status"]').textContent = copied ? 'Link copied to clipboard' : 'Copy failed';
+                button.focus({ preventScroll: true });
+                showToast(copied ? 'Link copied to clipboard' : 'Copy failed', copied ? 'success' : 'error');
+            });
+        });
+
         root.querySelectorAll('.task-concept-link').forEach((btn) => {
             btn.addEventListener('click', (e) => {
                 e.preventDefault();
@@ -3739,6 +3861,18 @@ function attachTaskEventListeners() {
             });
         });
 
+        root.querySelectorAll('.task-open-in-tab-btn').forEach((button) => {
+            button.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const task = _tasks.find(item => getTaskId(item) === button.dataset.taskId);
+                if (!task) return;
+                _pendingTaskNavigation = task;
+                hideTaskPanel({ restoreFocus: false });
+                activateTab('globalTasksTab');
+                void showGlobalTasks();
+            });
+        });
+
         root.querySelectorAll('.task-detail-toggle-btn').forEach((btn) => {
             btn.addEventListener('click', async (e) => {
                 e.stopPropagation();
@@ -3748,6 +3882,8 @@ function attachTaskEventListeners() {
                     await selectTask(taskId);
                 } else {
                     await toggleTaskDetails(taskId);
+                    Array.from(_panelEl.querySelectorAll('.task-detail-toggle-btn'))
+                        .find(button => button.dataset.taskId === taskId)?.focus();
                 }
             });
         });
@@ -3869,14 +4005,15 @@ function attachTaskEventListeners() {
                 void openTaskWorkProduct(button.dataset.taskId);
             });
         });
-        root.querySelectorAll('.task-save-product-btn').forEach(button => {
+        root.querySelectorAll('.task-save-product-btn, .task-select-deployment-btn').forEach(button => {
             button.addEventListener('click', async event => {
                 event.stopPropagation();
                 const taskId = button.dataset.taskId;
-                const input = button.closest('.task-work-product').querySelector('.task-current-product-input');
+                const input = button.closest('.task-work-product')?.querySelector('.task-current-product-input');
+                const productId = button.classList.contains('task-select-deployment-btn') ? button.dataset.conceptId : (input.value.trim() || null);
                 button.disabled = true;
                 try {
-                    await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, { current_work_product_concept_id: input.value.trim() || null });
+                    await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, { current_work_product_concept_id: productId });
                     const detail = getTaskDetailState(taskId);
                     detail.product = null;
                     detail.productHtml = '';

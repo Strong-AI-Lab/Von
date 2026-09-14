@@ -66,3 +66,68 @@ test('unread exchanges survive the recency cutoff and equal timestamps have stab
     ], nowMs: Date.parse('2026-09-11T13:00:00Z') }).sessionsToRender;
     expect(rows.map(row => row.session_id)).toEqual(['a', 'b', 'messages:old']);
 });
+
+async function mountSearch() {
+    document.body.insertAdjacentHTML('beforeend', '<div class="conversation-tray-header"></div>');
+    api.getJson.mockResolvedValue({ conversations: [] });
+    catalogue.initialiseConversationCatalogue({ render: jest.fn() });
+    await Promise.resolve(); await Promise.resolve();
+    return document.querySelector('input[type="search"]');
+}
+
+function enterQuery(input, value) {
+    input.value = value;
+    input.dispatchEvent(new Event('input'));
+}
+
+describe('catalogue content search', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => { jest.clearAllTimers(); jest.useRealTimers(); });
+
+    test('title and participant matches precede semantic-only results, including old unloaded chats', async () => {
+        const input = await mountSearch();
+        enterQuery(input, 'cooling buildings');
+        api.getJson.mockResolvedValue({ success: true, coverage_complete: true, results: [
+            { session_id: 'topic', session_name: 'Design', last_message_at: '2020-01-01', match: { score: 900, fields: ['semantic_content'], snippet: 'Passive ventilation reduces indoor temperatures.' } },
+            { session_id: 'title', session_name: 'Cooling buildings', match: { score: 1, fields: ['display_name', 'semantic_content'] } }
+        ] });
+        await catalogue.searchCatalogueContent();
+        const result = catalogue.filterCatalogueRows([
+            { session_id: 'title', session_name: 'Cooling buildings' },
+            { session_id: 'person', participant_ids: ['#V#cooling_buildings_team'], session_name: 'Team' },
+            { session_id: 'irrelevant', session_name: 'Shopping' }
+        ]);
+        expect(result.map(row => row.session_id)).toEqual(['title', 'person', 'topic']);
+        expect(result[2].match.snippet).toContain('ventilation');
+        expect(api.getJson.mock.calls.at(-1)[0]).toContain('match_mode=hybrid');
+        enterQuery(input, '');
+        expect(catalogue.filterCatalogueRows([])).toEqual([]);
+    });
+
+    test('typing is debounced and an obsolete response cannot enter the new query', async () => {
+        const input = await mountSearch();
+        api.getJson.mockClear();
+        enterQuery(input, 'first');
+        jest.advanceTimersByTime(200);
+        expect(api.getJson).not.toHaveBeenCalled();
+        let finish;
+        api.getJson.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+        jest.advanceTimersByTime(100);
+        expect(api.getJson).toHaveBeenCalledTimes(1);
+        enterQuery(input, 'second');
+        finish({ success: true, results: [{ session_id: 'obsolete', session_name: 'first' }] });
+        await Promise.resolve(); await Promise.resolve();
+        expect(catalogue.filterCatalogueRows([])).toEqual([]);
+    });
+
+    test('semantic failure retains participant matching and exposes retry', async () => {
+        const input = await mountSearch();
+        enterQuery(input, 'bob');
+        api.getJson.mockRejectedValue(new Error('Offline'));
+        await catalogue.searchCatalogueContent();
+        expect(catalogue.filterCatalogueRows([exchange('bob', '2026-09-13')])).toHaveLength(1);
+        const controls = document.createElement('div');
+        catalogue.mountCatalogueControls(controls);
+        expect(controls.textContent).toContain('Retry search');
+    });
+});

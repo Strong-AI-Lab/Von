@@ -12,6 +12,7 @@ import time
 from ..languagemodels.llm_interface import assert_model_execution_allowed
 from ..languagemodels.model_defaults import TRANSCRIPTION_MODELS
 from .settings_service import get_openai_env_var, resolve_enabled_llm_settings
+from .model_audio_metadata import recorded_transcription_supported
 
 MAX_AUDIO_BYTES = 24_000_000
 AUDIO_TYPES = {
@@ -28,7 +29,9 @@ class SpeechUnavailable(Exception):
     pass
 
 
-def transcription_model(actor: str, organisation: str | None) -> str:
+def transcription_model(
+    actor: str, organisation: str | None, requested_model=""
+) -> str:
     enabled = resolve_enabled_llm_settings(
         user_concept_id=actor, org_concept_id=organisation
     )
@@ -37,20 +40,29 @@ def transcription_model(actor: str, organisation: str | None) -> str:
         for e in enabled
         if isinstance(e, dict) and e.get("provider") == "openai"
     }
-    preferred = os.environ.get("VON_TRANSCRIPTION_MODEL", "").strip()
-    candidates = (preferred,) if preferred else TRANSCRIPTION_MODELS
+    preferred = str(
+        requested_model or os.environ.get("VON_TRANSCRIPTION_MODEL", "")
+    ).strip()
+    candidates = (preferred,) if preferred else (*TRANSCRIPTION_MODELS, *sorted(models))
     for model in candidates:
-        if model in TRANSCRIPTION_MODELS and model in models:
+        if model in models and recorded_transcription_supported("openai", model):
             return model
     raise SpeechUnavailable(
-        "Enable an OpenAI transcription model in Settings: "
+        (
+            f"OpenAI {preferred} is not an enabled recorded-transcription model. "
+            if preferred
+            else ""
+        )
+        + "Enable an OpenAI transcription model in Settings: "
         + ", ".join(TRANSCRIPTION_MODELS)
         + "."
     )
 
 
-def transcription_capability(actor: str, organisation: str | None) -> dict:
-    model = transcription_model(actor, organisation)
+def transcription_capability(
+    actor: str, organisation: str | None, requested_model=""
+) -> dict:
+    model = transcription_model(actor, organisation, requested_model)
     if not os.environ.get(get_openai_env_var() or "OPENAI_API_KEY"):
         raise SpeechUnavailable("The server's configured OpenAI key is unavailable.")
     return {
@@ -84,7 +96,15 @@ def normalise_language(language):
 
 
 def transcribe_audio(
-    *, actor, organisation, audio, mime_type, context="", vocabulary=None, language=""
+    *,
+    actor,
+    organisation,
+    audio,
+    mime_type,
+    context="",
+    vocabulary=None,
+    language="",
+    model="",
 ):
     import openai
 
@@ -93,7 +113,7 @@ def transcribe_audio(
         raise ValueError("Unsupported recording format. Use MP4, WebM, MP3 or WAV.")
     if not audio or len(audio) > MAX_AUDIO_BYTES:
         raise ValueError("Recording is empty or exceeds the 24 MB upload limit.")
-    capability = transcription_capability(actor, organisation)
+    capability = transcription_capability(actor, organisation, model)
     model = capability["model"]
     assert_model_execution_allowed(
         provider="openai",

@@ -35,7 +35,6 @@
 .unified-message-content .message-content pre { overflow: auto; white-space: pre; max-width: 100%; }
 .unified-message-content .message-author { font-weight: 600; margin-bottom: 8px; }
 .message-reply-destination { margin: 0 0 6px; font-size: 12px; opacity: .8; }
-.message-jump-latest { position: sticky; bottom: 8px; display: block; margin: auto; }
 .message-conversation-row .chat-session-tab-header { display: flex; align-items: center; gap: 8px; }
 .conversation-source-status { font-size: 12px; padding: 8px; }
 @media (max-width: 800px) { .unified-message-content .message-view-header { flex-wrap: wrap; } .unified-message-content .message-bubble { padding: 12px; } }
@@ -50,7 +49,9 @@
 .catalogue-filters input { min-width: 0; width: 100%; padding: 6px; font-size: 12px; border: 1px solid #cdd7de; border-radius: 5px; }
 .catalogue-filters button { font-size: 12px; border: 1px solid #cdd7de; border-radius: 5px; padding: 4px; background: white; color: #243449; }
 .catalogue-filters button[aria-pressed=true] { background: #dceafa; }
-.viewing-message-exchange .conversation-model-controls, .viewing-message-exchange .conversation-model-controls + .footer-separator, .viewing-message-exchange #conversationRuntimeCostInfo { display: none; }
+/* Model settings remain reachable across conversation types. Their visibility
+   follows the footer preference; only chat-specific cost is hidden here. */
+.viewing-message-exchange #conversationRuntimeCostInfo { display: none; }
 .conversation-unread-badge { background: #466eab; color: white; border-radius: 10px; padding: 1px 6px; font-size: 11px; }
 .conversation-unread-badge[hidden] { display: none; }
 .chat-session-tab-header > .participant-avatar { margin-right: 5px; vertical-align: middle; }
