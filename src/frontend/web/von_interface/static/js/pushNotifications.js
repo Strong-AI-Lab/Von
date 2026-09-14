@@ -16,8 +16,25 @@ export function notificationSupport() {
 }
 
 async function registration() {
-    await navigator.serviceWorker.register('/von/service-worker.js', { scope: '/von/' });
-    return navigator.serviceWorker.ready;
+    const reg = await navigator.serviceWorker.register('/von/service-worker.js', { scope: '/von/' });
+    // Settings lives in /settings iframe, outside the /von/ worker scope.
+    // navigator.serviceWorker.ready would wait forever for that frame to be
+    // controlled. Wait for this registration's activation instead.
+    if (reg.active?.state === 'activated') return reg;
+    const worker = reg.installing || reg.waiting || reg.active;
+    if (!worker) throw new Error('Notification service worker unavailable. Refresh to retry.');
+    await new Promise((resolve, reject) => {
+        const changed = () => {
+            if (worker.state === 'activated' || worker.state === 'redundant') {
+                worker.removeEventListener('statechange', changed);
+                if (worker.state === 'activated') resolve();
+                else reject(new Error('Notification service worker could not activate. Refresh to retry.'));
+            }
+        };
+        worker.addEventListener('statechange', changed);
+        changed();
+    });
+    return reg;
 }
 
 export async function disableBrowserNotifications() {
@@ -113,7 +130,13 @@ export async function initialiseNotificationControls() {
                 const key = Uint8Array.from(atob(padded), character => character.charCodeAt(0));
                 sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
             }
-            await postJson(`${API}/subscribe`, { subscription: sub.toJSON() });
+            const enrolment = await postJson(`${API}/subscribe`, { subscription: sub.toJSON() });
+            if (enrolment.provider_result === 'expired') {
+                await clearLocalNotifications();
+                await update();
+                status.textContent = 'The push service rejected this subscription. Enable again to request a fresh one; if it repeats, try a current supported browser.';
+                return;
+            }
             await update();
         });
     });

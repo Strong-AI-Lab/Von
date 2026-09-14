@@ -248,6 +248,9 @@ def subscribe(actor, device, organisation, subscription):
         },
         topic=identifier,
     )
+    if outcome == "expired":
+        coll.delete_one({"_id": identifier, "generation": row["generation"]})
+        return {"state": "disabled", "provider_result": outcome}
     coll.update_one({"_id": identifier}, {"$set": {"last_delivery": outcome}})
     return {
         "state": "pending",

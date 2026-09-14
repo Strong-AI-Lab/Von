@@ -119,12 +119,32 @@ def test_challenge_proves_device_and_actor_without_returning_secret(
         "https://fcm.googleapis.com:444/x",
         "https://user:password@fcm.googleapis.com/x",
         "https://fcm.googleapis.com/x#fragment",
+        "https://jmt17.google.com.evil.test/fcm/send/device",
+        "https://other.google.com/fcm/send/device",
+        "https://jmt17.google.com/log",
+        "https://jmt17.google.com/fcm/send/device",
+        "http://jmt17.google.com/fcm/send/device",
     ],
 )
 def test_endpoint_cannot_grant_arbitrary_network_access(subscription, endpoint):
     subscription["endpoint"] = endpoint
     with pytest.raises(ValueError):
         push.validate_subscription(subscription)
+
+
+def test_chromium_webpush_endpoint_is_supported(subscription):
+    subscription["endpoint"] = "https://fcm.googleapis.com/preprod/wp/test-device"
+    assert push.validate_subscription(subscription) == subscription
+
+
+def test_expired_confirmation_retires_subscription_for_fresh_opt_in(
+    store, subscription, monkeypatch
+):
+    db, _ = store
+    monkeypatch.setattr(push, "send", lambda *args, **kwargs: "expired")
+    result = push.subscribe("#V#alice", "device", "#V#sail", subscription)
+    assert result == {"state": "disabled", "provider_result": "expired"}
+    assert db[push.COLLECTION].count_documents({}) == 0
 
 
 def test_endpoint_cannot_be_rebound_to_unrelated_actor_device_or_scope(

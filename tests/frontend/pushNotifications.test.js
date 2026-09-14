@@ -17,7 +17,7 @@ beforeEach(() => {
     window.PushManager = function () {};
     global.caches = { match: jest.fn(async () => null) };
     window.Notification = { permission: 'default', requestPermission: jest.fn(async () => 'default') };
-    const reg = { pushManager: { getSubscription: jest.fn(async () => null), subscribe: jest.fn() } };
+    const reg = { active: { state: 'activated' }, pushManager: { getSubscription: jest.fn(async () => null), subscribe: jest.fn() } };
     Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: {
         register: jest.fn(async () => reg), ready: Promise.resolve(reg), getRegistration: jest.fn(async () => reg)
     } });
@@ -31,6 +31,14 @@ function controls() {
         <button data-push-test></button><button data-push-refresh></button></section>`;
     return require(base + 'pushNotifications.js');
 }
+
+test('Settings outside the worker scope becomes usable without a controlling worker', async () => {
+    navigator.serviceWorker.ready = new Promise(() => {});
+    const module = controls();
+    await module.initialiseNotificationControls(); await flush();
+    expect(document.querySelector('[data-push-status]').textContent).toContain('Notifications are off');
+    expect(document.querySelector('[data-push-enable]').disabled).toBe(false);
+});
 
 test('no permission request on initialisation; a dismissed user gesture leaves notifications off', async () => {
     const module = controls();
@@ -50,6 +58,24 @@ test('denied permission offers browser settings without prompting again', async 
     expect(document.querySelector('[data-push-enable]').disabled).toBe(true);
     expect(document.querySelector('[data-push-status]').textContent).toContain('blocked');
     expect(Notification.requestPermission).not.toHaveBeenCalled();
+});
+
+test('expired confirmation clears the rejected browser subscription and offers fresh opt-in', async () => {
+    Notification.permission = 'granted';
+    Notification.requestPermission.mockResolvedValue('granted');
+    const reg = await navigator.serviceWorker.ready;
+    const sub = { toJSON: () => ({}), unsubscribe: jest.fn(async () => true) };
+    reg.pushManager.getSubscription.mockResolvedValue(sub);
+    reg.getNotifications = jest.fn(async () => []);
+    reg.active.postMessage = jest.fn();
+    require(base + 'apiService.js').postJson.mockResolvedValue({ state: 'disabled', provider_result: 'expired' });
+    const module = controls();
+    await module.initialiseNotificationControls(); await flush();
+    document.querySelector('[data-push-enable]').click();
+    await flush(); await flush();
+    expect(sub.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('[data-push-status]').textContent).toContain('fresh one');
+    expect(document.querySelector('[data-push-enable]').disabled).toBe(false);
 });
 
 test('ordinary iPhone tab directs installation; installed app uses feature detection', () => {
