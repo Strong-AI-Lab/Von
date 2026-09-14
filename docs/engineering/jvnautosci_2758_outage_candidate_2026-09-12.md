@@ -15,13 +15,12 @@ The candidate adds presentation, a small public-only service-worker fallback,
 and an optional operator-bound deployment status publisher. No model calls,
 new workflow, HTTP write endpoint, credentials or database migration are involved.
 
-Merge decision: **not ready**. Component evidence supports the UI and fallback,
-but does not replace the task's authenticated candidate/PWA acceptance or prove
-an independently served production status record. These are blocking because
-an installed client must have a usable fallback and the maintenance record
-must remain available while the actual backend is stopped. The Jira connector
-returned `UNAUTHORIZED / oauth_token_invalid_grant`; the supplied assignment
-was used, without inventing inaccessible comments or conversation context.
+Merge decision: **not ready for release/merge**. Authenticated candidate outage,
+reload and draft recovery now pass (14 September continuation below). The
+remaining dependency is the operator-bound independently served production
+maintenance record and controller publisher configuration. The coding sandbox
+cannot inspect controller configuration or change live ingress. No merge or
+public deployment has occurred.
 
 ## Candidate behaviour
 
@@ -80,39 +79,85 @@ files, and zero HTTP effects. It does **not** exercise full authenticated
 planned-stop publication. Backend lifecycle tests cover publication order,
 verified completion, rollback and failed recovery with a disposable file.
 
-## Bounded operator handoff
+## 14 September reviewed continuation
 
-The README at `/home/mjw/.codex-von-worker/studio-browser/README.md` was read.
-Its listed fixtures belong to other tasks or an immutable release; none is
-bound to this candidate. Do not reuse or stop them.
+Recovered PR #665 and merged `origin/main` at `22acdc223982ae34a72f5e32003a4cf74562342b`
+without conflicts. Real acceptance found and repaired two candidate defects:
 
-1. Prepare a new task-specific localhost AgentTest profile rooted at
-   `/home/mjw/.codex-von-worker/worker-state/worktrees/35c046837b9bd2c7`, using the
-   established operator-prepared authentication route, generation disabled and
-   existing memberships preserved. Bind a new client/supervisor request bridge
-   under this checkout's ignored `.run/` directory. Supply its exact profile,
-   port, verified SHA and restart command. No credentials belong in the checkout.
-2. Confirm an existing independently served static route can map only
-   `/von-status/maintenance.json` to an operator-owned public file while port
-   5000 is stopped. No directory listing or HTTP write route. If there is no
-   such route, this needs a separately scoped infrastructure setup and recovery
-   plan; code deployment alone does not authorise changing Cloudflare ingress.
-3. Bind `public_status_root` and `maintenance_agent` in the operator deployment
-   configuration. Optional `maintenance_public_reason` must be suitable for
-   public display; optional `maintenance_estimate_seconds` must be reasoned from
-   the release plan. Default ETA is absent. Keep these fields outside task text
-   and install the new maintenance module with the coherent deployment bundle.
-4. Provide a disposable independent status route/file in the candidate fixture
-   to test planned-stop publication, external read-back, clearing only after
-   verified readiness and a stale/failed update. Use isolated network faults or
-   the owned fixture stop, never an unnecessary public outage.
-5. Resume authenticated browser acceptance, review and publication after that
-   setup. Preserve the task worktree. The controller must perform any eventual
-   authorised deployment and verify the exact merged `origin/main` SHA plus
-   independently served record and public readiness. No deployment SHA is
-   requested before the blocking evidence is obtained.
+- Healthy runtimes explicitly skipping startup materialisation could not leave
+  the offline shell. Explicit `skipped` now permits recovery, still requiring
+  healthy status and fresh marked app HTML.
+- Selecting an organisation after initial page load left draft recovery bound
+  to the initial scope. Recovery now rebinds after the confirmed switch,
+  removes the previous listener/view and keeps namespace isolation.
 
-A cold first visit with no installed service worker remains subject to the
-proxy/Cloudflare response. A cleared browser cache also removes the fallback.
-No independently served cold-visit app route was found in this repository;
-this residual infrastructure boundary is not hidden behind a success claim.
+Tested product revision: `efa7f0dda6c650e87488abfe093915dcd6c8f021`.
+`pdm run` passed 22 targeted backend tests; Jest passed 17 outage/health tests.
+The production component browser passed three viewports, focus restoration,
+transient and active-thinking non-takeover, offline reload/reopen, recovery,
+public-only caching and zero effects. `git diff --check` passed.
+
+Authenticated Chromium at 390×844 through the operator's independent localhost
+front (5091), backed by exact-candidate AgentTest (5087), verified synthetic
+Alice login and conversation creation, transient health failure without
+takeover, actual controlled backend stop, sustained outage dialog, retained
+open draft, independent status HTTP 200 during outage, reload/reopen fallback,
+device-offline wording and recovery after restart. The fixture creates a new
+signing key on every restart, so recovery correctly reached login; after normal
+synthetic login and organisation selection the original draft was available as
+an explicit recovery copy. Zero generate/send-message requests occurred. Cache
+inspection found exactly the four public fallback assets. Screenshots inspected.
+This is desktop Chromium mobile viewport acceptance, not a physical installed
+phone or public OAuth test.
+
+Evidence is retained under `.run/outage-resume/`: `acceptance-final.json`,
+`acceptance.cjs`, `authenticated-outage.png`, `recovered.png`, and component
+receipts/screenshots. Earlier failed probes are retained to explain the fixes.
+The supplied canonical archive
+`#V#computer_file_copy_45ea7ecc36eb4f76a78ad59e6c44e5ec` was checksum-verified:
+`d0400a6ae476eca9b3f01f90759a35ff4e154685d8ac562a7db4f9ea02225b51`.
+Its controlled planned-stop proof showed attributed ETA HTTP 200 while backend
+returned 503 and cleared ETA only after exact-candidate health 200. That proof
+belongs to revision `2ded69af7`; the publisher is unchanged in this continuation.
+Fresh browser acceptance observed that retained record as stale and displayed
+return time unknown, rather than inventing an estimate.
+
+## Remaining bounded operator handoff
+
+The old authentication/setup blocker is resolved. Do not prepare another login
+fixture or ask Michael to sign in. The fixture proxy launcher encountered a
+read-only host log path; its existing foreground `serve` mode worked without
+changing its bindings. Task-owned servers are stopped after acceptance.
+
+The current remaining dependency is **production independent status binding**:
+
+- A fresh anonymous GET of the public status URL returns HTTP 302 to Cloudflare
+  Access, so the browser's credential-free status fetch cannot consume it.
+- The local production backend status path returns HTTP 404. Local health is
+  healthy, AgentTest false, clean revision
+  `632af9653609da91218e781278b21c8b5c69acc2`.
+- These observations do not prove whether a private ingress/configuration
+  binding exists. Controller credentials/configuration are outside coding scope.
+
+The coordinating operator should inspect the existing ingress and supply or
+prepare a bounded route mapping **only** `/von-status/maintenance.json` to an
+operator-owned public file independently of backend port 5000, with anonymous
+GET access (no Access redirect), no listing or HTTP write route. Bind
+`public_status_root` and `maintenance_agent` in the deployment controller and
+install the maintenance module with the coherent release bundle. ETA remains
+optional and explicitly reasoned; never derive it from the health timeout.
+Keep private application routes behind their existing access boundary.
+If this requires infrastructure changes, use an explicitly scoped operator task
+with a route/configuration rollback; code deployment alone is not that grant.
+
+Return observed route/publisher bindings without credentials, public JSON
+read-back, an independent-origin/readiness proof without an unnecessary public
+outage, and the rollback reference. Then resume PR #665, required CI, merge and
+controller deployment of the current merged main revision. Verify public/static
+revision and readiness, and publication/clearing through the actual release.
+No deployment SHA is requested before this dependency is resolved.
+
+A cold first visit with no installed service worker, a cleared cache, and an
+expired Cloudflare Access session remain explicit infrastructure/session
+boundaries. No public ingress, controller configuration or database was changed
+by this coding run. Canonical task updates belong to the receiving controller.
