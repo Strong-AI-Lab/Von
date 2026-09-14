@@ -1763,6 +1763,9 @@ def create_task(
             "Task-created workflow launch skipped for %s: %s", task_concept_id, e
         )
 
+    from .task_reporting_service import resolve_task_reporting
+
+    result["reporting_resolution"] = resolve_task_reporting(result)
     return result
 
 
@@ -1779,7 +1782,11 @@ def get_task(task_concept_id: str) -> Dict[str, Any]:
         TaskNotFoundError: If task not found
     """
     task_concept_id, doc = _get_task_doc(task_concept_id)
-    return {**_build_task_response(doc), "current_work_product": resolve_task_work_product(doc)}
+    from .task_reporting_service import resolve_task_reporting
+
+    result = {**_build_task_response(doc), "current_work_product": resolve_task_work_product(doc)}
+    result["reporting_resolution"] = resolve_task_reporting(result)
+    return result
 
 
 def find_task_by_agent_creation_fingerprint(
@@ -3406,6 +3413,21 @@ def _actor_scoped_task_query_candidates(
 
 
 def search_tasks(
+    *, query: str | None = None, search_mode: str = "lexical", **filters
+) -> Dict[str, Any]:
+    """Search canonical tasks lexically or by actor-scoped semantic relevance."""
+    if any(key.startswith("_") for key in filters):
+        raise InvalidTaskDataError("Internal search parameters are not accepted")
+    if search_mode == "semantic":
+        from .task_semantic_index_service import search_semantic_tasks
+
+        return search_semantic_tasks(query=query, filters=filters)
+    if search_mode != "lexical":
+        raise InvalidTaskDataError("search_mode must be lexical or semantic")
+    return _search_tasks(query=query, **filters)
+
+
+def _search_tasks(
     *,
     query: str | None = None,
     project_concept_id: str | None = None,
@@ -3443,6 +3465,7 @@ def search_tasks(
     bulk_collection_ids: list[str] | str | None = None,
     limit: int = 50,
     offset: int = 0,
+    _semantic_query: str | None = None,
 ) -> Dict[str, Any]:
     """Search tasks with Jira-style filters over Vontology-backed task concepts."""
 
@@ -3522,6 +3545,11 @@ def search_tasks(
                 query_filter,
                 sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
             )
+        )
+    if _semantic_query is not None:
+        # Do not index placeholder text after a failed canonical text read.
+        query_texts_by_task = get_texts_for_concepts(
+            [doc["concept_id"] for doc in docs]
         )
     tasks = _build_task_responses(docs, texts_by_task=query_texts_by_task)
 
@@ -3859,8 +3887,20 @@ def search_tasks(
         bulk_collection_ids=bulk_collection_ids,
     )
     tasks = visibility_payload["tasks"]
+    semantic_diagnostics = None
+    if _semantic_query is not None:
+        from .task_semantic_index_service import assemble_task_context, rank_tasks
+
+        tasks, semantic_diagnostics = rank_tasks(tasks, _semantic_query)
     total = len(tasks)
     paged = tasks[offset : offset + limit]
+    rag_context = None
+    if semantic_diagnostics is not None:
+        rag_context = assemble_task_context(paged)
+        paged = [
+            {key: value for key, value in task.items() if key != "retrieval_text"}
+            for task in paged
+        ]
     return {
         "tasks": paged,
         "total": total,
@@ -3876,6 +3916,14 @@ def search_tasks(
         "query_candidate_prefilter": query_candidate_prefilter,
         "total_is_exhaustive": bool(
             query_candidate_prefilter.get("total_is_exhaustive", True)
+        ),
+        **(
+            {
+                "semantic_retrieval": semantic_diagnostics,
+                "rag_context": rag_context,
+            }
+            if semantic_diagnostics is not None
+            else {}
         ),
     }
 
@@ -5939,3 +5987,56 @@ __all__ = [
     "bulk_update_tasks",
     "delete_task",
 ]
+
+
+def refresh_coding_supervision_context(
+    repair_task_id: str,
+    *,
+    episode_key: str,
+    blocker: Dict[str, Any],
+    actor_concept_id: str,
+) -> Dict[str, Any]:
+    """Refresh a controller-created repair after the same unresolved blocker recurs.
+
+    Internal canonical service; not exposed as a model-selectable metadata write.
+    The originating agent can update only its own retained episode's observations.
+    Reporting responsibility does not change the creator/delegator or assignment.
+    """
+    repair_task_id, doc = _get_task_doc(repair_task_id)
+    references = (doc.get("metadata") or {}).get(
+        TASK_METADATA_KEY_EXTERNAL_REFERENCES
+    ) or {}
+    parent = references.get("coding_supervision") or {}
+    if (
+        parent.get("source_agent") != actor_concept_id
+        or parent.get("episode_key") != episode_key
+    ):
+        raise InvalidTaskDataError(
+            "Supervisor episode does not belong to this source controller"
+        )
+    source = get_task(parent["source_task_id"])
+    if (
+        source.get("assignee_concept_id") != actor_concept_id
+        or source.get("created_by_concept_id") != parent.get("delegator_id")
+        or source.get("organisation_concept_id") != parent.get("organisation_id")
+        or source.get("status") not in {"blocked", "pending", "in_progress"}
+        or blocker.get("binding") != parent["blocker"].get("binding")
+        or blocker.get("key") != parent["blocker"].get("key")
+        or blocker.get("scope") != parent["blocker"].get("scope")
+    ):
+        raise InvalidTaskDataError("Source authority or blocking episode changed")
+    updated = dict(parent)
+    updated["blocker"] = blocker
+    updated["prior_attempts"] = list(
+        dict.fromkeys([*parent.get("prior_attempts", []), parent["blocker"]["attempt"]])
+    )
+    ConceptsRepository.update_one(
+        {"concept_id": repair_task_id},
+        {
+            "$set": {
+                "metadata.external_references.coding_supervision": updated,
+                "updated_at": _now(),
+            }
+        },
+    )
+    return get_task(repair_task_id)

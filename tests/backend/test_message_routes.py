@@ -634,3 +634,52 @@ def test_personal_window_offers_shared_organisation_recovery(monkeypatch, app_cl
     assert response.status_code == 409
     assert response.get_json()['error_code'] == 'message_organisation_required'
     assert response.get_json()['common_organisation_options'] == options
+
+
+def test_exchange_reference_uses_authenticated_actor(monkeypatch, app_client):
+    from src.backend.services import message_catalogue_service
+
+    _, client = app_client
+    _authorise_test_direct_message(monkeypatch)
+    calls = []
+
+    def materialise(actor, participants, *, organisation):
+        calls.append((actor, participants, organisation))
+        return {"concept_id": "#V#reference_verified"}
+
+    monkeypatch.setattr(
+        message_catalogue_service, "materialise_exchange_reference", materialise
+    )
+    response = client.post(
+        "/api/messages/exchange/reference",
+        json={
+            "actor": "#V#spoofed",
+            "participant_ids": ["#V#user_alice", "#V#user_bob"],
+            "organisation_concept_id": "#V#org_test",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json["concept_id"] == "#V#reference_verified"
+    assert calls == [("#V#user_alice", ["#V#user_alice", "#V#user_bob"], "#V#org_test")]
+    monkeypatch.setattr(message_routes, "_get_current_user_concept_id", lambda: None)
+    assert client.post("/api/messages/exchange/reference", json={}).status_code == 401
+    assert len(calls) == 1
+
+
+def test_exchange_reference_denial_is_not_success(monkeypatch, app_client):
+    from src.backend.services import message_catalogue_service
+
+    _, client = app_client
+    _authorise_test_direct_message(monkeypatch)
+
+    def denied(*args, **kwargs):
+        raise PermissionError("Unavailable")
+
+    monkeypatch.setattr(
+        message_catalogue_service, "materialise_exchange_reference", denied
+    )
+    response = client.post(
+        "/api/messages/exchange/reference", json={"participant_ids": ["#V#user_alice"]}
+    )
+    assert response.status_code == 403
+    assert "concept_id" not in response.json

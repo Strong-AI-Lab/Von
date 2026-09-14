@@ -8,6 +8,7 @@
   <title>Von</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='outage/outage.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/conversation-visuals/katex.min.css') }}">
 
   <!-- Favicon -->
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
@@ -190,13 +191,13 @@
   </div>
 
   <!-- Footer for Model Info -->
-  <div class="footer-container">
+  <div class="footer-container" tabindex="0" role="region" aria-label="Footer information">
     <p id="modelInfoFooter" class="footer-info">
 
     </p>
     <p id="languageIndicator" class="language-indicator">🌐 en-NZ</p>
     <p id="serverUptimeFooter" class="pid-indicator" title="Process uptime">
-      <span class="footer-label">Uptime:</span> <span id="serverUptimeValue" title="Process uptime">-</span>
+      <span id="serverUptimeInfo"><span class="footer-label">Uptime:</span> <span id="serverUptimeValue" title="Process uptime">-</span></span>
       <span id="serverRuntimeCostInfo" class="conversation-runtime-cost-segment server-runtime-cost-segment" hidden>
         <span class="footer-separator">|</span>
         <button id="serverRuntimeCostButton"

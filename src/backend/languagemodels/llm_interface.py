@@ -2231,10 +2231,23 @@ class OpenAIClient(LLMInterface):
                 **responses_params,
             )
             if _should_log_llm_io():
-                logger.debug("OpenAI Responses raw response: %s", response)
+                from ..services.conversation_output_service import without_image_bytes
+                logger.debug("OpenAI Responses raw response: %s", without_image_bytes(
+                    response.model_dump() if hasattr(response, "model_dump") else response))
             provider_observed_model = getattr(response, "model", None)
             effective_model = provider_observed_model or target_model
             content = _extract_openai_responses_text(response)
+            from ..services.conversation_output_service import (
+                openai_visible_parts, retain_parts, VisibleTextProjection,
+            )
+            raw = response.model_dump() if hasattr(response, "model_dump") else response
+            parts = openai_visible_parts(raw) if isinstance(raw, Mapping) else []
+            if any(part.kind != "text" for part in parts):
+                from ..security.access_control import get_effective_user_concept_id
+                retained = retain_parts(parts, actor=get_effective_user_concept_id(), turn_id=None)
+                projection = content or "\n".join(part.get("text") or "Generated image."
+                                                   for part in retained)
+                content = VisibleTextProjection(projection, retained)
             if not content:
                 raise RuntimeError(
                     f"OpenAI {target_model} Responses payload contained no text"
@@ -2394,6 +2407,7 @@ class OpenAIClient(LLMInterface):
                 )
             self.last_response_metadata = {
                 "provider": "openai",
+                "content_parts": list(getattr(content, "content_parts", [])),
                 "api_surface": api_surface,
                 "requested_model": target_model,
                 "effective_model": effective_model,

@@ -15,6 +15,41 @@ from src.backend.services.concept_resolution_service import resolve_concept_by_n
 from src.backend.services.text_value_service import upsert_text_for_concept
 
 
+def test_language_preference_does_not_hide_visible_homonym(monkeypatch):
+    visible = {"#V#sam_a", "#V#sam_b"}
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "_search_text_relations",
+        lambda *a, **kw: visible | {"#V#hidden"},
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "filter_accessible_concept_ids",
+        lambda ids: set(ids) & visible,
+    )
+    monkeypatch.setattr(
+        ConceptsRepository,
+        "find",
+        lambda *a, **kw: [{"concept_id": cid, "relationships": {}} for cid in visible],
+    )
+    monkeypatch.setattr(
+        concept_resolution_service,
+        "get_texts_for_concepts",
+        lambda *a, **kw: {
+            "#V#sam_a": [{"text": "Sam Patel", "lang": "en-NZ"}],
+            "#V#sam_b": [{"text": "Sam Patel", "lang": "en"}],
+        },
+    )
+    result = resolve_concept_by_name(name="Sam Patel", preferred_languages=["en-NZ"])
+    assert result["status"] == "resolved"
+    assert result["resolved_concept_id"] == "#V#sam_a"
+    assert result["alternatives"][0]["concept_id"] == "#V#sam_b"
+    assert result["alternatives"][0]["matched_name"] == "Sam Patel"
+    assert "#V#hidden" not in str(result)
+    assert result["search_coverage"]["exhaustive"] is False
+    assert result["search_coverage"]["hydrated_visible_candidates"] == 2
+
+
 @pytest.fixture(autouse=True)
 def clean_collections():
     db = TextValuesRepository.db()

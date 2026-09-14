@@ -1365,7 +1365,7 @@ body.von-signed-out {
     margin-top: 6px;
 }
 
-/* ============================================================================
+/* =====================================================================
    Task Panel Styles (JVNAUTOSCI-1040)
    ============================================================================ */
 
@@ -5570,8 +5570,8 @@ h1 {
     right: 28px;
     bottom: 190px;
     z-index: 12;
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
     border: none;
     border-radius: 999px;
     display: none;
@@ -6566,7 +6566,7 @@ footer {
     left: 0;
     right: 0;
     min-height: 40px;
-    /* Allow footer to grow if content wraps */
+    /* Keep footer information on one scrollable row. */
     margin-top: 0;
     /* REMOVED: margin-top as it's fixed */
     font-size: 0.8rem;
@@ -6592,7 +6592,7 @@ footer {
     left: 0;
     right: 0;
     min-height: 40px;
-    /* Allow footer to grow if content wraps */
+    /* Keep footer information on one scrollable row. */
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -9034,6 +9034,11 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     margin: 0;
     font-size: 20px;
     line-height: 1.25;
+    overflow-wrap: anywhere;
+}
+
+.chat-reference-inspector-header > div:first-child {
+    min-width: 0;
 }
 
 .chat-reference-inspector-actions {
@@ -9089,6 +9094,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 .chat-reference-statement {
     color: #111827;
     font-size: 16px;
+    overflow-wrap: anywhere;
 }
 
 .chat-reference-notice {
@@ -10561,6 +10567,11 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 }
 
 .chat-session-menu {
+    box-sizing: border-box;
+    width: max-content;
+    max-width: min(320px, calc(100vw - 16px));
+    max-height: calc(100dvh - 16px);
+    overflow-y: auto;
     position: fixed;
     z-index: 20050;
     min-width: 160px;
@@ -10577,6 +10588,9 @@ body[data-active-tab="settingsTab"] .tab-content-area {
 }
 
 .chat-session-menu button {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    min-height: 44px;
     width: 100%;
     text-align: left;
     background: transparent;
@@ -12208,7 +12222,7 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     color: #065f46;
 }
 
-/* =============================================================================
+/* ======================================================================
    JVNAUTOSCI-1043: User editing of AI outputs
    ============================================================================= */
 
@@ -13344,12 +13358,6 @@ button.prompt-vontology-cartouche {
 
 #serverUptimeValue.health-telemetry-copy-error {
     color: #991b1b;
-}
-
-@media (max-width: 760px) {
-    .server-build-info {
-        display: none;
-    }
 }
 
 .footer-separator {
@@ -16303,7 +16311,7 @@ body.settings-body {
     color: #14532d;
 }
 
-/* ===========================
+/* ====================
    MARKDOWN CONTENT STYLING
    ========================== */
 
@@ -18583,3 +18591,214 @@ body.settings-body {
     .unified-message-content .send-message-btn { padding: 0 12px; font-size: 14px; }
     .unified-message-content .message-reply-destination { margin: 0 0 4px; font-size: 12px; }
 }
+
+/* Keep attachment-only sending available and large drafts scrollable. */
+.conversation-attachment-composer {
+    max-height: min(35vh, 240px);
+    overflow: auto;
+    min-width: 0;
+    flex-shrink: 0;
+}
+#messageComposeArea[data-has-attachments="true"] .send-message-btn {
+    display: inline-flex;
+}
+
+.task-deployment {
+    border: 1px solid var(--border-color, #ccc);
+    border-radius: 6px;
+    padding: 10px;
+    margin-block: 10px;
+    overflow-wrap: anywhere;
+}
+.task-deployment pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Shared navigation stays inside the composer so narrow-screen overflow cannot
+   clip it. It occupies its own row, rather than covering transcript text. */
+.chat-composer > .chat-scroll-to-end-btn,
+.message-navigation > .chat-scroll-to-end-btn {
+    position: static; flex: 0 0 44px; margin: 0 0 0 auto;
+    grid-column: 1 / -1; justify-self: end; padding: 0;
+}
+.message-navigation { display: flex; align-items: center; gap: 8px; width: 100%; }
+.message-navigation:not(:has(.visible, .message-jump-unread:not([hidden]))) { display: none; }
+.message-jump-unread, .new-shared-messages-indicator {
+    min-height: 44px; box-sizing: border-box; background: #1d4ed8;
+    color: #fff; border: 0; border-radius: 8px; padding: 8px 12px;
+    font-size: 14px; white-space: normal; cursor: pointer;
+}
+.message-jump-unread[hidden] { display: none; }
+.message-jump-unread:hover, .new-shared-messages-indicator:hover { background: #1e40af; }
+.chat-scroll-to-end-btn:active, .message-jump-unread:active,
+.new-shared-messages-indicator:active { background: #1e3a8a; transform: translateY(1px); }
+.chat-scroll-to-end-btn:focus-visible, .message-jump-unread:focus-visible,
+.new-shared-messages-indicator:focus-visible {
+    outline: 3px solid #1e40af; outline-offset: 3px; box-shadow: 0 0 0 3px white;
+}
+@media (prefers-reduced-motion: reduce) {
+    .chat-scroll-to-end-btn { transition: none; }
+}
+
+.selected-conversation-options {
+    flex: 0 0 auto;
+    min-height: 44px;
+    font-size: 12px;
+    padding: 6px 10px;
+    max-width: 100%;
+    white-space: normal;
+}
+.conversation-workspace[data-tray-collapsed="true"][data-tray-peek="false"] .selected-conversation-options { display: none; }
+.chat-session-menu button:focus-visible,
+.selected-conversation-options:focus-visible,
+.message-conversation-row:focus-visible {
+    outline: 3px solid #1d4ed8;
+    outline-offset: -3px;
+}
+
+/* Footer presentation preferences also apply to the narrow-screen details panel. */
+.footer-container,
+.mobile-footer-details-panel .footer-container {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    overflow-x: auto;
+    white-space: nowrap;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+.footer-container > *,
+.footer-container .footer-segment,
+.footer-container .db-conn-badge { flex: 0 0 auto; }
+.footer-container .footer-info,
+.mobile-footer-details-panel .footer-info,
+.footer-container .pid-indicator {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    white-space: nowrap;
+}
+.footer-container .footer-separator { display: none; }
+.footer-container .footer-info:empty,
+.footer-container .pid-indicator:empty { display: none; }
+.footer-visibility-settings { display: grid; gap: 10px; }
+.footer-visibility-settings label { display: flex; align-items: center; gap: 6px; }
+/* Fixed panels escape the scroll container's clipping boundary. */
+.footer-container .footer-org-menu,
+.footer-container .conversation-runtime-cost-details {
+    position: fixed;
+    left: 12px;
+    right: auto;
+    bottom: var(--von-fixed-footer-clearance, 64px);
+    white-space: normal;
+    max-height: min(420px, 60vh);
+    overflow-y: auto;
+}
+.mobile-footer-details-panel .footer-container .conversation-runtime-cost-details {
+    top: calc(var(--von-fixed-shell-height, 60px) + 72px);
+    bottom: auto;
+}
+html[data-footer-model="false"] .footer-container .conversation-model-controls { display: none; }
+html[data-footer-conversationcost="false"] .footer-container #modelInfoFooter > .conversation-runtime-cost-segment { display: none; }
+html[data-footer-user="false"] .footer-container .footer-user-segment { display: none; }
+html[data-footer-organisation="false"] .footer-container .footer-org-switcher { display: none; }
+html[data-footer-language="false"] .footer-container #languageIndicator { display: none; }
+html[data-footer-database="false"] .footer-container .db-conn-badge { display: none; }
+html[data-footer-uptime="false"] .footer-container #serverUptimeInfo { display: none; }
+html[data-footer-runtimecost="false"] .footer-container #serverRuntimeCostInfo { display: none; }
+html[data-footer-build="false"] .footer-container #serverBuildInfo { display: none; }
+html[data-footer-diagnostics="false"] .footer-container #serverPidFooter { display: none; }
+html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-build="false"] #serverUptimeFooter { display: none; }
+
+.footer-container [hidden] { display: none !important; }
+
+/* Compact status details expand in the row, preserving its scroll behaviour.
+   Keep clipped text available to assistive technology even before expansion. */
+.footer-container .db-conn-badge:not(:hover):not(:focus-within) .footer-quiet-metric,
+.footer-container :is(.conversation-model-controls, .footer-user-segment, .footer-org-switcher):not(:hover):not(:focus-within) > .footer-label-inline {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+.footer-container :is(.conversation-model-controls, .footer-user-segment, .footer-org-switcher):not(:hover):not(:focus-within) .concept-footer-button {
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.footer-container .db-conn-badge:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+}
+
+/* Source-based conversational visuals; original source stays independently usable. */
+.conversation-visual { max-width: 100%; min-width: 0; }
+.conversation-visual.visual-dark { color: #e5e7eb; background: #202e3b; }
+.conversation-visual.visual-dark .visual-source code { color: #e5e7eb; background: #15202c; }
+.conversation-visual.visual-dark .visual-error { color: #e5e7eb; background: #202e3b; }
+.conversation-visual .visual-source code { color: inherit; }
+.conversation-visual .visual-source button { color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 3px; }
+.conversation-visual.visual-display { display: block; margin: 1rem 0; }
+.conversation-visual .visual-output { max-width: 100%; }
+.conversation-visual.diagram .visual-output { display: block; overflow: auto; }
+.conversation-visual.diagram svg { display: block; width: 100%; height: auto; min-width: 480px; }
+.conversation-visual .katex-display { overflow-x: auto; overflow-y: hidden; padding: .3em 0; }
+.conversation-visual .visual-source { font: normal .8rem system-ui, sans-serif; }
+.conversation-visual .visual-source code { white-space: pre-wrap; display: block; overflow-wrap: anywhere; }
+.conversation-visual .visual-source code[hidden] { display: none; }
+.conversation-visual .visual-source button { font: inherit; margin: .15em .3em; }
+.conversation-visual.equation:not(.visual-display) .visual-source { display: inline; }
+.conversation-visual.equation:not(.visual-display) .visual-source > button:last-child { display: none; }
+.conversation-visual.equation:not(.visual-display) .visual-source:focus-within > button:last-child { display: inline; }
+.visual-error { display: block; padding: .5em; border-inline-start: 3px solid #b86615; }
+
+/* Conversation actions retain their owners and handlers inside a tap/Tab disclosure. */
+.conversation-actions { position: relative; flex-shrink: 0; font-size: 0.875rem; }
+.conversation-actions > summary {
+    cursor: pointer; min-height: 44px; padding: 10px; box-sizing: border-box;
+    border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: #334155;
+}
+.conversation-actions-panel {
+    position: absolute; right: 0; top: 100%; z-index: 110;
+    display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+    width: min(300px, calc(100vw - 32px)); max-height: 65dvh; overflow: auto;
+    padding: 10px; box-sizing: border-box; background: #fff; color: #334155;
+    border: 1px solid #cbd5e1; border-radius: 8px; box-shadow: 0 4px 16px #0f172a26;
+}
+.conversation-actions:not([open]) > .conversation-actions-panel { display: none; }
+.conversation-actions-panel button { min-height: 44px; text-align: left; white-space: normal; }
+.conversation-actions summary:focus-visible,
+.conversation-actions-panel button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.chat-conversation-masthead .chat-header-controls { overflow: visible; align-items: flex-start; }
+.message-view-header { min-height: 0; padding-block: 8px; gap: 8px; }
+.message-view-header .conversation-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chat-steering-activity { flex-basis: 100%; min-width: 0; }
+.chat-steering-activity > summary { cursor: pointer; min-height: 44px; padding: 10px; box-sizing: border-box; }
+.chat-steering-activity:not([open]) > .chat-steering-feedback { display: none; }
+.chat-steering-feedback > div { flex-wrap: wrap; }
+.chat-steering-toast {
+    position: fixed; z-index: 120; left: max(8px, env(safe-area-inset-left)); right: max(8px, env(safe-area-inset-right));
+    max-height: 6rem; overflow: auto; overflow-wrap: anywhere; pointer-events: none;
+    padding: 10px 14px; border-radius: 8px; background: #0f172a; color: #fff;
+    box-shadow: 0 2px 8px #0f172a33; font-size: 0.875rem;
+}
+.chat-steering-toast[hidden], .chat-steering-activity[hidden] { display: none; }
+#sendButton[data-submit-mode="steer"] svg path { d: path('M6 19v-6a6 6 0 0 1 6-6h6m-5-5 5 5-5 5'); }
+#sendButton[data-submit-mode="queue"] svg { border-bottom: 2px solid currentColor; }
+.chat-composer[data-steering-attention="true"] .composer-more-icon::after,
+.chat-composer[data-steering-attention="true"] .composer-add-icon::after { content: '•'; }
+#chatSubmitMode { min-height: 44px; max-width: 100%; }
+@media (max-width: 800px), (max-width: 1024px) and (pointer: coarse) {
+    .chat-conversation-masthead { grid-template-columns: minmax(0, 1fr) auto; }
+    .conversation-actions > summary { max-width: 130px; }
+    .message-view-header { flex-direction: row; align-items: center; }
+}
+
+#steerButton[hidden], #queueDraftButton[hidden] { display: none; }
+#chatSubmitModeHelp { display: block; flex-basis: 100%; font-size: 12px; margin: 0; }
+
+.unified-message-content .message-view-header { flex-wrap: nowrap; }

@@ -34,16 +34,6 @@
               aria-label="Concept Q&amp;A controls" aria-live="polite"></section>
           </div>
           <div class="chat-header-controls" role="group" aria-label="Conversation tools">
-            <button id="importExternalConversationBtn" class="chat-export-btn" type="button"
-              title="Import a Codex, Claude Code, Copilot, or Gemini conversation" aria-label="Import conversation"
-              data-keep-title="true">
-              <span class="btn-icon">Import</span>
-            </button>
-            <button id="importAllExternalConversationsBtn" class="chat-export-btn" type="button"
-              title="Find and safely import agent conversations stored on this machine"
-              aria-label="Import conversations from this machine" data-keep-title="true">
-              <span class="btn-icon">Import all</span>
-            </button>
             <input id="importExternalConversationInput" class="visually-hidden" type="file"
               accept=".json,.jsonl,application/json,application/x-ndjson" aria-label="Choose conversation file" />
             <button id="continueImportedConversationBtn" class="chat-export-btn hidden" type="button"
@@ -51,41 +41,46 @@
               aria-label="Continue imported conversation" data-keep-title="true">
               <span class="btn-icon">Continue</span>
             </button>
-            <button id="conversationSituationToggleBtn" class="chat-export-btn chat-situation-toggle" type="button"
-              title="Inspect this conversation's shared situation" aria-label="Inspect conversation situation"
-              aria-expanded="false" aria-controls="conversationSituationPanel" data-keep-title="true">
-              <span class="chat-situation-toggle-label">Situation</span>
-              <span id="conversationSituationBadge" class="chat-situation-badge hidden" aria-hidden="true"></span>
-            </button>
-            <button id="taskPanelToggleBtn" class="chat-export-btn" type="button"
-              title="Open tasks panel" aria-label="Tasks" data-keep-title="true">
-              <span class="btn-icon">📋</span>
-              <span id="taskCountBadge" class="task-count-badge hidden" aria-hidden="true"></span>
-            </button>
-            <button id="inviteConversationBtn" class="chat-export-btn" type="button"
-              title="Invite people to this conversation" aria-label="Invite to conversation" data-keep-title="true">
-              <span class="btn-icon">👥</span>
-            </button>
-            <button id="incomingInvitesBtn" class="chat-export-btn" type="button"
-              title="View incoming conversation invites" aria-label="View conversation invites" data-keep-title="true">
-              <span class="btn-icon">📨</span>
-              <span id="incomingInvitesBadge" class="invite-badge hidden" aria-hidden="true"></span>
-            </button>
-            <button id="exportConversationMarkdownBtn" class="chat-export-btn" type="button"
-              title="Copy conversation transcript as Markdown" aria-label="Export conversation as Markdown"
-              data-keep-title="true">
-              <span class="btn-icon">MD</span>
-            </button>
-            <button id="copyConversationInfoJsonBtn" class="chat-export-btn" type="button"
-              title="Copy conversation info as JSON" aria-label="Copy conversation info as JSON"
-              data-keep-title="true" data-copy-json-role="copy-json" disabled>
-              <span class="btn-icon">ℹ</span>
-            </button>
-            <button id="exportConversationJsonBtn" class="chat-export-btn" type="button"
-              title="Save conversation info as JSON file" aria-label="Save conversation info as JSON"
-              data-keep-title="true">
-              <span class="btn-icon">{}</span>
-            </button>
+            <details class="conversation-actions" id="conversationActions">
+              <summary>Conversation actions</summary>
+              <div class="conversation-actions-panel">
+                <button id="conversationSituationToggleBtn" class="chat-export-btn chat-situation-toggle" type="button"
+                  title="Inspect this conversation's shared situation" aria-label="Shared situation"
+                  aria-expanded="false" aria-controls="conversationSituationPanel" data-keep-title="true">
+                  <span class="chat-situation-toggle-label">Shared situation</span>
+                  <span id="conversationSituationBadge" class="chat-situation-badge hidden" aria-hidden="true"></span>
+                </button>
+                <button id="taskPanelToggleBtn" class="chat-export-btn" type="button"
+                  title="Open tasks panel" aria-label="Conversation tasks" data-keep-title="true">
+                  <span class="btn-icon">Conversation tasks</span>
+                  <span id="taskCountBadge" class="task-count-badge hidden" aria-hidden="true"></span>
+                </button>
+                <button id="inviteConversationBtn" class="chat-export-btn" type="button"
+                  title="Invite people to this conversation" aria-label="Invite people" data-keep-title="true">
+                  <span class="btn-icon">Invite people</span>
+                </button>
+                <button id="incomingInvitesBtn" class="chat-export-btn" type="button"
+                  title="View incoming conversation invites" aria-label="Incoming invitations" data-keep-title="true">
+                  <span class="btn-icon">Incoming invitations</span>
+                  <span id="incomingInvitesBadge" class="invite-badge hidden" aria-hidden="true"></span>
+                </button>
+                <button id="exportConversationMarkdownBtn" class="chat-export-btn" type="button"
+                  title="Copy conversation transcript as Markdown" aria-label="Copy transcript (Markdown)"
+                  data-keep-title="true">
+                  <span class="btn-icon">Copy transcript (Markdown)</span>
+                </button>
+                <button id="copyConversationInfoJsonBtn" class="chat-export-btn" type="button"
+                  title="Copy information (JSON)" aria-label="Copy information (JSON)"
+                  data-keep-title="true" data-copy-json-role="copy-json" disabled>
+                  <span class="btn-icon">Copy information (JSON)</span>
+                </button>
+                <button id="exportConversationJsonBtn" class="chat-export-btn" type="button"
+                  title="Save information (JSON) file" aria-label="Save information (JSON)"
+                  data-keep-title="true">
+                  <span class="btn-icon">Save information (JSON)</span>
+                </button>
+              </div>
+            </details>
           </div>
         </div>
 
@@ -333,7 +328,7 @@
 
   <div id="inviteConversationPopup" class="llm-popup hidden invite-popup" aria-hidden="true">
     <div class="llm-popup-header">
-      <span>Invite to conversation</span>
+      <span>Invite people</span>
       <button id="closeInviteConversation" class="btn-mini" title="Close">✕</button>
     </div>
     <div class="llm-popup-body">
@@ -367,7 +362,7 @@
   </div>
 
   <!-- Task Panel (JVNAUTOSCI-1040) -->
-  <div id="taskPanel" class="llm-popup hidden task-panel" role="dialog" aria-label="Tasks" aria-hidden="true">
+  <div id="taskPanel" class="llm-popup hidden task-panel" role="dialog" aria-label="Conversation tasks" aria-hidden="true">
     <div class="llm-popup-header">
       <span>Tasks</span>
       <div class="task-panel-header-actions">
