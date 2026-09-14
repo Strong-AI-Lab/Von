@@ -16,8 +16,11 @@ async function check() {
   try {
     const response = await fetch('/health', { cache: 'no-store', redirect: 'error', signal: controller.signal });
     const health = response.ok ? await response.json() : null;
+    const seeds = health?.runtime_authority?.startup_seed_materialisations;
+    // Explicitly skipped startup work (including AgentTest) is not a pending
+    // readiness failure. Still require healthy transport and the real app below.
     if (health?.status === 'healthy' && typeof health.start_time === 'string' &&
-        health.runtime_authority?.startup_seed_materialisations?.ready !== false) {
+        (seeds?.ready !== false || seeds?.state === 'skipped')) {
       // Health may be routed independently of app HTML. Do not loop on a proxy
       // error page while health alone is available. This response is never cached.
       const app = await fetch(location.href, { cache: 'no-store', redirect: 'error', signal: controller.signal });

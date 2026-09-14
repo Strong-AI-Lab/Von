@@ -42,7 +42,9 @@ const server = http.createServer((req, res) => {
   if (!available) { res.writeHead(503); res.end('Backend unavailable'); return; }
   if (pathname === '/health') {
     res.setHeader('Content-Type', 'application/json');
-    res.end(JSON.stringify({ status: 'healthy', start_time: 'fixture' })); return;
+    res.end(JSON.stringify({ status: 'healthy', start_time: 'fixture',
+      runtime_authority: { startup_seed_materialisations: { ready: false, state: 'skipped' } }
+    })); return;
   }
   if (pathname === '/von/') { res.setHeader('Content-Type', 'text/html'); res.end(app); return; }
   let file;
