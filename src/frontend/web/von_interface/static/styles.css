@@ -4465,6 +4465,41 @@ button.unified-search-conversation-main {
     }
 }
 
+.message-copy-markdown {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    vertical-align: middle;
+    gap: 5px;
+    min-width: 32px;
+    min-height: 32px;
+    padding: 5px;
+}
+
+.message-copy-markdown svg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    flex-shrink: 0;
+}
+
+.message-copy-label {
+    display: none;
+}
+
+.message-copy-markdown:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+}
+
+/* Touch users cannot hover for the native tooltip. */
+@media (hover: none), (pointer: coarse) {
+    .message-copy-label { display: inline; }
+    .message-copy-markdown { min-width: 44px; min-height: 44px; }
+}
+
 .message-empty-state {
     display: flex;
     flex-direction: column;
