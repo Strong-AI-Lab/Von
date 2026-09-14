@@ -30,7 +30,7 @@ export function createConversationTray(workspace) {
         cleanup.push(() => target.removeEventListener(event, callback));
     };
     const isVertical = () => workspace.dataset.effectiveTabsLayout === 'vertical';
-    const isMobile = () => !isVertical() && !!narrow?.matches;
+    const isMobile = () => !!narrow?.matches;
     const isCollapsed = () => isMobile() ? !!preferences.mobileCollapsed : isVertical() && preferences.collapsed;
     const isMenuOpen = () => !!document.querySelector('.chat-session-menu.open');
     const maxWidth = () => Math.max(220, Math.min(400, (workspace.clientWidth || window.innerWidth) - 420));
@@ -46,16 +46,16 @@ export function createConversationTray(workspace) {
             // Scroll only the list: scrollIntoView could displace the transcript.
             const bounds = tabs.getBoundingClientRect();
             const row = active.getBoundingClientRect();
-            if (row.left < bounds.left) tabs.scrollLeft += row.left - bounds.left;
-            else if (row.right > bounds.right) tabs.scrollLeft += Math.min(row.left - bounds.left, row.right - bounds.right);
+            if (row.top < bounds.top) tabs.scrollTop += row.top - bounds.top;
+            else if (row.bottom > bounds.bottom) tabs.scrollTop += Math.min(row.top - bounds.top, row.bottom - bounds.bottom);
         }
     }
 
     function render() {
         const collapsed = isCollapsed();
         workspace.dataset.trayMobile = String(isMobile());
-        if (!collapsed || !isVertical()) peek = false;
-        const nextPresentation = isMobile() && collapsed ? 'mobile-closed' : !isVertical() ? 'horizontal' : collapsed && !peek ? 'rail' : 'expanded';
+        if (!collapsed || !isVertical() || isMobile()) peek = false;
+        const nextPresentation = isMobile() ? (collapsed ? 'mobile-closed' : 'mobile-open') : !isVertical() ? 'horizontal' : collapsed && !peek ? 'rail' : 'expanded';
         const presentationChanged = presentation !== nextPresentation;
         if (tabs && presentationChanged && presentation) {
             scrollPositions.set(presentation, { top: tabs.scrollTop, left: tabs.scrollLeft });
@@ -104,7 +104,7 @@ export function createConversationTray(workspace) {
     listen(toggle, 'click', () => setCollapsed(!isCollapsed()));
     listen(navigation, 'pointerenter', (event) => {
         clearTimers();
-        if (event.pointerType === 'touch' || !preferences.expandOnHover || !preferences.collapsed || !isVertical()) return;
+        if (isMobile() || event.pointerType === 'touch' || !preferences.expandOnHover || !preferences.collapsed || !isVertical()) return;
         enterTimer = setTimeout(() => { peek = true; render(); }, 200);
     });
     listen(navigation, 'pointerleave', () => {
@@ -114,7 +114,7 @@ export function createConversationTray(workspace) {
     listen(navigation, 'focusin', (event) => {
         clearTimers();
         // Focusing the collapse button itself must not immediately reopen it.
-        if (event.target !== toggle && preferences.collapsed && isVertical()) {
+        if (!isMobile() && event.target !== toggle && preferences.collapsed && isVertical()) {
             peek = true;
             render();
         }
@@ -122,7 +122,15 @@ export function createConversationTray(workspace) {
     listen(navigation, 'focusout', (event) => {
         if (!navigation.contains(event.relatedTarget)) leaveTimer = setTimeout(closePeek, 0);
     });
+    listen(document, 'focusin', (event) => {
+        if (isMobile() && !isCollapsed() && !navigation?.contains(event.target) && !event.target.closest?.('.chat-session-menu')) {
+            setCollapsed(true);
+        }
+    });
     listen(document, 'pointerdown', (event) => {
+        if (isMobile() && !isCollapsed() && !navigation?.contains(event.target) && !event.target.closest?.('.chat-session-menu')) {
+            setCollapsed(true);
+        }
         if (peek && !navigation?.contains(event.target) && !event.target.closest?.('.chat-session-menu')) {
             clearTimers();
             peek = false;
@@ -142,6 +150,10 @@ export function createConversationTray(workspace) {
             }
             toggle?.focus({ preventScroll: true });
         }
+    });
+
+    listen(tabs, 'click', (event) => {
+        if (isMobile() && event.target.closest?.('[role="tab"]')) setCollapsed(true);
     });
 
     // Roving focus follows the actual layout. Enter/Space retain native activation.
@@ -171,7 +183,7 @@ export function createConversationTray(workspace) {
     }
 
     listen(resize, 'pointerdown', (event) => {
-        if (event.button !== 0 || !isVertical()) return;
+        if (event.button !== 0 || !isVertical() || isMobile()) return;
         event.preventDefault();
         drag = { x: event.clientX, width: effectiveWidth(), savedWidth: preferences.width, pointerId: event.pointerId };
         resize.setPointerCapture?.(event.pointerId);
@@ -186,6 +198,7 @@ export function createConversationTray(workspace) {
     listen(resize, 'pointercancel', () => finishDrag(true));
     listen(resize, 'lostpointercapture', () => finishDrag(true));
     listen(resize, 'keydown', (event) => {
+        if (isMobile()) return;
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
         event.preventDefault();
         preferences.width = event.key === 'Home' ? 220 : event.key === 'End' ? maxWidth()
