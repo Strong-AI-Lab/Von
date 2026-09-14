@@ -8191,12 +8191,34 @@ def backfill_chat_history_blob_payloads(
                 continue
 
             try:
-                chat_history_coll.update_one(
-                    {"_id": doc.get("_id")},
-                    {"$set": {"history": updated_history}},
-                )
-                sessions_updated += 1
-                entries_updated += session_candidate_entries
+                # Replace only entries we actually observed. A full-array write
+                # could erase a concurrent append, edit, or deletion.
+                changed = 0
+                for index, (before, after) in enumerate(zip(history, updated_history)):
+                    if before == after:
+                        continue
+                    field = f"history.{index}"
+                    result = chat_history_coll.update_one(
+                        {
+                            "_id": doc.get("_id"),
+                            "user_id": doc.get("user_id"),
+                            "namespace": doc.get("namespace"),
+                            field: before,
+                        },
+                        {"$set": {field: after}},
+                    )
+                    if result.matched_count:
+                        changed += 1
+                    else:
+                        errors.append(
+                            {
+                                "type": "entry_changed_concurrently",
+                                "session_id": doc.get("session_id"),
+                                "history_index": index,
+                            }
+                        )
+                sessions_updated += int(changed > 0)
+                entries_updated += changed
             except Exception as exc:
                 errors.append(
                     {
