@@ -169,9 +169,7 @@ def test_lookup_falls_back_to_exact_text_only_after_fingerprint_miss(
     monkeypatch.setattr(
         service.ConceptsRepository,
         "find",
-        lambda *_args, **_kwargs: [
-            _conversation_doc("#V#legacy_visible_conversation")
-        ],
+        lambda *_args, **_kwargs: [_conversation_doc("#V#legacy_visible_conversation")],
     )
 
     assert (
@@ -335,3 +333,80 @@ def test_focal_conversation_backlinks_are_bounded_and_source_scoped() -> None:
     assert backlinks["source_concept_id"] == "#V#task"
     assert len(backlinks["items"]) == 25
     assert backlinks["more_count"] == 5
+
+
+def test_source_name_is_current_across_concept_retrieval_paths(monkeypatch):
+    from src.backend.services import chat_history_service, concept_service
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.vontology.utils_vontology import (
+        get_concept_display_name_with_names_fallback,
+    )
+
+    doc = _conversation_doc("#V#conversation_named")
+    doc["metadata"] = {"session_id": "named-session"}
+    doc["relationships"][service.PREDICATE_HAS_OWNER] = ["#V#owner"]
+    doc["names"] = [{"name": "Obsolete title", "type": "NL", "language": "en-NZ"}]
+    state = {"title": "Canonical title"}
+    calls = []
+
+    def summaries(pairs, **kwargs):
+        calls.append(pairs)
+        return {("#V#owner", "named-session"): {"session_name": state["title"]}}
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_session_summaries_for_owner_sessions",
+        summaries,
+    )
+    monkeypatch.setattr(service.ConceptsRepository, "find_one", lambda *a, **kw: doc)
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        lambda *a, **kw: [],
+    )
+    monkeypatch.setattr(concept_service, "get_texts_for_concepts", lambda *a, **kw: {})
+    with override_current_actor("#V#owner", None):
+        for title, expected in [
+            ("Canonical title", "Canonical title"),
+            ("Renamed – Māori", "Renamed – Māori"),
+            (" ", "Conversation"),
+        ]:
+            state["title"] = title
+            assert (
+                service.get_conversation_concept(doc["concept_id"])["name"] == expected
+            )
+            assert get_concept_display_name_with_names_fallback(doc) == expected
+            assert concept_service.resolve_concept_display_names(
+                [doc], preferred_language="en-NZ"
+            ) == {doc["concept_id"]: expected}
+    assert all(pairs == [("#V#owner", "named-session")] for pairs in calls)
+    assert doc["names"][0]["name"] == "Obsolete title"  # No source mutation.
+
+
+def test_source_names_require_authenticated_owner_and_batch_reads(monkeypatch):
+    from src.backend.services import chat_history_service
+    from src.backend.security.access_control import override_current_actor
+
+    docs = []
+    for i in range(53):
+        doc = _conversation_doc(f"#V#conversation_{i}")
+        doc["metadata"] = {"session_id": str(i)}
+        doc["relationships"][service.PREDICATE_HAS_OWNER] = ["#V#owner"]
+        docs.append(doc)
+    calls = []
+
+    def summaries(pairs, **kwargs):
+        calls.append(pairs)
+        return {pair: {"session_name": "Title " + pair[1]} for pair in pairs}
+
+    monkeypatch.setattr(
+        chat_history_service,
+        "get_chat_history_session_summaries_for_owner_sessions",
+        summaries,
+    )
+    for actor in (None, "#V#other"):
+        with override_current_actor(actor, None):
+            assert service.resolve_conversation_names(docs) == {}
+    assert calls == []
+    with override_current_actor("#V#owner", None):
+        assert len(service.resolve_conversation_names(docs)) == 53
+    assert [len(pairs) for pairs in calls] == [50, 3]

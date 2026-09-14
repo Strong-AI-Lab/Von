@@ -19932,6 +19932,16 @@ def conversation_reference_route():
         if not result.get("success"):
             return jsonify({"error": "Conversation or turn unavailable"}), 404
         if data.get("metadata_only") is True:
+            from ...services.conversation_management_service import (
+                apply_conversation_preferences,
+            )
+
+            canonical_name = result.get("session_name")
+            result = apply_conversation_preferences(
+                actor_user_id=actor, conversations=[result]
+            )[0]
+            result["canonical_session_name"] = canonical_name
+            result.setdefault("session_name_source", "chat_history")
             result = {
                 key: result.get(key)
                 for key in (
@@ -19939,6 +19949,8 @@ def conversation_reference_route():
                     "concept_reference",
                     "session_id",
                     "session_name",
+                    "canonical_session_name",
+                    "session_name_source",
                     "turn_id",
                     "open_action",
                 )

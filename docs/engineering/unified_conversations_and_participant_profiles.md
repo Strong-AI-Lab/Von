@@ -181,6 +181,21 @@ retain the source locator; messages remain canonical message concepts. Reference
 are stable per actor/exchange, not shared ownership or an access grant. Repeated
 copies recheck source access. No existing message migration is required.
 
+## Conversation names through concept references
+
+Chat history remains canonical for ordinary conversation titles. Conversation
+concept name retrieval projects the current title for the authenticated owner,
+using bounded batches of exact owner/session metadata reads. Renames therefore
+appear without copying names into Vontology or changing concept visibility.
+Unnamed sources use “Conversation”. Shared participants continue to dereference
+through the existing source access and accepted-invitation checks.
+
+The browser's compact-reference metadata applies the same per-viewer name
+preference as the conversation list. It returns `canonical_session_name`
+separately and identifies `session_name_source`, so a private display preference
+is not presented as a change to the source title. Full transcript retrieval
+continues to return the canonical source title.
+
 ## Title, participant and topic search
 
 The Conversations search field now combines loaded title/participant matches
