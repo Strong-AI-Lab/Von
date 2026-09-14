@@ -14,7 +14,7 @@ import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_NARROW_
 import { createVoiceConversation } from './voiceConversation.js';
 import { getClientContext } from './clientContext.js';
 import { createDictationController } from './dictation.js';
-import { initialiseImagePicker, renderImageAttachments, renderImageComposer, uploadConversationImage, imagesBlocked, imageItems, takeImages, restoreImages, descriptorsForIds } from "./utils/conversationImages.js";
+import { isConversationImageFile, initialiseImagePicker, renderImageAttachments, renderImageComposer, uploadConversationImage, imagesBlocked, imageItems, takeImages, restoreImages, descriptorsForIds } from "./utils/conversationImages.js";
 // Chat Tab Module
 import { annotateTurn, fetchWithTimeout, getJsonDetailed, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import {
@@ -21573,7 +21573,7 @@ function refreshConversationImages() {
 
 function syncConversationAttachmentWorkflowBinding(sessionId) {
     const key = getPendingFileCopySessionKey(sessionId);
-    const last = imageItems(sessionId).filter(item => item.descriptor && !item.type.startsWith('image/')).at(-1);
+    const last = imageItems(sessionId).filter(item => item.descriptor && !isConversationImageFile(item)).at(-1);
     if (last) {
         pendingFileCopyConceptIdsBySession.set(key, last.descriptor.concept_id);
         pendingFileCopyDisplayNamesBySession.set(key, last.name);
@@ -21939,7 +21939,7 @@ async function performUploadFilesToVon(list, uploadState) {
         });
         if (uploaded) {
             successCount += 1;
-            if (!file.type.startsWith('image/')) {
+            if (!isConversationImageFile(file)) {
                 const item = imageItems(uploadTargetSessionId).findLast(item => item.name === file.name && item.descriptor);
                 if (item) rememberPendingUploadedFileCopyConceptId(item.descriptor.concept_id, uploadTargetSessionId, file.name);
             }

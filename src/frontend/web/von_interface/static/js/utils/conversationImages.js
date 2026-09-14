@@ -67,7 +67,7 @@ export function renderImageComposer(parent, sessionId, changed) {
     parent.replaceChildren();
     for (const item of imageItems(sessionId)) {
         const card = document.createElement('div');
-        card.style.cssText = 'display:inline-flex;flex-direction:column;gap:4px;margin:6px;max-width:180px;min-width:0;overflow-wrap:anywhere';
+        card.className = 'conversation-image-draft';
         if (item.descriptor) {
             renderImageAttachments(card, [item.descriptor]);
             card.querySelectorAll('img').forEach(img => { img.style.maxHeight = '100px'; });
@@ -96,12 +96,16 @@ export function renderImageComposer(parent, sessionId, changed) {
         const remove = document.createElement('button');
         remove.type = 'button'; remove.textContent = 'Remove'; remove.setAttribute('aria-label', `Remove ${item.name}`);
         remove.onclick = () => {
+            item.controller?.abort();
             pending.set(sessionId, imageItems(sessionId).filter(x => x !== item));
             releasePreview(item);
             changed();
         };
         card.appendChild(remove); parent.appendChild(card);
     }
+}
+export function isConversationImageFile(file) {
+    return file.type?.startsWith('image/') || /\.(png|jpe?g|webp|heic|heif|gif|bmp|tiff?|svg)$/i.test(file.name || '');
 }
 export async function uploadConversationImage(file, sessionId, headers, changed) {
     const item = {
@@ -119,15 +123,23 @@ function releasePreview(item) {
 async function uploadItem(item, file, sessionId, headers, changed) {
     if (item.uploading || !imageItems(sessionId).includes(item)) return false;
     item.uploading = true;
+    item.controller = new AbortController();
     item.error = null;
     changed();
     try {
         if (imageItems(sessionId).length > 8) throw new Error('At most eight attachments per message. Remove an attachment before sending.');
+        const isImage = isConversationImageFile(file);
+        if (isImage) {
+            if (!file.size || file.size > 8 * 1024 * 1024) throw new Error('Images must be nonempty and at most 8 MiB.');
+            if (file.type && !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+                throw new Error('Use a still PNG, JPEG or WebP image. Convert HEIC or other formats before attaching.');
+            }
+        }
         const form = new FormData(); form.append('file', file, file.name || 'image.png');
         form.append('conversation_attachment', '1');
-        const endpoint = file.type.startsWith('image/') ? '/von/api/images/upload' : '/von/api/files/upload';
-        const response = await fetch(endpoint, {method:'POST', headers, body:form});
-        const result = await response.json();
+        const endpoint = isImage ? '/von/api/images/upload' : '/von/api/files/upload';
+        const response = await fetch(endpoint, {method:'POST', headers, body:form, signal:item.controller.signal});
+        const result = await response.json().catch(() => ({}));
         const descriptor = result.image_attachment || (result.uploaded?.concept_id ? {...result.uploaded, filename: file.name, content_type: file.type || 'application/octet-stream', size_bytes: file.size} : null);
         if (!response.ok || !descriptor) throw new Error(result.message || result.error || 'Attachment upload failed');
         // Removing an in-flight upload must not restore it when the response arrives.
