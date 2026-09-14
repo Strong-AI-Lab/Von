@@ -49,6 +49,57 @@ class ConversationConceptError(Exception):
     pass
 
 
+def resolve_conversation_names(concepts: Iterable[Dict[str, Any]]) -> Dict[str, str]:
+    """Project current source titles for the authenticated owner's concepts.
+
+    Titles remain in chat history. Exact owner/session pairs are read in batches;
+    a concept ID or a stored owner identifier alone never authorises the read.
+    Shared participants use the existing source-reference/invitation route.
+    """
+    candidates = [doc for doc in concepts if _is_visible_conversation_document(doc)]
+    if not candidates:
+        return {}
+    from ..security.access_control import get_effective_user_concept_id
+    from .chat_history_service import (
+        get_chat_history_session_summaries_for_owner_sessions,
+    )
+
+    actor = get_effective_user_concept_id()
+    if not actor:
+        return {}
+    pairs_by_id = {}
+    for doc in candidates:
+        owners = doc.get("relationships", {}).get(PREDICATE_HAS_OWNER, [])
+        owners = [owners] if isinstance(owners, str) else owners
+        session_id = (doc.get("metadata") or {}).get("session_id")
+        if owners == [actor] and isinstance(session_id, str) and session_id.strip():
+            pairs_by_id[doc["concept_id"]] = (actor, session_id.strip())
+    pairs = list(dict.fromkeys(pairs_by_id.values()))
+    summaries = {}
+    try:
+        for offset in range(0, len(pairs), 50):
+            summaries.update(
+                get_chat_history_session_summaries_for_owner_sessions(
+                    pairs[offset : offset + 50], limit=50
+                )
+            )
+    except Exception:
+        logger.warning(
+            "Conversation source names temporarily unavailable", exc_info=True
+        )
+    result = {}
+    for concept_id, pair in pairs_by_id.items():
+        summary = summaries.get(pair)
+        if isinstance(summary, dict):
+            title = summary.get("session_name")
+            result[concept_id] = (
+                title.strip()
+                if isinstance(title, str) and title.strip()
+                else "Conversation"
+            )
+    return result
+
+
 def _generate_conversation_concept_id(session_id: str) -> str:
     """Generate a concept_id for a conversation based on session_id.
 
@@ -685,6 +736,8 @@ def _build_conversation_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     owner = (relationships.get(PREDICATE_HAS_OWNER) or [None])[0]
     participants = relationships.get(PREDICATE_HAS_PARTICIPANT, [])
     organisation = (relationships.get(PREDICATE_HAS_ORGANISATION) or [None])[0]
+
+    name = resolve_conversation_names([doc]).get(conversation_concept_id, name)
 
     return {
         "conversation_concept_id": conversation_concept_id,

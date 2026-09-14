@@ -227,3 +227,50 @@ def test_source_change_between_anchor_and_page_is_retryable(source, monkeypatch)
     result = read(build_turn_reference(PARENT, "a-stored"))
     assert result["success"] is False
     assert result["error_code"] == "conversation_turn_changed"
+
+
+def test_named_reference_metadata_matches_viewer_state_and_preserves_source(
+    monkeypatch, source
+):
+    from src.backend.services import conversation_management_service as management
+
+    monkeypatch.setattr(
+        von_routes,
+        "get_effective_context",
+        lambda *a: {"namespace": "#V#alice@org", "organisation_id": "#V#org"},
+    )
+    preference = {"session_name_override": "My conversation name"}
+    monkeypatch.setattr(
+        management,
+        "get_conversation_preferences",
+        lambda **kw: {"source-session": preference},
+    )
+    app = Flask(__name__)
+    app.secret_key = "fixture-only"
+    app.register_blueprint(von_routes.von_bp, url_prefix="/von")
+    with app.test_client() as client:
+        with client.session_transaction() as session:
+            session["user_concept_id"] = "#V#alice"
+
+        def metadata():
+            response = client.post(
+                "/von/api/session/conversation_reference",
+                json={"conversation_ref": PARENT, "metadata_only": True},
+            )
+            assert response.status_code == 200
+            return response.json
+
+        result = metadata()
+        assert result["session_name"] == "My conversation name"
+        assert result["canonical_session_name"] == "Original title"
+        assert result["session_name_source"] == "actor_preference"
+        assert "messages" not in result
+        preference.clear()
+        source["title"] = "Renamed canonical title"
+        result = metadata()
+        assert (
+            result["session_name"]
+            == result["canonical_session_name"]
+            == "Renamed canonical title"
+        )
+        assert result["session_name_source"] == "chat_history"

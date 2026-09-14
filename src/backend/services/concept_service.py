@@ -1982,9 +1982,15 @@ def resolve_concept_display_names(
             return 1
         return 2 if candidate else 3
 
+    from .conversation_concept_service import resolve_conversation_names
+
+    conversation_names = resolve_conversation_names(docs_by_id.values())
     type_rank = {"NL": 0, "ABBR": 1}
     resolved: Dict[str, str] = {}
     for concept_id, concept_doc in docs_by_id.items():
+        if concept_id in conversation_names:
+            resolved[concept_id] = conversation_names[concept_id]
+            continue
         candidates: list[tuple[tuple[int, int, str, str], str]] = []
         for row in rows_by_concept.get(concept_id, []):
             if not isinstance(row, dict):
