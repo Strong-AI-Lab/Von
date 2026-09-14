@@ -191,6 +191,27 @@ def task_execution_enqueue_submission_id_for_launch(
     return f"task-launch:{execution_id.removeprefix('#V#task_execution_')}"
 
 
+def independent_task_session_id(
+    *, task_concept_id: str, creator_concept_id: str, organisation_concept_id: str
+) -> str:
+    """A task-owned carrier, stable across retries and distinct across actors.
+
+    The source conversation remains provenance. This carrier gives background
+    work its own history, situation revisions and conversation admission fence.
+    It is never selected by a model-supplied destination session identifier.
+    """
+    material = json.dumps(
+        [
+            "von-independent-task-session.v1",
+            _concept_id(task_concept_id, field="task_concept_id"),
+            _concept_id(creator_concept_id, field="creator_concept_id"),
+            _concept_id(organisation_concept_id, field="organisation_concept_id"),
+        ],
+        separators=(",", ":"),
+    )
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, material))
+
+
 def _metadata(doc: Mapping[str, Any]) -> dict[str, Any]:
     raw = doc.get("metadata")
     return dict(raw) if isinstance(raw, Mapping) else {}
@@ -652,6 +673,25 @@ def reconcile_task_execution_queue_record(
                 "task_execution_queue_link_mismatch",
                 f"The queue execution envelope {field} does not match its launch",
             )
+    source_session_id = session_id
+    execution_context = workflow_inputs.get("task_execution_context", "originating")
+    if execution_context not in ("originating", "independent"):
+        raise InvalidTaskExecutionData("Unknown task execution context")
+    if execution_context == "independent":
+        source_session_id = _required_text(
+            workflow_inputs.get("source_conversation_session_id"),
+            field="workflow_inputs.source_conversation_session_id",
+        )
+        expected_session_id = independent_task_session_id(
+            task_concept_id=task_id,
+            creator_concept_id=actor_id,
+            organisation_concept_id=org_id,
+        )
+        if session_id != expected_session_id or session_id == source_session_id:
+            raise TaskExecutionAccessError(
+                "task_execution_conversation_mismatch",
+                "Independent execution must use its own server-derived session",
+            )
     expected_execution_id = task_execution_concept_id_for_launch(
         task_concept_id=task_id,
         creator_concept_id=actor_id,
@@ -728,7 +768,7 @@ def reconcile_task_execution_queue_record(
             organisation_concept_id=org_id,
             namespace=namespace,
         )
-        if current_values["conversation_session_id"] != session_id:
+        if current_values["conversation_session_id"] != source_session_id:
             raise TaskExecutionAccessError(
                 "task_execution_conversation_mismatch",
                 "The task conversation changed before execution",
@@ -922,6 +962,7 @@ __all__ = [
     "bind_task_execution_queue_record",
     "create_task_execution",
     "get_task_execution",
+    "independent_task_session_id",
     "mark_task_execution_dispatch_failed",
     "reconcile_task_execution_queue_record",
     "task_execution_concept_id_for_launch",

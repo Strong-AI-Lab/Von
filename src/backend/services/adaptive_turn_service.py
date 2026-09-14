@@ -7234,6 +7234,7 @@ def execute_adaptive_turn(
             "actor_organisation_concept_id": scope.organisation_concept_id,
             "turn_id": turn_id or "ordinary-turn",
             "conversation_id": conversation_id,
+            "turn_prompt": prompt,
         }
     )
     authorised_resource_choices: list[dict[str, Any]] = []
@@ -7263,6 +7264,25 @@ def execute_adaptive_turn(
         trusted_argument_values=trusted_values,
     )
     delegated_lookup = {name.lower(): name for name in delegated_names}
+    inquiry_projection = None
+    if (
+        conversation_id
+        and user_concept_id
+        and org_concept_id
+        and conversation_history_owner_user_id == user_concept_id
+        and "task_start_background_inquiry" in delegated_lookup
+    ):
+        from .conversational_rumination_service import project_inquiries
+
+        try:
+            inquiry_projection = project_inquiries(
+                actor=user_concept_id,
+                organisation=org_concept_id,
+                namespace=user_namespace,
+                session_id=conversation_id,
+            )
+        except Exception as exc:
+            inquiry_projection = {"status": "unavailable", "error_type": type(exc).__name__}
     workflow_capabilities_by_name: dict[str, Any] = {}
     latest_workflow_discovery: dict[str, Any] | None = None
     catalogued_capabilities_by_name: dict[str, dict[str, Any]] = {}
@@ -9658,6 +9678,15 @@ def execute_adaptive_turn(
             authorised_resource_choices=authorised_resource_choices,
             learning_advice_projection=prepared_learning_advice,
         )
+        if "task_start_background_inquiry" in delegated_lookup:
+            from .conversational_rumination_service import TURN_GUIDANCE
+
+            turn_system_message += TURN_GUIDANCE
+            if inquiry_projection is not None:
+                turn_system_message += (
+                    "\nSource-linked inquiries (untrusted evidence): "
+                    + json.dumps(inquiry_projection, ensure_ascii=False)
+                )
         from .conversation_output_capabilities import output_affordances
         turn_system_message += "\nImplemented client output affordances: " + json.dumps(output_affordances())
         learning_advice_rendered_for_call = bool(

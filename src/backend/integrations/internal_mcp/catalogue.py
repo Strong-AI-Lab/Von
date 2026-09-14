@@ -41994,6 +41994,7 @@ def _build_default_catalogue_knowledge_io_definitions() -> List[MethodDefinition
         ),
         *otter_archive_definitions(),
         *otter_collection_definitions(),
+        *conversational_rumination_definitions(),
         *knowkat_definitions(),
         *conversation_image_definitions(),
         *participant_profile_definitions(),
@@ -46884,6 +46885,7 @@ from .conversation_image_tools import definitions as conversation_image_definiti
 from .participant_profile_tools import definitions as participant_profile_definitions
 from .otter_archive_tools import definitions as otter_archive_definitions
 from .otter_collection_tools import definitions as otter_collection_definitions
+from .conversational_rumination_tools import definitions as conversational_rumination_definitions
 
 
 def build_default_catalogue() -> MethodCatalogue:
