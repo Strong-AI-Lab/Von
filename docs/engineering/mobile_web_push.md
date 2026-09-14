@@ -1,7 +1,7 @@
 # Mobile Web Push — JVNAUTOSCI-2757
 
 - **Kind:** Bounded implementation and operator handoff
-- **Lifecycle:** Candidate; not accepted or deployed
+- **Lifecycle:** Local browser acceptance complete; public activation is controller-owned
 - **Owner:** Von maintainers, for Michael Witbrock
 - **Scope:** Direct-message notification opt-in for one actor/organisation context
   per app installation; multiple devices enrol independently
@@ -96,75 +96,88 @@ display. Before rotating either key, disable enrolments through the service and
 require fresh opt-in; replacing the encryption key alone makes old subscriptions
 unreadable. The controller's code rollback is not key/configuration rollback.
 
-## Evidence and remaining operator work
+## Accepted local path and activation handoff
 
-The candidate has targeted backend tests for challenge binding, foreign
-actor/device/scope denial, canonical coding reports with suppressed workflow
-launch, delayed insertion, duplicate/retry/crash handling, opt-out, expiry,
-membership removal, logout and access-checked navigation. Frontend tests exercise
-the actual worker handler and Settings module. Synthetic worker events in unit
-tests do not establish a real push or OS notification display.
+On 14 September 2026, the clean candidate
+`70fc2819b67975cdc426eda47519106470ffd5ae` passed actual local browser delivery:
 
-The disposable transport fixture is reproducible with:
+- Synthetic Alice and Bob logged in through the normal localhost Browser test
+  login. Both task-owned profiles reported the exact candidate in `/health`.
+- Settings → Conversations → Enable performed a real PushManager subscription,
+  encrypted provider send and device-bound confirmation. The Settings iframe is
+  outside `/von/`; the client now awaits the registered worker's activation
+  rather than waiting indefinitely for that iframe to be controlled.
+- A canonical message from Bob to Alice produced one generic notification while
+  Alice's Von tab was closed and her browser remained running. The private
+  message body did not appear in the alert. Bob received HTTP 404 attempting to
+  open Alice's opaque notification receipt.
+- A screenshot of the task-owned desktop showed the actual alert. A real X11
+  mouse click opened its canonical URL and the accessible message exchange.
+  Device Disable returned `disabled`, removed the PushManager subscription and
+  left no notifications. Owned subscriptions were also cleaned up in the
+  runner's finalisation path.
 
-```sh
-pdm run python tests/browser/webPushFixture.py
-PLAYWRIGHT_BROWSERS_PATH=/tmp/von-playwright node tests/browser/webPushSmoke.cjs
-```
+Environment: headed persistent Chromium 153.0.8010.12 on Linux ARM64, ordinary
+browser tab, automation-granted notification permission, localhost secure
+context. An isolated Dunst 1.9.2 notification daemon and private D-Bus supplied
+native display/click on task display `:98`; both child processes stopped when
+acceptance ended. The default session bus could not query host AppArmor policy
+from this sandbox. The private test bus used its own same-user Unix socket and
+configuration; no host policy, system service or unrelated desktop was changed.
+This is **not** an installed-app, Android-phone, iPhone or public-HTTPS result.
 
-It uses generated in-memory keys, an in-memory database, synthetic authenticated
-actors and the candidate's actual API, Settings section and service-worker file.
-It does not read live configuration or call a model. Stop the fixture after use.
-For a prepared isolated display the runner accepts `VON_PUSH_HEADED=1`.
+The browser's `PushMessagingGcmEndpointWebpushPath` feature selected its actual
+FCM `https://fcm.googleapis.com/preprod/wp/` transport. The unbranded browser's
+older `jmt17.google.com/fcm/send/` endpoint rejected its subscription as expired.
+The application provider allowlist remains unchanged: no Google-wide or staging
+host exception was shipped. A permanent rejection of a confirmation now retires
+its server record and clears the rejected browser subscription, offering fresh
+opt-in instead of a misleading indefinite pending state.
 
-On 12 September 2026, Chromium 153.0.8010.12, Linux ARM64, an ordinary headless
-390×844 tab registered the real worker and rendered the denied state correctly.
-`Notification.permission` was `denied` while the injected Permissions API state
-was `granted`; the real `PushManager.subscribe` call returned
-`AbortError: Registration failed - permission denied`. No subscription, provider
-send, installed app, background/closed-app alert, or device display was verified.
-Evidence is retained in `.run/web-push-smoke/receipt.json` and `controls.png` in the
-task worktree. The first fixture reported Git HEAD at request time rather than
-capturing loaded-source provenance at startup; its receipt is diagnostic evidence
-only, not acceptance bound to the final commit. The harness now captures startup
-provenance. An isolated headed attempt failed because the retained Xvfb binary
-crashed starting display `:97`; no other task's display/profiles were repurposed.
+The earlier diagnostic HTTP 403 came from importing unversioned `apiService.js`
+into a document already using the release-scoped module graph. That second
+coordinator created a new, unbound window selector. The actual Settings request
+succeeded with its actor-bound selector; strict window validation was preserved.
+Browser harnesses should use the page's actual module graph or its current
+window header, not load a parallel copy of the coordinator.
 
-**Merge decision: not ready.** The task requires an actual supported push path;
-the available browser transport has not provided one. Unit tests and registration
-do not satisfy that criterion. Source publication must preserve this boundary.
+Evidence is retained in the task worktree's `.run/push-resume/acceptance.json`,
+`desktop-alert.png`, `click.png` and `accept.cjs`. The screenshot and canonical
+message IDs are bound in the receipt. The source repair handoff was independently
+checksum-verified as `#V#computer_file_copy_47a3732ac0294834ac602067ab67e644`, SHA256
+`6a114a6798762d391cef8af2ff29508f62fa73f4b9b09f7f543970256a0e05da`.
+Its earlier login/subscription preparation did not itself establish display.
 
-Bounded operator preparation needed under the existing task authority:
+Validation: 80 targeted backend notification/message/window-isolation tests
+passed after incorporating current main. The final expired-confirmation change
+passed all 29 notification backend cases; all 12 notification frontend cases,
+affected static lint and diff checks passed. These cover permission dismissal
+and denial, canonical coding reports with workflow launches suppressed, stale
+subscriptions, expiry, duplicate/retry/crash bounds, actor/device/scope denial,
+queued delivery after logout, and access-checked navigation. Synthetic unit
+Push events are not counted as real display evidence.
 
-1. Prepare a dedicated notification browser bridge bound to this task worktree
-   and its current candidate SHA, with separate synthetic Alice/Bob sessions and
-   an isolated disposable database. Use
-   `/home/mjw/.codex-von-worker/studio-browser/README.md`; the listed retained
-   profiles belong to other tasks. Place bridge requests/receipts under this
-   worktree's `.run/notification-browser/`; allocate unused localhost ports and
-   verify roots, SHA and actor scopes through health/auth read-back.
-   First stop the task-owned `tests/browser/webPushFixture.py` process listening
-   on 127.0.0.1:5077 after verifying its command and checkout root. The worker's
-   command session ended but the listener remained outside its visible PID
-   namespace; no unrelated process or port was killed.
-2. Supply an isolated working headed display and a browser/profile supporting
-   actual Web Push. Keep test VAPID/encryption keys outside the coding checkout;
-   permit its normal provider transport. Browser fixture login must preserve
-   real memberships and must not enrol real users for synthetic tests.
-3. Demonstrate the normal authenticated opt-in/challenge, a canonically created
-   recipient message and actual background notification, click, test and disable.
-   Recheck unrelated-account denial and queued delivery after logout. Record OS,
-   browser, installed/tab state and real provider method. Android and iOS physical
-   evidence remains unavailable here; distinguish available-platform acceptance
-   from those phone results.
-4. Repair Jira connector authentication or have the coordinating operator update
-   the engineering decision surface; the worker's read returned an invalid-grant
-   reauthentication error. Do not mark the task delivered during this handoff.
-5. Once acceptance supports merge, complete CI/merge, verify `origin/main`, then
-   request the exact merged SHA through the controller. Verify protected runtime
-   configuration, actual sender activation, HTTPS manifest/service-worker paths,
-   public served revision and the installed-app path. No deployment was performed
-   or requested by this unfinished candidate.
+The supported local delivery path now satisfies the bounded source merge gate.
+Physical Android/iOS verification remains unavailable. The existing offline and
+expired-session limitations above remain; no broader delivery guarantee is made.
+Public activation still requires the controller to:
+
+1. Deploy the exact merged `origin/main` revision through its authorised release
+   route, keeping the prior release as code rollback.
+2. Verify the protected VAPID/encryption configuration described above, the
+   locked dependency environment and actual sender activation. Test keys exist
+   only in the isolated fixture; their availability says nothing about public
+   runtime configuration. Code rollback does not provision or rotate keys.
+3. Read back the public served revision and HTTPS manifest/worker paths, then
+   verify authenticated notification configuration and an installed-app delivery
+   on the target device. Keep that evidence separate from localhost acceptance.
+4. Reconcile the engineering issue through the coordinating operator: the Jira
+   connector still returned `oauth_token_invalid_grant` during this continuation.
+
+The coding run requests deployment through its structured result only. It does
+not mutate the live service or send canonical task/completion messages; the
+controller owns those effects. Shared service-worker/manifest changes in
+JVNAUTOSCI-2758 still need to preserve this notification path.
 
 ## Platform sources checked
 
@@ -177,3 +190,7 @@ Bounded operator preparation needed under the existing task authority:
 - [MDN Push API](https://developer.mozilla.org/en-US/docs/Web/API/Push_API)
   and [pywebpush's implementation](https://github.com/web-push-libs/pywebpush)
   describe browser subscriptions and encrypted provider transport.
+
+- [Chromium push endpoint selection](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/components/push_messaging/push_messaging_utils.cc)
+  and [endpoint constants](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/components/push_messaging/push_messaging_constants.cc)
+  identify the newer Web Push and legacy staging routes checked during recovery.
