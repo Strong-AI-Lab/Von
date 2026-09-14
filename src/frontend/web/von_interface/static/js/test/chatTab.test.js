@@ -11363,6 +11363,65 @@ describe('chat message layout hooks', () => {
     });
 });
 
+describe('turn reference context menu', () => {
+    const flushMicrotasks = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+    test('copies stored sources and preserves keyboard and native interactions', async () => {
+        const { postJson } = require('../apiService.js');
+        const reference = '#V#conversation_fixture_turn_612d73746f726564';
+        postJson.mockResolvedValue({ success: true, concept_reference: reference });
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+        const previousMenu = document.querySelector('.chat-session-menu');
+        document.body.innerHTML = '<div id="scrollableField"></div>';
+        if (previousMenu) document.body.appendChild(previousMenu);
+        __testOnly_setActiveChatSession('source-session', 'Source');
+        for (const [sender, turnId] of [['User', 'u-stored'], ['Von', 'a-stored']]) {
+            __testOnly_appendMessage(sender, 'Saved text', turnId, false, true);
+            const turn = document.querySelector(`[data-turn-id="${turnId}"]`);
+            const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 40 });
+            turn.querySelector('.chat-message-text').dispatchEvent(event);
+            expect(event.defaultPrevented).toBe(true);
+            const item = document.querySelector('.chat-session-menu [role="menuitem"]');
+            expect(item.textContent).toBe('Copy turn reference');
+            expect(document.activeElement).toBe(item);
+            __testOnly_setActiveChatSession('other-session', 'Other');
+            item.click();
+            await flushMicrotasks();
+            expect(postJson).toHaveBeenLastCalledWith('/von/api/session/conversation_reference', {
+                session_id: 'source-session', metadata_only: true, turn_id: turnId
+            });
+            expect(writeText).toHaveBeenLastCalledWith(reference);
+            expect(document.activeElement).toBe(turn);
+            __testOnly_setActiveChatSession('source-session', 'Source');
+        }
+        const turn = document.querySelector('[data-turn-id="a-stored"]');
+        turn.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true }));
+        expect(document.querySelector('.chat-session-menu').classList.contains('open')).toBe(true);
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        expect(document.activeElement).toBe(turn);
+        const link = document.createElement('a');
+        link.href = '#example';
+        turn.appendChild(link);
+        const nativeMenu = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+        link.dispatchEvent(nativeMenu);
+        expect(nativeMenu.defaultPrevented).toBe(false);
+        const selection = window.getSelection();
+        turn.querySelector('.chat-message-text').textContent = 'Selected answer';
+        selection.selectAllChildren(turn.querySelector('.chat-message-text'));
+        expect(selection.toString()).toBe('Selected answer');
+        const selectedMenu = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+        turn.dispatchEvent(selectedMenu);
+        expect(selectedMenu.defaultPrevented).toBe(false);
+        selection.removeAllRanges();
+        const copies = writeText.mock.calls.length;
+        postJson.mockResolvedValue({ success: false });
+        turn.querySelector('.conversation-turn-copy').click();
+        await flushMicrotasks();
+        expect(writeText).toHaveBeenCalledTimes(copies);
+        __testOnly_setActiveChatSession(null, null);
+    });
+});
+
 describe('relation truth-state display elements', () => {
     beforeEach(() => {
         const { createVontologyCartouche, normalisePotentialConceptId } = require('../utils/textDecorator.js');

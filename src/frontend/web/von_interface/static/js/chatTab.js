@@ -38272,6 +38272,32 @@ function createTurnReferenceCopyButton(sourceSessionId, turnId) {
     return referenceButton;
 }
 
+function bindTurnReferenceMenu(container) {
+    const copyButton = container.querySelector('.conversation-turn-copy');
+    if (!copyButton) return;
+    container.tabIndex = 0;
+    container.setAttribute('aria-haspopup', 'menu');
+    container.setAttribute('aria-expanded', 'false');
+    container.setAttribute('aria-keyshortcuts', 'Shift+F10');
+    container.setAttribute('aria-description', 'Right-click or press Shift+F10 for turn options.');
+    const open = event => {
+        // Preserve native link, input and selected-text menus inside a turn.
+        if (event.target.closest('a, input, textarea, select, [contenteditable="true"]')
+            || window.getSelection()?.toString()) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const rect = container.getBoundingClientRect();
+        const pointer = event.type === 'contextmenu' && (event.clientX || event.clientY);
+        openChatSessionMenu(pointer ? event.clientX : rect.left, pointer ? event.clientY : rect.bottom, [
+            { label: 'Copy turn reference', onClick: () => copyButton.click() }
+        ], { returnFocus: container, focusFirst: true });
+    };
+    container.addEventListener('contextmenu', open);
+    container.addEventListener('keydown', event => {
+        if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) open(event);
+    });
+}
+
 function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory = false, timestampStr = null, fastpathMeta = null, ttsText = null, messageOptions = null) {
     const scrollableField = document.getElementById('scrollableField');
     if (!scrollableField) {
@@ -38941,6 +38967,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
 
         const renderedTurn = turnId ? Array.from(scrollableField.querySelectorAll('[data-turn-id]')).find(el => el.dataset.turnId === turnId) : null;
         if (renderedTurn) {
+            bindTurnReferenceMenu(renderedTurn);
             const liveRequest = liveChatRequestsBySession.get(getChatRequestSessionKey(activeChatSessionId));
             const attachments = options.imageAttachments || (sender === 'User' ? descriptorsForIds(liveRequest?.executionEnvelope?.image_attachment_ids) : []);
             renderImageAttachments(renderedTurn, attachments);
