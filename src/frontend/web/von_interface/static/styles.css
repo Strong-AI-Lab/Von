@@ -18566,7 +18566,7 @@ body.settings-body {
         gap: 8px; margin: 4px 0; padding: 8px 0;
         border-top: 1px solid #e2e8f0;
     }
-    .compact-speech-help { display: block; flex-basis: 100%; font-size: 12px; margin: 0; }
+    .compact-speech-help, #imageAttachmentHelp { display: block; flex-basis: 100%; font-size: 12px; margin: 0; }
     .chat-composer-more-actions .button-row > button,
     .chat-composer-more-actions .button-row > select { min-height: 44px; margin: 0; }
     .chat-composer-more-actions #dictateButton { width: auto; flex-basis: auto; padding: 0 12px; border-radius: 6px; gap: 6px; }

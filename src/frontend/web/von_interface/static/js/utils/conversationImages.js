@@ -142,6 +142,39 @@ async function uploadItem(item, file, sessionId, headers, changed) {
     changed();
     return Boolean(item.descriptor);
 }
+// Both controls use the existing session-bound upload path supplied by chatTab.
+export function initialiseImagePicker(upload, status) {
+    const input = document.getElementById('attachImageInput');
+    const button = document.getElementById('attachImageButton');
+    const paste = document.getElementById('pasteImageButton');
+    if (button && input) {
+        button.addEventListener('click', () => input.click());
+        input.addEventListener('change', () => {
+            const files = Array.from(input.files || []);
+            input.value = '';
+            if (files.length) void upload(files);
+        });
+        input.addEventListener('cancel', () => status('Image selection cancelled. Your draft is unchanged.'));
+    }
+    paste?.addEventListener('click', async () => {
+        if (!navigator.clipboard?.read) {
+            status('Clipboard images are unavailable here. Use Attach image, or paste into the message field.', 'error');
+            return;
+        }
+        try {
+            const items = await navigator.clipboard.read();
+            const files = [];
+            for (const item of items) {
+                const type = item.types.find(value => value.startsWith('image/'));
+                if (type) files.push(new File([await item.getType(type)], `pasted-image-${files.length + 1}.${type.split('/')[1]}`, {type}));
+            }
+            if (files.length) await upload(files);
+            else status('No image found on the clipboard. Use Attach image to choose a photo.', 'error');
+        } catch (_) {
+            status('Clipboard access was unavailable or cancelled. Use Attach image, or paste into the message field.', 'error');
+        }
+    });
+}
 export function takeImages(sessionId) {
     if (imagesBlocked(sessionId)) throw new Error('Attachment preparation failed or is still running. Remove or finish the upload before sending.');
     const ids = imageItems(sessionId).map(x => x.descriptor.concept_id);

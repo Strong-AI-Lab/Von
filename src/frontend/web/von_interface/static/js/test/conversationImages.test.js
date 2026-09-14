@@ -24,7 +24,7 @@ test('failed preparation remains visible and prevents text-only submission until
     expect(panel.querySelector('[role=alert]').textContent).toMatch(/still PNG/);
     expect(imagesBlocked('failed')).toBe(true);
     expect(() => takeImages('failed')).toThrow(/preparation failed/);
-    panel.querySelector('button').click();
+    panel.querySelector('button[aria-label="Remove bad.svg"]').click();
     expect(imagesBlocked('failed')).toBe(false);
 });
 

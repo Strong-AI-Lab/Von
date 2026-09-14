@@ -3,6 +3,7 @@
 const chatTabModulePath = '../../src/frontend/web/von_interface/static/js/chatTab.js';
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
+    WINDOW_SESSION_HEADER: 'X-Von-Window-Session',
     annotateTurn: jest.fn(),
     getUserContext: jest.fn(),
     getWindowSessionId: jest.fn(() => 'window-attachment-test')
@@ -73,6 +74,54 @@ describe('chat attachment workflow input binding', () => {
         chatTab.__testOnly_resetChatRequestState();
         jest.restoreAllMocks();
         delete global.fetch;
+    });
+
+    test('explicit clipboard image preserves caption and binds to only the next message', async () => {
+        const { __testOnly_uploadFilesToVon, sendMessage } = require(chatTabModulePath);
+        const { initialiseImagePicker } = require('../../src/frontend/web/von_interface/static/js/utils/conversationImages.js');
+        document.body.insertAdjacentHTML('beforeend', '<button id="pasteImageButton">Paste image</button>');
+        const bodies = [];
+        global.fetch = jest.fn(async (url, options = {}) => {
+            if (url === '/von/api/images/upload') return {ok:true, json:async () => ({image_attachment:{concept_id:'#V#clipboard-image', filename:'pasted-image-1.png'}})};
+            if (String(url).startsWith('/von/generate')) {
+                bodies.push(JSON.parse(options.body));
+                return {ok:true, json:async () => ({response:'Image received.', llm_debug:{model:'test-model'}})};
+            }
+            if (String(url).startsWith('/von/history/length')) return {ok:true, json:async () => ({history_length:0, authenticated:true})};
+            if (String(url).startsWith('/von/api/render_markdown')) return {ok:true, json:async () => ({html:JSON.parse(options.body).text || ''})};
+            return {ok:true, json:async () => ({})};
+        });
+        const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+        Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{
+            read:jest.fn(async () => [{types:['text/plain', 'image/png'], getType:async () => new Blob(['image'], {type:'image/png'})}])
+        }});
+        try {
+            let finishUpload;
+            const uploaded = new Promise(resolve => { finishUpload = resolve; });
+            initialiseImagePicker(async files => {
+                await __testOnly_uploadFilesToVon(files);
+                finishUpload();
+            }, jest.fn());
+            const input = document.querySelector('#promptInput');
+            input.value = 'Describe this screenshot\nKeep the caption';
+            document.querySelector('#pasteImageButton').click();
+            await uploaded;
+            expect(input.value).toBe('Describe this screenshot\nKeep the caption');
+            expect(document.querySelector('#conversationImageComposer img')).not.toBeNull();
+            const upload = fetch.mock.calls.find(([url]) => url === '/von/api/images/upload');
+            expect(upload[1].body.get('file').type).toBe('image/png');
+            expect(upload[1].headers['X-Von-Window-Session']).toBe('window-attachment-test');
+            await sendMessage();
+            expect(bodies[0].image_attachment_ids).toEqual(['#V#clipboard-image']);
+            expect(bodies[0]).not.toHaveProperty('workflow_inputs');
+            input.value = 'Next text-only question';
+            await sendMessage();
+            expect(bodies[1]).not.toHaveProperty('image_attachment_ids');
+            expect(fetch.mock.calls.some(([url]) => url === '/von/api/files/upload')).toBe(false);
+        } finally {
+            if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+            else delete navigator.clipboard;
+        }
     });
 
     test('normal upload binds its trusted file-copy id to the next generate request', async () => {

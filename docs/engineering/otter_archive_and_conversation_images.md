@@ -38,6 +38,18 @@ text. Consumers reassembling originals must check the complete upstream hash.
 
 ## Reusable image handling
 
+In the main conversation composer, open **More actions** (the **+** on a phone),
+then choose **Paste image** to read a copied screenshot through the browser's
+clipboard permission prompt. **Attach image** opens the native image picker if
+clipboard access is unavailable, denied, or contains no image. Both preserve the
+caption and use the existing upload/preview path; review the preview before
+sending. Ordinary text paste still belongs to the message field.
+
+Android keyboards can refuse their own image-tile insertion before Von receives
+a paste event. The explicit action is a recovery for that browser limitation;
+it does not enable Gboard's image tile. See the
+[native observations and diagnosis](mobile_screenshot_paste_2026-09-14.md).
+
 The existing drop, paste and picker routes feed one image pipeline. Up to eight still PNG, JPEG or WebP
 images may accompany a message (8 MiB and 25 million pixels per image). Media is decoded rather than
 trusted by filename. The composer shows progress, previews, removal and failures; unresolved preparation

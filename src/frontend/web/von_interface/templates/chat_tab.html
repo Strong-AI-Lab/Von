@@ -256,6 +256,10 @@
               title="End this conversation (resets Von's context while keeping the conversation view)">End
               conversation</button>
 
+            <p id="imageAttachmentHelp">If your keyboard cannot paste a screenshot, use Paste image and allow clipboard access, or choose Attach image. Your caption stays in the draft.</p>
+            <button id="pasteImageButton" class="btn btn-secondary" type="button" aria-describedby="imageAttachmentHelp">Paste image</button>
+            <button id="attachImageButton" class="btn btn-secondary" type="button" aria-describedby="imageAttachmentHelp">Attach image</button>
+            <input id="attachImageInput" class="visually-hidden" type="file" tabindex="-1" accept="image/png,image/jpeg,image/webp" multiple aria-label="Choose images" />
             <button id="uploadFileButton" class="btn btn-secondary" type="button"
               title="Upload a file, drag and drop onto the conversation, or paste an image">Upload File</button>
             <input id="uploadFileInput" class="visually-hidden" type="file" multiple aria-label="Upload file" />
