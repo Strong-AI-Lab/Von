@@ -204,6 +204,20 @@ def admission(config, state, inputs, *, now=None):
                 "reason": receipt["reason"],
                 "receipt": receipt,
             }
+    for row in inputs.get("supervisor_repair_comments", []):
+        receipt = (row.get("source") or {}).get("coding_supervisor_repair")
+        token = "supervisor-comment:" + str(row.get("comment_id"))
+        if (
+            row.get("comment_id")
+            and token not in consumed
+            and verified_repair(blocker, receipt, now)
+        ):
+            return {
+                "kind": "verified_repair",
+                "token": token,
+                "reason": receipt["reason"],
+                "receipt": receipt,
+            }
     return None
 
 
@@ -213,5 +227,10 @@ def consume(state, decision):
     if token:
         state.setdefault("consumed_retry_tokens", []).append(token)
     state["launch_admission"] = decision
+    if state.get("supervision") and decision.get("kind") in {
+        "verified_repair",
+        "probe_recovery",
+    }:
+        state["supervision"]["resolved"] = True
     state.pop("blocker", None)
     state.pop("waiting_report", None)

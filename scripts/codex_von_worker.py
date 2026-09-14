@@ -31,6 +31,14 @@ except ImportError:
     except ImportError:
         from scripts import codex_von_retry as retry_policy
 
+try:
+    from . import codex_von_supervision as supervision
+except ImportError:
+    try:
+        import codex_von_supervision as supervision
+    except ImportError:
+        from scripts import codex_von_supervision as supervision
+
 ACTIVITY_CHECKPOINT_SECONDS = 15
 
 ACTIVE = {"pending", "in_progress", "blocked"}
@@ -43,8 +51,17 @@ RESULT_SCHEMA = {
         "question": {"type": "string"},
         "deploy_commit": {"type": "string"},
         "blocker": retry_policy.BLOCKER_SCHEMA,
+        "repair_receipt_json": {"type": ["string", "null"]},
     },
-    "required": ["status", "summary", "evidence", "question", "deploy_commit", "blocker"],
+    "required": [
+        "status",
+        "summary",
+        "evidence",
+        "question",
+        "deploy_commit",
+        "blocker",
+        "repair_receipt_json",
+    ],
     "additionalProperties": False,
 }
 
@@ -93,6 +110,7 @@ def capability_context(config, *, read_only, worktree=None):
         "controller_actions": ["reply", "resume_task", "create_task"],
         "deployment_enabled": bool(config.get("deployment_command")),
         "retry_probe_keys": sorted((config.get("retry_probes") or {}).keys()),
+        "supervision_enabled": bool(config.get("supervision_enabled")),
         "limitations": [
             "Use available shell tools for non-secret host/repository facts; missing supplied facts do not mean inspection is unavailable.",
             "Do not access credentials, private databases or live-service mutation routes.",
@@ -173,7 +191,10 @@ def authorised_task(task, config):
         task.get("assignee_concept_id") == config["agent_id"]
         and task.get("organisation_concept_id") == config["organisation_id"]
         and task.get("created_by_concept_id") == config["delegator_id"]
-        and task.get("report_to_concept_id") in (None, config["delegator_id"])
+        and (
+            config.get("supervision_enabled")
+            or task.get("report_to_concept_id") in (None, config["delegator_id"])
+        )
     )
 
 
@@ -443,14 +464,20 @@ def check_task(config, api, task_id):
 
 def validate_result(value):
     # Strict output requires every property; retained old results may omit blocker.
-    fields = set(RESULT_SCHEMA["required"]) - {"blocker"}
-    if not isinstance(value, dict) or set(value) - {"blocker"} not in (
+    optional = {"blocker", "repair_receipt_json"}
+    fields = set(RESULT_SCHEMA["required"]) - optional
+    if not isinstance(value, dict) or set(value) - optional not in (
         fields,
         fields - {"deploy_commit"},
     ):
         raise ValueError("Codex did not return the required result fields")
-    if any(not isinstance(v, str) for k, v in value.items() if k != "blocker"):
+    if any(not isinstance(v, str) for k, v in value.items() if k not in optional):
         raise ValueError("Codex result fields must be text")
+    if value.get("repair_receipt_json") is not None and (
+        not isinstance(value["repair_receipt_json"], str)
+        or not isinstance(json.loads(value["repair_receipt_json"]), dict)
+    ):
+        raise ValueError("Repair receipt must be a JSON object string or null")
     retry_policy.validate_blocker(value.get("blocker"))
     if value["status"] not in RESULT_SCHEMA["properties"]["status"]["enum"]:
         raise ValueError("Unknown Codex outcome")
@@ -518,9 +545,11 @@ class Von:
         require_task_execution_preferences(task)
         task_id = task["task_concept_id"]
         comments = []
+        all_comments = []
         offset = 0
         while True:
             page = self.tasks.list_task_comments(task_id, offset=offset, limit=500)
+            all_comments.extend(page["comments"])
             comments.extend(
                 c
                 for c in page["comments"]
@@ -608,11 +637,46 @@ class Von:
             "requested_model": task.get("requested_model"),
             "requested_reasoning_effort": task.get("requested_reasoning_effort"),
             "comments": comments,
+            "reporting_resolution": supervision.resolution(task)
+            if self.config.get("supervision_enabled")
+            else None,
+            "report_to_concept_id": task.get("report_to_concept_id"),
+            "supervisor_repair_comments": supervision.repair_comments(
+                self.config, self, task, all_comments
+            ),
             "replies": [
                 message for message in replies if not self.inbox_answered(message)
             ],
             **self.followup_context(task_id),
         }
+
+    def reconcile_supervision(self, task, state, persist):
+        try:
+            return supervision.reconcile(self.config, self, task, state, persist)
+        except Exception as exc:  # noqa: BLE001 - preserve failed handoffs while other tasks progress
+            key = (
+                fingerprint(
+                    [state["task_id"], state.get("attempt"), type(exc).__name__]
+                )
+                + ":supervision-failure"
+            )
+            if state.get("supervision_failure_message", {}).get("key") != key:
+                message_id = self.send(
+                    task,
+                    key,
+                    f"Supervisor handoff for {state['task_id']} could not be reconciled ({type(exc).__name__}). "
+                    "Review the existing repair task, current assignment, organisation membership and reporting configuration. "
+                    "The source remains waiting without another coding launch; retained state is available to the controller.",
+                )
+                state["supervision_failure_message"] = {
+                    "key": key,
+                    "message_id": message_id,
+                }
+                persist()
+            return None
+
+    def record_supervisor_repair(self, task, result):
+        return supervision.record_repair(self.config, self, task, result)
 
     def inbox_answered(self, message):
         if not self.config.get("inbox_enabled"):
@@ -723,7 +787,7 @@ class Von:
             recipient_ids=[c["delegator_id"]],
             organisation_concept_id=c["organisation_id"],
             thread_id=task["task_concept_id"],
-            subject=f"Codex DGX: {task['title']}",
+            subject=f"{c.get('display_name', c['agent_id'])}: {task['title']}",
             content=content,
             metadata={"attribution": "Sent by the Codex DGX coding worker"},
         )
@@ -788,6 +852,7 @@ class Von:
             state["report_task"], state["attempt"] + ":result", state["report_content"]
         )
         if scope_valid:
+            self.record_supervisor_repair(task, result)
             evidence_addition = (
                 f"{result['evidence']}\nVon result: {message_id}\n"
                 f"Execution archive: {capture.get('archive_url', 'unavailable')}\n"
@@ -1163,9 +1228,9 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         receipt
     )
     if success:
-        result[
-            "summary"
-        ] += f" Deployed and verified the public server at {commit[:12]}."
+        result["summary"] += (
+            f" Deployed and verified the public server at {commit[:12]}."
+        )
     else:
         result["status"] = "blocked"
         result["summary"] += (
@@ -1176,9 +1241,9 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         )
     if recover_only:
         result["status"] = "blocked"
-        result[
-            "summary"
-        ] += " The task changed; only the interrupted deployment was reconciled."
+        result["summary"] += (
+            " The task changed; only the interrupted deployment was reconciled."
+        )
     write_json(state_path, state)
 
 
@@ -1398,6 +1463,12 @@ def tick(config, api, lock_fd):
                 # One task's unavailable reporting must not wedge the queue.
                 try:
                     report_waiting(config, api, task, state, path)
+                    if config.get("supervision_enabled"):
+                        api.reconcile_supervision(
+                            task,
+                            state,
+                            lambda path=path, state=state: write_json(path, state),
+                        )
                 except Exception as exc:  # noqa: BLE001 - canonical reporting errors stay isolated to this task
                     state["waiting_report_error"] = type(exc).__name__
                     write_json(path, state)
@@ -1457,9 +1528,9 @@ def tick(config, api, lock_fd):
                 state["result"]["summary"] = (
                     "Coding execution settings rejected: " + str(exc)
                 )
-                state["result"][
-                    "question"
-                ] = "Correct this task's model or reasoning setting, then give an explicit retry reason in the task thread."
+                state["result"]["question"] = (
+                    "Correct this task's model or reasoning setting, then give an explicit retry reason in the task thread."
+                )
             write_json(path, state)
         apply_deployment(config, api, state, path, lock_fd)
         finish_captured(config, api, state, path)

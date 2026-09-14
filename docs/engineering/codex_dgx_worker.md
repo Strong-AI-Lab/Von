@@ -672,3 +672,57 @@ writes (registration, one batch, final reference), independently of event count.
 text, refresh, scoped download and clearing on scope change using an isolated
 browser fixture. These tests do not prove live scheduler activation, public
 OAuth, actual provider summaries, or production historical backfill.
+
+### Supervisor repair tasks
+
+An operator-owned `supervision_enabled: true` enables repair-task handoffs in
+an existing controller. It adds no schedule or model poll. Instantiate additional
+agents with that optional flag and their existing agent, delegator and organisation
+bindings; configure the ontology relation through canonical relationship services.
+Do not copy credentials or infer delegation from a supervisor relation.
+
+`report_to_concept_id` is the task override (`#V#reportsto`). When unset,
+`#V#has_supervisor` on the assignee supplies the default for people and agents.
+Canonical task point reads and creation responses expose `reporting_resolution`
+with the selected concept, source and resolution status. Defaults are not copied
+into the explicit field. An ambiguous, inaccessible or cyclic route is reported
+without admitting another coding run. Existing controllers keep their prior
+eligibility policy unless supervision is enabled; enabled controllers still
+require the configured creator/delegator, assignee, organisation and native writer.
+Reporting responsibility no longer substitutes for those execution checks.
+
+Under its existing lock, the controller retains an episode fingerprint before
+creating a canonical repair on behalf of the existing delegator. The repair
+records that attribution, source task, blocker and agent chain in
+`external_references.coding_supervision`, inherits explicit execution preferences,
+and links back with `blocks`/`blocked_by`. The controller reconciles the deterministic
+creation fingerprint after an interrupted acknowledgement. A same-blocker manual
+retry retains the repair episode and refreshes its attempt context; a verified
+recovery followed by a new failure starts a new episode. Self-reports, archives,
+status resets and elapsed time do not supply recovery evidence. Cancelled or
+reassigned repair tasks require reconciliation, not automatic duplication.
+
+The supervisor inspects retained work, repairs within the original scope, and
+returns `repair_receipt_json` containing exact fresh observations. The finishing
+controller checks the current source instructions, scope and assignment, then
+records a canonical attestation. The source admits that attempt-bound receipt once
+through the shared retry policy. A completed repair status alone is insufficient.
+Legacy unclassified failures remain reviewable but require an explicit reviewed
+continuation; the controller does not invent their missing observation contract.
+A human supervisor receives a native task and Von notification, never a coding
+process in the human's identity. Supervisor chains reject repeated identities.
+
+For an upgrade, install the coherent release and update a private Mac adapter
+under its existing lock. The Mac adapter calls `api.reconcile_supervision` for
+waiting attempts and `api.record_supervisor_repair` before applying a successful
+result. Carry `supervision` state to a reserved continuation alongside consumed
+retry tokens. Exclude derived reporting projections and controller-verified repair
+comments from the Mac instruction fingerprint; recheck retry admission at begin.
+Keep old retained results readable when nullable result fields are added.
+
+Before clearing legacy generated `report_to_concept_id` defaults, retain an exact
+review manifest: task ID, old value, original creation provenance, later reporting
+changes and source instruction. Preserve deliberate choices and ambiguous cases.
+Apply only reviewed entries after the eligibility fix is installed, through
+canonical task updates, and read back the effective ontology default. Do not use
+a blanket rewrite based solely on the current field matching the delegator.

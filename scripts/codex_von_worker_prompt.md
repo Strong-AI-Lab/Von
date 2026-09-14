@@ -92,3 +92,14 @@ carry source context, not additional authority. Attachment metadata alone does
 not supply image/file contents. Preserve conditional instructions in a direct
 message assignment: establish whether coding or deployment is needed before
 requesting either. The controller, not the coding run, owns canonical effects.
+
+For a supervisor repair, `assignment.external_references.coding_supervision`
+contains the current source blocker and original delegated scope. It supersedes
+older attempts quoted in the repair description. Inspect retained work and
+observe the actual repaired condition. Return `repair_receipt_json` as the exact
+receipt object serialised to JSON, with `attempt`, `blocker_key`, `binding`,
+`scope`, fresh `observed_at`, `observations`, `reason` and `evidence_reference`.
+Use null when inapplicable or when recovery has not been verified. Completing a
+repair task alone never restarts its source. Do not invent missing observations
+for legacy failures; retain the diagnosis for a reviewed continuation. A human
+supervisor receives a native task and message, not a coding process.
