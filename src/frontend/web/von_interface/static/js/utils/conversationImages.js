@@ -215,7 +215,10 @@ export function bindAttachmentComposer(root, input, sessionKey, headers, changed
     const picker = document.createElement('input');
     picker.type = 'file'; picker.multiple = true; picker.hidden = true;
     const button = document.createElement('button');
-    button.type = 'button'; button.textContent = 'Attach files';
+    button.type = 'button'; button.textContent = '+';
+    button.className = 'message-attachment-button';
+    button.title = 'Attach files';
+    button.setAttribute('aria-label', 'Attach files');
     button.onclick = () => picker.click();
     const pendingRoot = document.createElement('div');
     pendingRoot.className = 'pending-message-attachments';
@@ -225,7 +228,18 @@ export function bindAttachmentComposer(root, input, sessionKey, headers, changed
         for (const file of files) await uploadConversationImage(file, key, headers(), refresh);
     };
     picker.onchange = () => { void upload(Array.from(picker.files)); picker.value = ''; };
-    root.append(button, picker, pendingRoot);
+    // Reply already has a row shared with Send; the new-message modal needs
+    // the same inline attachment affordance beside its text field.
+    let row = input.parentElement;
+    if (!row.classList.contains('message-compose-row')) {
+        row = document.createElement('div');
+        row.className = 'message-attachment-input-row';
+        input.before(row);
+        row.append(input);
+    }
+    row.classList.add('message-attachment-input-row');
+    input.before(button);
+    root.append(picker, pendingRoot);
     input.addEventListener('paste', event => {
         const files = Array.from(event.clipboardData?.files || []).filter(f => f.type.startsWith('image/'));
         if (!files.length) return;
