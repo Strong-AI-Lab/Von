@@ -21573,7 +21573,7 @@ function refreshConversationImages() {
 
 function syncConversationAttachmentWorkflowBinding(sessionId) {
     const key = getPendingFileCopySessionKey(sessionId);
-    const last = imageItems(sessionId).filter(item => item.descriptor && !item.type.startsWith('image/')).at(-1);
+    const last = imageItems(sessionId).filter(item => item.descriptor && !isConversationImageFile(item)).at(-1);
     if (last) {
         pendingFileCopyConceptIdsBySession.set(key, last.descriptor.concept_id);
         pendingFileCopyDisplayNamesBySession.set(key, last.name);
