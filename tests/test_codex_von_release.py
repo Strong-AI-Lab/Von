@@ -28,6 +28,7 @@ def source(tmp_path):
         "codex_von_worker.py",
         "codex_von_inbox.py",
         "codex_von_retry.py",
+        "codex_von_supervision.py",
         "codex_von_deploy.py",
         "codex_von_release.py",
         "deploy_local_main.py",
@@ -40,6 +41,8 @@ def source(tmp_path):
     service = source / "src/backend/services/task_management_service.py"
     service.parent.mkdir(parents=True)
     service.write_text("RELEASE = 'old'\n")
+    (service.parent / "task_reporting_service.py").write_bytes(
+        (repo / "src/backend/services/task_reporting_service.py").read_bytes())
     preferences = source / "src/backend/utils/task_execution_preferences.py"
     preferences.parent.mkdir(parents=True)
     preferences.write_bytes(

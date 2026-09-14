@@ -1,4 +1,5 @@
 /** Message-source adapter for the existing conversation tray. */
+import { bindConversationRowMenu, createSelectedConversationOptions } from './conversationRowMenu.js';
 import { copyTextWithClipboardFallback } from '../utils/copyJsonButtonState.js';
 import { showToast } from '../utils/toast.js';
 import { getJson, postJson } from '../apiService.js';
@@ -211,29 +212,14 @@ export function renderMessageConversationRow(row, { selected = false, pinned = f
     el.setAttribute('aria-label', el.title);
     el.append(header, meta, preview);
     el.addEventListener('click', () => void selectMessageConversation(row));
-    const trigger = document.createElement('button');
-    trigger.type = 'button';
-    trigger.className = 'conversation-menu-trigger';
-    trigger.textContent = '⋯';
-    trigger.setAttribute('aria-label', `Conversation actions for ${row.session_name}`);
-    trigger.setAttribute('aria-haspopup', 'menu');
-    header.append(trigger);
-    const open = async event => {
-        event.preventDefault();
-        event.stopPropagation();
+    el.dataset.sessionName = row.session_name;
+    bindConversationRowMenu(el, async (x, y, options) => {
         const showMenu = openMenu || (await import('../chatTab.js')).openChatSessionMenu;
         if (!el.isConnected) return;
-        const rect = trigger.getBoundingClientRect();
-        showMenu(event.type === 'contextmenu' ? event.clientX : rect.left,
-            event.type === 'contextmenu' ? event.clientY : rect.bottom,
-            buildMessageConversationMenuItems(row, { pinned, togglePin, hide, hidden }),
-            { returnFocus: trigger, focusFirst: true });
-    };
-    trigger.addEventListener('click', open);
-    el.addEventListener('contextmenu', open);
+        showMenu(x, y, buildMessageConversationMenuItems(row, { pinned, togglePin, hide, hidden }), options);
+    });
     el.addEventListener('keydown', event => {
-        if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) void open(event);
-        else if (event.target === el && (event.key === 'Enter' || event.key === ' ')) {
+        if (event.target === el && (event.key === 'Enter' || event.key === ' ')) {
             event.preventDefault(); void selectMessageConversation(row);
         }
     });
@@ -266,6 +252,7 @@ export function buildMessageConversationMenuItems(row, { pinned, togglePin, hide
 }
 
 export function mountCatalogueControls(container) {
+    container.append(createSelectedConversationOptions(container));
     const compose = document.createElement('button');
     compose.type = 'button'; compose.className = 'chat-session-tab';
     compose.textContent = 'Talk to a person or agent';

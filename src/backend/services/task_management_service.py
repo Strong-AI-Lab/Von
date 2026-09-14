@@ -1763,6 +1763,9 @@ def create_task(
             "Task-created workflow launch skipped for %s: %s", task_concept_id, e
         )
 
+    from .task_reporting_service import resolve_task_reporting
+
+    result["reporting_resolution"] = resolve_task_reporting(result)
     return result
 
 
@@ -1779,7 +1782,11 @@ def get_task(task_concept_id: str) -> Dict[str, Any]:
         TaskNotFoundError: If task not found
     """
     task_concept_id, doc = _get_task_doc(task_concept_id)
-    return {**_build_task_response(doc), "current_work_product": resolve_task_work_product(doc)}
+    from .task_reporting_service import resolve_task_reporting
+
+    result = {**_build_task_response(doc), "current_work_product": resolve_task_work_product(doc)}
+    result["reporting_resolution"] = resolve_task_reporting(result)
+    return result
 
 
 def find_task_by_agent_creation_fingerprint(
@@ -5980,3 +5987,56 @@ __all__ = [
     "bulk_update_tasks",
     "delete_task",
 ]
+
+
+def refresh_coding_supervision_context(
+    repair_task_id: str,
+    *,
+    episode_key: str,
+    blocker: Dict[str, Any],
+    actor_concept_id: str,
+) -> Dict[str, Any]:
+    """Refresh a controller-created repair after the same unresolved blocker recurs.
+
+    Internal canonical service; not exposed as a model-selectable metadata write.
+    The originating agent can update only its own retained episode's observations.
+    Reporting responsibility does not change the creator/delegator or assignment.
+    """
+    repair_task_id, doc = _get_task_doc(repair_task_id)
+    references = (doc.get("metadata") or {}).get(
+        TASK_METADATA_KEY_EXTERNAL_REFERENCES
+    ) or {}
+    parent = references.get("coding_supervision") or {}
+    if (
+        parent.get("source_agent") != actor_concept_id
+        or parent.get("episode_key") != episode_key
+    ):
+        raise InvalidTaskDataError(
+            "Supervisor episode does not belong to this source controller"
+        )
+    source = get_task(parent["source_task_id"])
+    if (
+        source.get("assignee_concept_id") != actor_concept_id
+        or source.get("created_by_concept_id") != parent.get("delegator_id")
+        or source.get("organisation_concept_id") != parent.get("organisation_id")
+        or source.get("status") not in {"blocked", "pending", "in_progress"}
+        or blocker.get("binding") != parent["blocker"].get("binding")
+        or blocker.get("key") != parent["blocker"].get("key")
+        or blocker.get("scope") != parent["blocker"].get("scope")
+    ):
+        raise InvalidTaskDataError("Source authority or blocking episode changed")
+    updated = dict(parent)
+    updated["blocker"] = blocker
+    updated["prior_attempts"] = list(
+        dict.fromkeys([*parent.get("prior_attempts", []), parent["blocker"]["attempt"]])
+    )
+    ConceptsRepository.update_one(
+        {"concept_id": repair_task_id},
+        {
+            "$set": {
+                "metadata.external_references.coding_supervision": updated,
+                "updated_at": _now(),
+            }
+        },
+    )
+    return get_task(repair_task_id)
