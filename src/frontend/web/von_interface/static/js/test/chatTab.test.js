@@ -8087,6 +8087,9 @@ describe('thinking card toggle accessibility', () => {
         jest.spyOn(window, 'scrollTo').mockImplementation(({ top }) => {
             window.scrollY = Math.min(top, document.documentElement.scrollHeight - window.innerHeight);
         });
+        document.getElementById('scrollableField').getBoundingClientRect = () => ({
+            bottom: document.documentElement.scrollHeight - 200 - window.scrollY
+        });
         let resolveGenerate;
         global.fetch = jest.fn((url, options = {}) => {
             if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
@@ -8109,7 +8112,7 @@ describe('thinking card toggle accessibility', () => {
             }
             expect(resolveGenerate).toBeDefined();
             expect(document.querySelector('.user-turn').textContent).toContain('Show the latest turn');
-            expect(window.scrollY).toBe(document.documentElement.scrollHeight - window.innerHeight);
+            expect(window.scrollY).toBe(document.documentElement.scrollHeight - 176 - window.innerHeight);
             if (scrollAway) window.scrollY = 100;
             window.scrollTo.mockClear();
             resolveGenerate();
@@ -8120,7 +8123,7 @@ describe('thinking card toggle accessibility', () => {
                 expect(window.scrollY).toBe(100);
             } else {
                 expect(window.scrollTo).toHaveBeenCalled();
-                expect(window.scrollY).toBe(document.documentElement.scrollHeight - window.innerHeight);
+                expect(window.scrollY).toBe(document.documentElement.scrollHeight - 176 - window.innerHeight);
             }
         } finally {
             for (const [target, key, descriptor] of [
@@ -12818,6 +12821,8 @@ describe('scroll to latest message affordance', () => {
         Object.defineProperty(document.documentElement, 'scrollHeight', { value: 1200, configurable: true });
         Object.defineProperty(window, 'innerHeight', { value: 600, configurable: true });
         Object.defineProperty(window, 'scrollY', { value: 100, writable: true, configurable: true });
+        document.getElementById('scrollableField').getBoundingClientRect = () => ({ bottom: 1000 - window.scrollY });
+        document.querySelector('.chat-composer').getBoundingClientRect = () => ({ height: 100 });
         window.scrollTo = jest.fn(({ top }) => {
             window.scrollY = top;
         });
@@ -12828,11 +12833,11 @@ describe('scroll to latest message affordance', () => {
         __testOnly_updateScrollToEndButtonVisibility(scrollableField);
         const button = __testOnly_ensureScrollToEndButton(scrollableField);
         expect(button).toBeTruthy();
-        expect(button.parentElement).toBe(document.querySelector('.chat-composer'));
+        expect(button.parentElement).toBe(document.querySelector('.chat-transcript-navigation'));
         expect(button.classList.contains('visible')).toBe(true);
         expect(button.getAttribute('aria-hidden')).toBe('false');
 
-        window.scrollY = 610;
+        window.scrollY = 524;
         __testOnly_updateScrollToEndButtonVisibility(scrollableField);
         expect(button.classList.contains('visible')).toBe(false);
         expect(button.getAttribute('aria-hidden')).toBe('true');
@@ -12849,7 +12854,7 @@ describe('scroll to latest message affordance', () => {
         button.click();
 
         expect(window.scrollTo).toHaveBeenCalledWith({
-            top: 1200,
+            top: 524,
             behavior: 'smooth'
         });
 

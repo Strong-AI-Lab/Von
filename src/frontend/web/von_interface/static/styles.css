@@ -18900,3 +18900,20 @@ html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-bu
     .chat-composer > .prompt-input-wrapper, .chat-composer > #promptInput { grid-column: 3; }
     .chat-composer #sendButton { grid-column: 4; }
 }
+
+/* Desktop navigation belongs to the transcript and never changes composer height.
+   A zero-height sticky host keeps the control reachable while reading history. */
+.chat-transcript-navigation {
+    position: sticky;
+    bottom: 16px;
+    height: 0;
+    flex: 0 0 0;
+    z-index: 12;
+}
+.chat-transcript-navigation > .chat-scroll-to-end-btn {
+    position: absolute;
+    right: 12px;
+    bottom: 0;
+    margin: 0;
+    padding: 0;
+}
