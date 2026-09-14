@@ -31,7 +31,6 @@ import { getSessionScopedOrgId } from '../utils/sessionScopedStorage.js';
 import { hydrateConceptCartouchesInRoot } from '../utils/selectConceptByIdHandler.js';
 import { createCartoucheFragment } from '../utils/textDecorator.js';
 import { showToast } from '../utils/toast.js';
-import { buildMessageStreamReference } from '../utils/messageStreamReference.js';
 import { copyTextWithClipboardFallback } from '../utils/copyJsonButtonState.js';
 import {
     clearRecommendationReviewResults,
@@ -783,9 +782,6 @@ function bindMessageStreamMenu(element, getOtherUserId) {
         const otherUserId = getOtherUserId();
         const userId = _currentUserId;
         if (!otherUserId || !userId) return;
-        const thread = _threads.find(row => getThreadUserId(row) === otherUserId);
-        const messages = otherUserId === _currentConversationUserId ? _currentMessages : [thread?.last_message].filter(Boolean);
-        const payload = buildMessageStreamReference({ currentUserId: userId, otherUserId, messages, displayName: _exchange?.session_name || `Conversation with ${formatUserName(otherUserId)}`, participantIds: _exchange?.participant_ids, organisationConceptId: _exchange?.organisation_concept_id });
         const { openChatSessionMenu } = await import('../chatTab.js');
         if (!element.isConnected || _currentUserId !== userId) return;
         const rect = element.getBoundingClientRect();
@@ -793,8 +789,16 @@ function bindMessageStreamMenu(element, getOtherUserId) {
             label: 'Copy conversation reference',
             onClick: async () => {
                 if (_currentUserId !== userId) return;
-                const copied = await copyTextWithClipboardFallback(JSON.stringify(payload, null, 2));
-                showToast(copied ? 'Copied message conversation reference.' : 'Failed to copy conversation reference.', copied ? 'success' : 'error');
+                try {
+                    const result = await postJson('/api/messages/exchange/reference', {
+                        participant_ids: _exchange?.participant_ids || [userId, otherUserId],
+                        organisation_concept_id: _exchange?.organisation_concept_id || null,
+                    });
+                    if (!result?.success || !result.concept_id?.startsWith('#V#')) throw new Error('unavailable');
+                    if (_currentUserId !== userId) return;
+                    const copied = await copyTextWithClipboardFallback(result.concept_id);
+                    showToast(copied ? 'Copied message conversation reference.' : 'Failed to copy conversation reference.', copied ? 'success' : 'error');
+                } catch (_) { showToast('Conversation reference unavailable.', 'info'); }
             }
         }], { returnFocus: element, focusFirst: true });
     };

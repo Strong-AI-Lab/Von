@@ -1,6 +1,5 @@
 /** Message-source adapter for the existing conversation tray. */
 import { copyTextWithClipboardFallback } from '../utils/copyJsonButtonState.js';
-import { buildMessageStreamReference } from '../utils/messageStreamReference.js';
 import { showToast } from '../utils/toast.js';
 import { getJson, postJson } from '../apiService.js';
 import { getSessionScopedOrgId } from '../utils/sessionScopedStorage.js';
@@ -244,7 +243,7 @@ export function renderMessageConversationRow(row, { selected = false, pinned = f
 export function buildMessageConversationMenuItems(row, { pinned, togglePin, hide, hidden } = {}) {
     const items = [
         { label: 'Open conversation', onClick: () => void selectMessageConversation(row) },
-        { label: 'Copy Concept ID', onClick: async () => {
+        { label: 'Copy conversation reference', onClick: async () => {
             try {
                 const result = await postJson('/api/messages/exchange/reference', {
                     participant_ids: row.participant_ids,
@@ -255,15 +254,7 @@ export function buildMessageConversationMenuItems(row, { pinned, togglePin, hide
                 showToast(copied ? 'Copied conversation Concept ID.' : 'Failed to copy Concept ID.', copied ? 'success' : 'error');
             } catch (_) { showToast('Conversation Concept ID is unavailable. Try again.', 'error'); }
         } },
-        { label: 'Copy conversation reference', onClick: async () => {
-            const reference = buildMessageStreamReference({
-                currentUserId: row.viewer_id, otherUserId: row.other_participant_ids[0] || row.viewer_id,
-                participantIds: row.participant_ids, organisationConceptId: row.organisation_concept_id,
-                displayName: row.session_name,
-            });
-            const copied = reference && await copyTextWithClipboardFallback(JSON.stringify(reference, null, 2));
-            showToast(copied ? 'Copied conversation reference.' : 'Failed to copy conversation reference.', copied ? 'success' : 'error');
-        } },
+
     ];
     if (togglePin) items.push({ label: pinned ? 'Unpin conversation' : 'Pin conversation', onClick: togglePin });
     if (hide) items.push({ label: hidden ? 'Unhide conversation' : 'Hide conversation', onClick: hide });

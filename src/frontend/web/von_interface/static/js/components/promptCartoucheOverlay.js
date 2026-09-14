@@ -1,3 +1,4 @@
+import { isConversationConceptReference, conversationReferenceMetadata } from '../utils/conversationReference.js';
 // Prompt cartouche overlay
 //
 // Implements an in-place “rich textarea” overlay for Vontology concept IDs.
@@ -440,6 +441,7 @@ function findTokenAtPosition(text, pos) {
 }
 
 async function fetchConceptMeta(fullId) {
+    if (isConversationConceptReference(fullId)) return conversationReferenceMetadata(fullId);
     if (promptConceptMetaCache.has(fullId)) {
         return promptConceptMetaCache.get(fullId);
     }
