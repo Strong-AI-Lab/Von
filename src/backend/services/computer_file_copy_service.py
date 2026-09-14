@@ -714,6 +714,26 @@ def resolve_file_copy_blob_info(
 
     blob_key = _first_text_value(concept_id, "#V#has_blob_key")
     if not blob_key:
+        # Early Jira attachment imports persisted complete blob attributes but
+        # could omit both the format marker and blob text relations. Preserve
+        # canonical text precedence; this only recovers that legacy format.
+        if (
+            attrs.get("source_system") == "jira_attachment"
+            and isinstance(attrs.get("blob_key"), str)
+            and attrs["blob_key"].strip()
+            and attrs.get("blob_backend")
+            and attrs.get("sha256")
+            and isinstance(attrs.get("size_bytes"), int)
+        ):
+            return FileCopyBlobInfo(
+                concept_id=concept_id,
+                blob_key=attrs["blob_key"],
+                blob_backend=attrs["blob_backend"],
+                blob_uri=attrs.get("blob_uri"),
+                content_type=attrs.get("content_type"),
+                original_filename=attrs.get("original_filename"),
+                size_bytes=attrs["size_bytes"],
+            )
         return None
 
     blob_backend = _first_text_value(concept_id, "#V#has_blob_backend")
