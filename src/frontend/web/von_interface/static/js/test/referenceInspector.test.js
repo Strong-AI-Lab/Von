@@ -5,11 +5,12 @@ import {
   normaliseReferenceManifest,
   openReferenceInspector,
 } from '../components/referenceInspector.js';
-import { getJsonDetailed } from '../apiService.js';
+import { getJsonDetailed, postJson } from '../apiService.js';
 import { copyTextWithClipboardFallback } from '../utils/copyJsonButtonState.js';
 
 jest.mock('../apiService.js', () => ({
   getJsonDetailed: jest.fn(),
+  postJson: jest.fn(),
 }));
 
 jest.mock('../utils/copyJsonButtonState.js', () => ({
@@ -248,4 +249,26 @@ describe('conversation reference inspector', () => {
     expect(text).toContain('completed');
     expect(text).toContain('Open workflow definition');
   });
+});
+
+
+test('exact turn inspector preserves the reference and follows bounded continuation', async () => {
+  __testOnly_resetReferenceInspector();
+  installInspectorDom();
+  initializeReferenceInspector();
+  postJson.mockResolvedValueOnce({ success: true, session_name: 'Current source title', turn_id: 'stored',
+    messages: [{ role: 'assistant', turn_id: 'stored', content: '<script>source data</script>' }], next_cursor: 'next-page' })
+    .mockResolvedValueOnce({ success: true, messages: [{ role: 'user', content: 'Later context' }], next_cursor: null });
+  const onClose = jest.fn();
+  await openReferenceInspector({ reference_id: '#V#conversation_0123456789ab_turn_73746f726564', reference_type: 'conversation_turn' }, { onClose });
+  expect(document.getElementById('conversationReferenceInspectorTitle').textContent).toBe('Current source title');
+  expect(document.querySelector('[aria-label="Referenced turn"]').textContent).toContain('<script>source data</script>');
+  expect(document.querySelector('#conversationReferenceInspectorBody script')).toBeNull();
+  const more = [...document.querySelectorAll('button')].find(button => button.textContent === 'Fetch more context');
+  more.click();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(postJson).toHaveBeenLastCalledWith('/von/api/session/conversation_reference', expect.objectContaining({ cursor: 'next-page' }));
+  expect(document.getElementById('conversationReferenceInspectorBody').textContent).toContain('Later context');
+  document.getElementById('conversationReferenceInspectorCloseBtn').click();
+  expect(onClose).toHaveBeenCalled();
 });

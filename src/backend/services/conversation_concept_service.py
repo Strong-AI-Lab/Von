@@ -561,6 +561,63 @@ def get_or_create_conversation_concept(
     return conversation_concept_id
 
 
+def get_source_conversation_identity_for_authorisation(
+    session_id: str,
+) -> Optional[str]:
+    """Internal inverse locator, for a source already authorised by the caller.
+
+    Return identity only, preserving a legacy materialised identity even when
+    the accepted participant cannot read the owner's private concept document.
+    """
+    collection = ConceptsRepository.collection()
+    if collection is None:
+        return None
+    expected = _generate_conversation_concept_id(session_id)
+    document = collection.find_one(
+        {
+            "concept_id": expected,
+            "metadata.session_id": session_id,
+            "relationships.is_an_instance_of": CONVERSATION_TYPE_ID,
+        },
+        {"_id": 0, "concept_id": 1},
+    )
+    if document:
+        return document.get("concept_id")
+    document = collection.find_one(
+        {
+            "metadata.session_id": session_id,
+            "relationships.is_an_instance_of": CONVERSATION_TYPE_ID,
+        },
+        {"_id": 0, "concept_id": 1},
+    )
+    return document.get("concept_id") if document else None
+
+
+def get_conversation_source_locator_for_authorisation(concept_id: str) -> Optional[str]:
+    """Internal locator-only read, followed by mandatory source authorisation.
+
+    An accepted participant may read the chat source without seeing its owner's
+    private concept projection. Read only its exact session locator here; never
+    return a title, owner, text or concept document through this boundary.
+    Callers must not expose this locator before current chat access succeeds.
+    Legacy text-only mappings remain subject to the actor-filtered reader.
+    """
+    collection = ConceptsRepository.collection()
+    if collection is not None:
+        document = collection.find_one(
+            {
+                "concept_id": concept_id,
+                "relationships.is_an_instance_of": CONVERSATION_TYPE_ID,
+            },
+            {"_id": 0, "metadata.session_id": 1},
+        )
+        source = (document or {}).get("metadata", {}).get("session_id")
+        if isinstance(source, str) and source.strip():
+            return source.strip()
+    concept = get_conversation_concept(concept_id)
+    return concept.get("session_id") if concept else None
+
+
 def get_conversation_concept(conversation_concept_id: str) -> Optional[Dict[str, Any]]:
     """Get a conversation concept by concept_id.
 

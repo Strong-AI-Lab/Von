@@ -3339,6 +3339,70 @@ def get_chat_history_segments(
         ) from e
 
 
+def find_chat_history_turn_position(
+    *,
+    user_id: str,
+    session_id: str,
+    turn_id: str,
+    namespace: Optional[str] = None,
+) -> Optional[int]:
+    """Locate a unique stored ID without transferring the full transcript.
+
+    The caller must first authorise this source. Recompute the position on every
+    dereference, so edits before the turn do not change its identity.
+    """
+    collection = get_chat_history_collection_service(read_only=True)
+    if collection is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    _guard_chat_history_read("find_chat_history_turn_position")
+    for query in _build_chat_history_session_read_queries(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=True,
+    ):
+        rows = _read_aggregate(
+            collection,
+            [
+                {"$match": query},
+                {
+                    "$project": {
+                        "ids": {
+                            "$map": {
+                                "input": _history_array_expr(),
+                                "as": "entry",
+                                "in": {"$ifNull": ["$$entry.turn_id", None]},
+                            }
+                        }
+                    }
+                },
+                {
+                    "$project": {
+                        "position": {"$indexOfArray": ["$ids", turn_id]},
+                        "matches": {
+                            "$size": {
+                                "$filter": {
+                                    "input": "$ids",
+                                    "as": "id",
+                                    "cond": {"$eq": ["$$id", turn_id]},
+                                }
+                            }
+                        },
+                    }
+                },
+            ],
+            operation="find_chat_history_turn_position.aggregate",
+        )
+        row = next(rows, None)
+        if isinstance(row, Mapping):
+            return (
+                row["position"]
+                if row.get("matches") == 1 and row.get("position", -1) >= 0
+                else None
+            )
+    return None
+
+
 def get_chat_history_transcript_page(
     *,
     user_id: str,

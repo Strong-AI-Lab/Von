@@ -19847,6 +19847,105 @@ def continue_external_conversation_route():
         )
 
 
+@von_bp.route("/api/session/conversation_reference", methods=["POST"])
+def conversation_reference_route():
+    """Lazily copy or dereference a source identity under the browser actor."""
+    from ...integrations.internal_mcp.catalogue import (
+        _conversation_transcript_page_source,
+        _resolve_chat_history_read_target,
+    )
+    from ...security.access_control import override_current_actor
+    from ...services.conversation_concept_service import (
+        get_or_create_conversation_concept,
+    )
+    from ...services.conversation_reference_service import build_turn_reference
+
+    actor = session.get("user_concept_id")
+    if not actor:
+        return jsonify({"error": "Not authenticated"}), 401
+    data = request.get_json(silent=True) or {}
+    effective = get_effective_context(
+        request.headers.get("X-Von-Window-Session"),
+        dict(session),
+        actor,
+    )
+    scope = {
+        "acting_user_concept_id": actor,
+        "namespace": effective.get("namespace"),
+        "organisation_concept_id": effective.get("organisation_id"),
+    }
+    with override_current_actor(actor, effective.get("organisation_id")):
+        if data.get("conversation_ref"):
+            result = _conversation_transcript_page_source(
+                **scope,
+                conversation_ref=data["conversation_ref"],
+                page_size=12,
+                cursor=data.get("cursor"),
+            )
+        else:
+            access = _resolve_chat_history_read_target(
+                {**scope, "session_id": data.get("session_id")}
+            )
+            if not access.get("success"):
+                return jsonify({"error": "Conversation unavailable"}), 404
+            source = access["session_id"]
+            from ...services.conversation_concept_service import (
+                get_source_conversation_identity_for_authorisation,
+            )
+
+            # The accepted participant can reference an authorised source while
+            # its derived concept remains private to the source owner. Never
+            # copy a title or widen memberships to make that reference work.
+            concept_id = get_source_conversation_identity_for_authorisation(source)
+            if not concept_id:
+                try:
+                    concept_id = get_or_create_conversation_concept(
+                        source,
+                        owner_concept_id=access["read_user_id"],
+                        namespace=access.get("read_namespace"),
+                        organisation_concept_id=effective.get("organisation_id"),
+                    )
+                except Exception:
+                    # A concurrent participant may have created the same private
+                    # identity, which the current concept visibility cannot read.
+                    concept_id = get_source_conversation_identity_for_authorisation(
+                        source
+                    )
+                    if not concept_id:
+                        return (
+                            jsonify(
+                                {
+                                    "error": "Conversation identity temporarily unavailable"
+                                }
+                            ),
+                            503,
+                        )
+            turn_id = data.get("turn_id")
+            if turn_id is not None:
+                try:
+                    concept_id = build_turn_reference(concept_id, turn_id)
+                except ValueError:
+                    return jsonify({"error": "Stored turn ID required"}), 400
+            result = _conversation_transcript_page_source(
+                **scope, conversation_ref=concept_id, page_size=12
+            )
+        if not result.get("success"):
+            return jsonify({"error": "Conversation or turn unavailable"}), 404
+        if data.get("metadata_only") is True:
+            result = {
+                key: result.get(key)
+                for key in (
+                    "success",
+                    "concept_reference",
+                    "session_id",
+                    "session_name",
+                    "turn_id",
+                    "open_action",
+                )
+            }
+        return jsonify(result), 200
+
+
 @von_bp.route("/api/session/create_chat_session", methods=["POST"])
 def create_chat_session():
     """Create and switch to a new chat session for the current user."""

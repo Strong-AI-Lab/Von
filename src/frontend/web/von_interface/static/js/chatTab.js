@@ -1,3 +1,4 @@
+import { copyCompactConversationReference, isConversationConceptReference, conversationReferenceMetadata, readConversationReference } from './utils/conversationReference.js';
 import { bindConversationRowMenu } from './components/conversationRowMenu.js';
 import { initialiseConversationActions } from './components/conversationActions.js';
 import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './components/conversationNavigation.js';
@@ -68,7 +69,6 @@ import {
     parseIsoTimestampMs,
     selectConversationHistorySessions
 } from './utils/conversationHistoryPreferences.js';
-import { buildConversationReferencePayload as buildSharedConversationReferencePayload } from './utils/conversationReference.js';
 import {
     confirmConceptQaFormalisation,
     conceptQaActionAllowed,
@@ -1879,31 +1879,12 @@ function toggleConversationPinned(sessionId) {
     pinConversation(sessionId);
 }
 
-function buildConversationReferencePayload(session) {
-    const orgContext = getSessionScopedOrgContext();
-    return buildSharedConversationReferencePayload(session, {
-        currentUserConceptId: getCurrentUserConceptId() || null,
-        namespace: getSessionScopedNamespace() || null,
-        organisationConceptId: (
-            typeof orgContext?.concept_id === 'string' && orgContext.concept_id.trim()
-                ? orgContext.concept_id.trim()
-                : (typeof orgContext?.id === 'string' && orgContext.id.trim() ? orgContext.id.trim() : null)
-        ),
-    });
-}
-
 async function copyConversationReferenceToClipboard(session) {
-    const payload = buildConversationReferencePayload(session);
-    if (!payload) {
-        showToast('No conversation ID is available.', 'info');
-        return false;
-    }
     let text;
     try {
-        text = JSON.stringify(payload, null, 2);
-    } catch (err) {
-        console.error('[chatTab] Failed to serialize conversation reference:', err);
-        showToast('Failed to prepare conversation reference.', 'error');
+        text = await copyCompactConversationReference(session);
+    } catch (_) {
+        showToast('Conversation reference unavailable. Please retry.', 'error');
         return false;
     }
     const copied = await copyTextToClipboard(text);
@@ -2529,6 +2510,24 @@ async function deleteConversation(sessionId) {
         console.error('[chatTab] moveConversationToTrash error:', e);
         showToast('Failed to move conversation to Trash', 'error');
         return false;
+    }
+}
+
+export async function openConversationConceptReference(reference) {
+    try {
+        const result = await readConversationReference({ conversation_ref: reference });
+        if (!result?.success) throw new Error('unavailable');
+        if (!result.turn_id) return openConversationSearchResult(result);
+        const previousTab = document.querySelector('.tab-button.active')?.dataset.tab;
+        activateTab('chatTab');
+        const { openReferenceInspector } = await import('./components/referenceInspector.js');
+        return openReferenceInspector({
+            reference_id: reference, reference_type: 'conversation_turn',
+            label: result.session_name || 'Conversation turn',
+        }, { onClose: () => { if (previousTab) activateTab(previousTab); } });
+    } catch (_) {
+        showToast('Conversation or turn unavailable.', 'info');
+        return { ok: false };
     }
 }
 
@@ -23017,10 +23016,8 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, _debugData) 
         });
 }
 
-// =============================================================================
-// JVNAUTOSCI-1043: User editing of AI outputs
-// =============================================================================
-
+// ======================================================================// JVNAUTOSCI-1043: User editing of AI outputs
+// ======================================================================
 /**
  * Enter edit mode for an assistant message.
  * Replaces rendered content with a plain-text textarea for editing.
@@ -23412,6 +23409,7 @@ function normaliseKindClass(kind) {
 }
 
 async function fetchConceptMetaForChat(fullId, generation = chatConceptMetaHydrationGeneration) {
+    if (isConversationConceptReference(fullId)) return conversationReferenceMetadata(fullId);
     try {
         // Prefer an exact lookup rather than fuzzy search: avoids incorrect labels.
         const nodeUrl = `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(fullId)}&raw_only=1&soft=1`;
@@ -23500,6 +23498,7 @@ async function fetchConceptMetaForChat(fullId, generation = chatConceptMetaHydra
 }
 
 async function fetchConceptMetaForChatNodeOnly(fullId, generation = chatConceptMetaHydrationGeneration) {
+    if (isConversationConceptReference(fullId)) return conversationReferenceMetadata(fullId);
     try {
         const nodeUrl = `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(fullId)}&raw_only=1&soft=1`;
         const nodeRes = await fetchOptionalChatConceptResource(
@@ -23567,6 +23566,11 @@ async function fetchAndCacheConceptMetaForChat(
     const conceptId = normalisePotentialConceptId(fullId);
     if (!conceptId) {
         return null;
+    }
+
+    if (isConversationConceptReference(conceptId)) {
+        const meta = await conversationReferenceMetadata(conceptId);
+        return isChatConceptMetaHydrationCurrent(generation) ? meta : null;
     }
 
     if (chatConceptMetaCache.has(conceptId)) {
@@ -38210,6 +38214,23 @@ function formatChatTimestamp(isoString) {
     }
 }
 
+function createTurnReferenceCopyButton(sourceSessionId, turnId) {
+    const referenceButton = document.createElement('button');
+    referenceButton.type = 'button';
+    referenceButton.className = 'btn-mini conversation-turn-copy';
+    referenceButton.textContent = '⧉';
+    referenceButton.title = 'Copy turn link';
+    referenceButton.setAttribute('aria-label', 'Copy turn link');
+    referenceButton.addEventListener('click', async () => {
+        try {
+            const reference = await copyCompactConversationReference({ session_id: sourceSessionId }, turnId);
+            const copied = await copyTextToClipboard(reference);
+            showToast(copied ? 'Copied turn reference.' : 'Could not copy turn reference.', copied ? 'success' : 'error');
+        } catch (_) { showToast('This entry has no available stored turn reference.', 'info'); }
+    });
+    return referenceButton;
+}
+
 function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory = false, timestampStr = null, fastpathMeta = null, ttsText = null, messageOptions = null) {
     const scrollableField = document.getElementById('scrollableField');
     if (!scrollableField) {
@@ -38727,7 +38748,10 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageContainer.appendChild(assistantAvatar);
             messageContainer.appendChild(messageContent);
 
-            if (turnId) messageContainer.dataset.turnId = turnId;
+            if (turnId) {
+                messageContainer.dataset.turnId = turnId;
+                messageHeader.appendChild(createTurnReferenceCopyButton(activeChatSessionId, turnId));
+            }
             scrollableField.appendChild(messageContainer);
         } else {
             // For user messages and errors, use simpler styling
@@ -38867,7 +38891,10 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 thinkingCardSlot.className = 'thinking-card-inline-slot';
                 messageContainer.appendChild(thinkingCardSlot);
             }
-            if (turnId) messageContainer.dataset.turnId = turnId;
+            if (turnId) {
+                messageContainer.dataset.turnId = turnId;
+                messageHeader.appendChild(createTurnReferenceCopyButton(activeChatSessionId, turnId));
+            }
             scrollableField.appendChild(messageContainer);
         }
 
