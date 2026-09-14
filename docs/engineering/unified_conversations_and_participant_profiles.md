@@ -233,3 +233,29 @@ the admin chat-history reindex route). The lexical backfill utility
 projections only; it does not backfill embeddings. Inspect coverage and use bounded,
 actor/namespace-specific reindexing rather than scanning history on every search.
 This change does not run a live backfill or certify current production index coverage.
+
+## Stored conversation turn references
+
+Chat turns use the existing compact format
+`#V#conversation_<identity>_turn_<UTF-8 hex of stored turn_id>`. The conversation
+identity and persisted turn ID, rather than a title, timestamp or array position,
+keep the reference stable across reloads, renaming and transcript reordering.
+`POST /von/api/session/conversation_reference` resolves the source and stored
+turn before returning the reference. The same reference can be opened as a
+conversation cartouche or retrieved through `conversation_get`; access still
+requires the reader's normal source permissions. It is not an access grant.
+
+Right-click an individual user or assistant turn and choose **Copy turn
+reference**, or focus the turn and press **Shift+F10** or the **Context Menu**
+key. Escape closes the menu and returns focus. The existing **Copy turn link**
+button provides direct and touch access to the same action. Links, editable
+fields and selected text retain their native browser context menus. Entries
+without an available stored turn ID report that fact without copying a
+fabricated reference; client-only history IDs are not stable locators.
+
+Coverage: `test_compact_conversation_reference.py` exercises generation,
+resolution, renamed/reordered sources and unavailable/denied turns;
+`chatTab.test.js` covers the renderer/menu integration; and
+`tests/browser/turnReferenceMenu.cjs` checks the production frontend modules in
+a local HTTP fixture with real browser clipboard access and reloads. That
+fixture does not claim live authenticated-server or public deployment acceptance.
