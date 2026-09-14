@@ -82,7 +82,7 @@ verified completion, rollback and failed recovery with a disposable file.
 ## 14 September reviewed continuation
 
 Recovered PR #665 and merged `origin/main` at `22acdc223982ae34a72f5e32003a4cf74562342b`
-without conflicts. Real acceptance found and repaired two candidate defects:
+without conflicts. Real acceptance found and repaired three candidate defects:
 
 - Healthy runtimes explicitly skipping startup materialisation could not leave
   the offline shell. Explicit `skipped` now permits recovery, still requiring
@@ -90,6 +90,10 @@ without conflicts. Real acceptance found and repaired two candidate defects:
 - Selecting an organisation after initial page load left draft recovery bound
   to the initial scope. Recovery now rebinds after the confirmed switch,
   removes the previous listener/view and keeps namespace isolation.
+- The recovery panel occupied a narrow mobile composer control column. It now
+  spans the composer width; an authenticated reload on final product revision
+  `2c7eb97e7e05d40d8cf3b1e4c7a65b7fb732f177` verified a readable 360px recovery
+  panel in a 390px viewport, with expanded draft and discard control.
 
 Tested product revision: `efa7f0dda6c650e87488abfe093915dcd6c8f021`.
 `pdm run` passed 22 targeted backend tests; Jest passed 17 outage/health tests.
@@ -111,7 +115,7 @@ This is desktop Chromium mobile viewport acceptance, not a physical installed
 phone or public OAuth test.
 
 Evidence is retained under `.run/outage-resume/`: `acceptance-final.json`,
-`acceptance.cjs`, `authenticated-outage.png`, `recovered.png`, and component
+`acceptance.cjs`, `authenticated-outage.png`, `recovered.png`, final `recovery-layout.json`/`.png`, and component
 receipts/screenshots. Earlier failed probes are retained to explain the fixes.
 The supplied canonical archive
 `#V#computer_file_copy_45ea7ecc36eb4f76a78ad59e6c44e5ec` was checksum-verified:
