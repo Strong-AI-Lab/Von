@@ -55,18 +55,18 @@ function mergeCost(base, overlay) {
 
 function formatAmount(amount, currency) {
   if (amount === null) return '';
-  const roundToCents = amount > 0.02;
+  const belowCent = amount > 0 && amount < 0.01;
+  const displayedAmount = belowCent ? 0.01 : amount;
+  let formatted;
   try {
-    return new Intl.NumberFormat('en-NZ', {
-      style: 'currency',
-      currency,
-      minimumFractionDigits: roundToCents ? 2 : (amount > 0 && amount < 0.01 ? 4 : 2),
-      maximumFractionDigits: roundToCents ? 2 : 6,
-    }).format(amount);
+    formatted = new Intl.NumberFormat('en-NZ', {
+      style: 'currency', currency,
+      minimumFractionDigits: 2, maximumFractionDigits: 2,
+    }).format(displayedAmount);
   } catch (_) {
-    const fractionDigits = roundToCents ? 2 : 6;
-    return `${currency === 'USD' ? 'US$' : `${currency} `}${amount.toFixed(fractionDigits)}`;
+    formatted = `${currency === 'USD' ? 'US$' : `${currency} `}${displayedAmount.toFixed(2)}`;
   }
+  return `${belowCent ? '< ' : ''}${formatted}`;
 }
 
 function describeCost(cost, { compact = false } = {}) {

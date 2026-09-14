@@ -3,6 +3,74 @@ from __future__ import annotations
 from src.backend.services import minimal_imposition_benchmark_service as service
 
 
+def test_clarification_benchmark_does_not_reward_always_ask_or_first_match():
+    base = {
+        "case_id": "C01",
+        "evidence_ref": "fixture:independent-world-state",
+        "evidence_kind": "scripted",
+        "stratum": "ordinary",
+        "arm": "candidate",
+        "clarification_required": False,
+        "useful_completion": False,
+        "question_count": 1,
+        "repeated_question_count": 0,
+        "wrong_target_count": 0,
+        "duplicate_effect_count": 0,
+        "unmet_obligation_count": 1,
+    }
+    report = service.summarise_clarification_trials(
+        [
+            base,  # Settled alias: always asking incurs burden and leaves work pending.
+            {
+                **base,
+                "case_id": "C02",
+                "clarification_required": True,
+                "question_count": 0,
+                "wrong_target_count": 1,
+            },  # First-match guess did not complete the job.
+            {
+                **base,
+                "case_id": "C04",
+                "question_count": 0,
+                "useful_completion": True,
+                "unmet_obligation_count": 0,
+            },
+        ]
+    )
+    row = report["groups"][0]
+    assert row["trial_count"] == 3
+    assert row["useful_completion_count"] == 1
+    assert row["unnecessary_clarification_episode_count"] == 1
+    assert row["missed_material_clarification_count"] == 1
+    assert row["wrong_target_count"] == 1
+    assert row["measurements"]["cost"] == []  # unmeasured, not free
+    assert row["evidence_kind"] == "scripted"
+
+
+def test_clarification_benchmark_rejects_completion_with_duplicate_effects():
+    import pytest
+
+    with pytest.raises(ValueError, match="Completion conflicts"):
+        service.summarise_clarification_trials(
+            [
+                {
+                    "case_id": "C16",
+                    "evidence_ref": "fixture:task-readback",
+                    "evidence_kind": "model_trial",
+                    "stratum": "boundary",
+                    "arm": "candidate",
+                    "clarification_required": False,
+                    "useful_completion": True,
+                    "question_count": 0,
+                    "repeated_question_count": 0,
+                    "wrong_target_count": 0,
+                    "duplicate_effect_count": 1,
+                    "unmet_obligation_count": 0,
+                }
+            ]
+        )
+
+
 def _profile() -> dict:
     return {
         "profile_concept_id": "#V#minimal_imposition_benchmark_profile_autopilot_v1",

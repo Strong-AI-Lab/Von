@@ -21,6 +21,18 @@ function normaliseList(value) {
     : [];
 }
 
+// A display label is a bounded view of the statement, never an assertion alias.
+// The full reference ID remains alongside it, in lookup requests and in Copy ID.
+function assertionDisplayLabel(assertion) {
+  const statement = clean(assertion?.human_statement)?.replace(/\s+/gu, ' ');
+  if (!statement) return 'Assertion';
+  const characters = Array.from(statement);
+  if (characters.length <= 96) return statement;
+  const prefix = characters.slice(0, 95).join('');
+  const wordBoundary = prefix.lastIndexOf(' ');
+  return `${wordBoundary >= 64 ? prefix.slice(0, wordBoundary) : prefix}…`;
+}
+
 export function normaliseReferenceManifest(value) {
   if (!value || typeof value !== 'object') return null;
   if (value.schema_version !== REFERENCE_MANIFEST_SCHEMA_VERSION) return null;
@@ -212,6 +224,8 @@ function renderAssertion(payload) {
   const body = clearBody();
   if (!body) return;
   const assertion = payload?.assertion || {};
+  const title = byId('conversationReferenceInspectorTitle');
+  if (title) title.textContent = assertionDisplayLabel(assertion);
   const summary = appendSection(body, 'Summary');
   appendText(
     summary,
@@ -393,6 +407,7 @@ function setHeader(reference) {
 async function loadCurrentReference() {
   const reference = currentReference;
   if (!reference) return;
+  setHeader(reference);
   setBusy(true);
   setStatus(`Loading ${reference.label || 'reference'}`);
   const body = clearBody();

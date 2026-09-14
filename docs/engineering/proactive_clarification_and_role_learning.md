@@ -437,6 +437,49 @@ Do not claim repair completed merely because a status update returned success.
 
 ## 8. Implementation selection and touchpoints
 
+### Repository implementation boundary
+
+The implementation task `#V#task_agent_7cbf944d3d6c7c8a37817aa48ec594ec`
+extends the existing direct adaptive exchange. Its code candidate refines the
+ordinary-turn support wording, retains visible lower-ranked name matches, and
+adds `turn_checkpoint_conversation` for a server-bound conversation owner.
+The checkpoint uses the existing situation compare-and-set service. Native
+task creation saves an actor-scoped idempotency key before dispatch; canonical
+task creation/reconciliation and current assignment eligibility remain the
+effect boundary. Runtime effect projections retain the dispatched key when a
+later model sidecar omits it. Exact runtime-fact blocks cannot be supplied by
+the checkpoint's model-authored text.
+
+The `/generate` route supplies the trusted owner, namespace and starting
+revision and carries the checkpoint revision into terminal persistence.
+Participants do not acquire a new right to replace an owner's carrier.
+Stateless callers and non-owner turns retain their existing task/key route;
+the new automatic checkpoint guarantee is bounded to owner-bound ordinary
+turns. Revisions detect stale replacement, not concurrent execution: a failed
+checkpoint requires reconciliation, and canonical task identity prevents
+duplicate creation. Existing task IDs and authority-checked updates support
+repair; reassignment alone does not establish worker cancellation or undo
+disclosure.
+
+Semantic policy remains in the existing code-owned turn support message;
+this candidate does not select a second independently governed prompt or
+override a live Vontology body. No production prompt, alias, membership or
+predicate is activated. The design specifies no new predicate for this slice:
+exact source occurrences, scoped assertions, `hasName` and the existing
+conversation carrier remain the representation surfaces. Name/role admission,
+later retrieval and correction use canonical assertion tools; changed role
+judgement remains with the model.
+
+The [development fixtures](../../tests/fixtures/clarification/README.md) provide
+all 22 labelled scenarios and a minimal-imposition trial summariser. Isolated
+gateway replays establish checkpoint, task cardinality, current eligibility,
+scoped source retention and recovery mechanics. They use scripted model
+responses; live prompt ownership, the historical reported alias, live model
+clarification quality, RAG indexing and prospective learned role benefit are
+unverified. Source publication is not runtime activation. Rollback is the
+code revision plus canonical reconciliation of any retained task key/receipt;
+no schema/database migration or live data write is required by this candidate.
+
 The implementation candidate should first keep one ordinary adaptive model/tool
 exchange. Adaptable judgement belongs in its governed prompt/context surface;
 stable knowledge belongs in canonical scoped facts; exact dispatch, trusted

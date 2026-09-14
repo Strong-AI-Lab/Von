@@ -6844,7 +6844,20 @@ def _message_get_direct(**kwargs):
             "message_not_found",
             "No participant-visible internal direct message was found for that ID.",
         )
-    return {"success": True, "message": project_direct_message(message)}
+    from ...services.message_attachment_service import (
+        message_attachment_content,
+        message_attachment_descriptors,
+    )
+
+    attachments = message_attachment_descriptors(message)
+    return {
+        "success": True,
+        "message": project_direct_message(message),
+        "attachment_content": message_attachment_content(message, actor_scope.user_concept_id),
+        "image_attachments": [
+            a for a in attachments if a.get("content_type", "").startswith("image/")
+        ],
+    }
 
 
 def _message_list_direct(**kwargs):
@@ -35903,6 +35916,7 @@ def _task_search(**kwargs):
     try:
         result = search_tasks(
             query=kwargs.get("query"),
+            search_mode=kwargs.get("search_mode", "lexical"),
             project_concept_id=kwargs.get("project_concept_id"),
             collection_concept_id=kwargs.get("collection_concept_id"),
             status_filter=kwargs.get("status_filter") or kwargs.get("status"),
@@ -40826,7 +40840,10 @@ def _build_default_catalogue_core_definitions() -> List[MethodDefinition]:
             description=(
                 "Resolve a Vontology concept deterministically from a user-provided surface form. "
                 "Read-only: does not mutate concepts. Returns resolved/ambiguous/not_found with an audit trail. "
-                "Supports language preferences, instance_of restriction, and optional code-string matching."
+                "Supports language preferences, instance_of restriction, and optional code-string matching. "
+                "Resolution is lexical candidate evidence, not intended operational identity or authority. "
+                "Inspect match stage, accessible alternatives and bounded search coverage before relying "
+                "on a weak match. Not-found does not prove absence outside the searched scope."
             ),
         ),
         MethodDefinition(
@@ -45113,6 +45130,7 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                     "project_concept_id": (str, type(None)),
                     "collection_concept_id": (str, type(None)),
                     "query": (str, type(None)),
+                    "search_mode": str,
                     "status_filter": (str, type(None)),
                     "status": (str, type(None)),
                     "statuses": (list, type(None)),
@@ -45166,7 +45184,9 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
             description=(
                 "Search Von's internal task store with rich filters (status, assignee, "
                 "creator, report-to, labels, planning metadata, category/source semantics, "
-                "hierarchy, date ranges, and dependency state)."
+                "hierarchy, date ranges, and dependency state). Set search_mode='semantic' "
+                "with a natural-language query to retrieve related tasks and citation-ready "
+                "RAG context. Inspect semantic_retrieval for embedding failures and lexical fallback."
             ),
         ),
         MethodDefinition(

@@ -19,13 +19,13 @@ const selected = {
     originating_conversation_id: '#V#conversation_a', conversation_session_id: 'session-a',
     task_type_ids: [], current_work_product: {status: 'ready', concept_id: '#V#brief_a'},
 };
-async function setup({product = {status: 'ready', concept_id: '#V#brief_a', content: 'Current A'}, activity = []} = {}) {
+async function setup({product = {status: 'ready', concept_id: '#V#brief_a', content: 'Current A'}, activity = [], deployments = []} = {}) {
     const api = require(apiPath);
     api.getJson.mockImplementation(async url => {
         if (url === '/api/tasks/taxonomy') return {task_types: [], task_sources: [], defaults: {}};
         if (url === '/von/api/chat_prompt_queue') return {items: activity};
         if (url.startsWith('/api/tasks/?')) return {tasks: [selected], count: 1};
-        if (url === '/api/tasks/%23V%23task_a') return selected;
+        if (url === '/api/tasks/%23V%23task_a') return {...selected, deployments};
         if (url === '/api/tasks/%23V%23task_a/work-product') return product;
         return {};
     });
@@ -110,4 +110,33 @@ test('reopening Tasks during an auth/scope reload cannot leave the workspace per
     requests[1]({tasks: [], count: 0});
     await flush();
     expect(document.querySelector('#globalTaskInspector').textContent).toContain('Maintain brief A');
+});
+
+
+test('shows multiple deployment attempts and selects only the verified attempt as product', async () => {
+    const deployments = ['deployed', 'verified'].map((status, index) => ({
+        concept_id: `#V#deployment_${index}`, deployment_id: `dgx-${index}`,
+        environment: 'production', target: '<img src=x onerror=alert(1)>', status,
+        build: {build_id: `sha256:build-${index}`, source_revision: 'ab10a303e'},
+        observations: [{status, evidence: 'Health revision checked'}],
+    }));
+    const api = await setup({deployments});
+    document.querySelector('.task-item').click();
+    await flush();
+    const inspector = document.querySelector('#globalTaskInspector');
+    expect(inspector.querySelectorAll('.task-deployment')).toHaveLength(2);
+    expect(inspector.textContent).toContain('This deployment is not currently verified.');
+    expect(inspector.textContent).toContain('sha256:build-0');
+    expect(inspector.querySelector('.task-deployment img')).toBeNull();
+    expect(inspector.querySelectorAll('.task-select-deployment-btn')).toHaveLength(1);
+    inspector.querySelector('.task-select-deployment-btn').click();
+    await flush();
+    expect(api.patchJson).toHaveBeenCalledWith('/api/tasks/%23V%23task_a', {current_work_product_concept_id: '#V#deployment_1'});
+});
+
+test('a fresh deployment product read preserves its unverified status', async () => {
+    await setup({product: {status: 'ready', kind: 'deployment', concept_id: '#V#deployment_1', deployment: {status: 'rolled_back', environment: 'production'}, content: 'Rollback evidence'}});
+    document.querySelector('#globalTaskInspector .task-open-product-btn').click();
+    await flush();
+    expect(document.querySelector('#globalTaskInspector').textContent).toContain('Deployment: rolled_back (production)');
 });

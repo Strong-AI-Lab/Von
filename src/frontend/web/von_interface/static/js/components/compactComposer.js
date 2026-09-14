@@ -48,6 +48,18 @@ export function initialiseCompactChatComposer(composer, resizeDraft = resizeComp
         const name = menu.open ? 'Close actions' : 'More actions';
         if (label) label.textContent = name;
         if (summary) summary.title = name;
+        // Keep the enlarged settings/activity disclosure within short desktop views.
+        if (menu.open && !isCompactComposer()) {
+            const bounds = summary.getBoundingClientRect();
+            const above = bounds.top >= 160;
+            panel.style.bottom = above ? 'calc(100% + 8px)' : 'auto';
+            panel.style.top = above ? 'auto' : 'calc(100% + 8px)';
+            panel.style.maxHeight = `${Math.max(44, Math.min(420, (above ? bounds.top : window.innerHeight - bounds.bottom) - 16))}px`;
+        } else {
+            panel.style.removeProperty('bottom');
+            panel.style.removeProperty('top');
+            panel.style.removeProperty('max-height');
+        }
         // Use the browser's close-request stack (including Android Back where
         // supported), without adding synthetic entries to conversation history.
         if (menu.open && isCompactComposer() && menu.isConnected) {
@@ -64,7 +76,7 @@ export function initialiseCompactChatComposer(composer, resizeDraft = resizeComp
     // Wait for the completed click: collapsing during pointer/focus events can
     // move Send before touch activation reaches it.
     document.addEventListener('click', event => {
-        if (menu.isConnected && isCompactComposer() && !menu.contains(event.target)) dismiss();
+        if (menu.isConnected && isCompactComposer() && !event.composedPath().includes(menu)) dismiss();
     });
     // Keyboard activation also dismisses before the existing submission handler.
     composer.querySelector('#sendButton')?.addEventListener('click', () => {

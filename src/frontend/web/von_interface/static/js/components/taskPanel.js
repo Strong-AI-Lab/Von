@@ -2749,6 +2749,21 @@ function renderTaskOrganisationField(task) {
     `;
 }
 
+function renderTaskDeployments(task) {
+    const deployments = task.deployments || [];
+    if (!deployments.length) return '';
+    return `<section aria-label="Builds and deployments"><h4>Builds and deployments</h4>
+      ${deployments.map(deployment => `<article class="task-deployment">
+        <button type="button" class="task-concept-link" data-concept-id="${escapeHtml(deployment.concept_id)}" data-concept-name="${escapeHtml(deployment.deployment_id)}">${escapeHtml(deployment.deployment_id)}</button>
+        <p>${escapeHtml(deployment.environment)} · ${escapeHtml(deployment.status)} · ${escapeHtml(deployment.target || 'Target not recorded')}</p>
+        <p>Build: ${escapeHtml(deployment.build?.build_id || '')}<br>Source revision: ${escapeHtml(deployment.build?.source_revision || '')}<br>Deployed: ${escapeHtml(deployment.deployed_at || 'Not recorded')}</p>
+        ${deployment.status !== 'verified' ? '<p>This deployment is not currently verified.</p>' : ''}
+        <details><summary>Deployment evidence and history</summary><pre>${escapeHtml(JSON.stringify(deployment.observations || [], null, 2))}</pre></details>
+        ${deployment.status === 'verified' ? `<button type="button" class="task-select-deployment-btn" data-task-id="${escapeHtml(getTaskId(task))}" data-concept-id="${escapeHtml(deployment.concept_id)}">Use as current work product</button>` : ''}
+      </article>`).join('')}
+    </section>`;
+}
+
 function renderTaskWorkProduct(task, detailState) {
     const product = detailState?.product || task.current_work_product;
     const messages = {
@@ -2762,8 +2777,9 @@ function renderTaskWorkProduct(task, detailState) {
     const productId = product?.concept_id || '';
     const execute = canExecuteTaskWithVon(task);
     const active = isTaskExecutionLaunchSuppressed(taskId);
-    return `<section class="task-work-product" aria-label="Current work product">
+    return `${renderTaskDeployments(task)}<section class="task-work-product" aria-label="Current work product">
         <h4>Current work product</h4>
+        ${product?.kind === 'deployment' ? `<p>Deployment: ${escapeHtml(product.deployment?.status || 'unreported')} (${escapeHtml(product.deployment?.environment || '')})</p>` : ''}
         <p>${product?.status === 'ready' ? escapeHtml(productId) : escapeHtml(messages[product?.status] || 'Open task details to check its current product.')}</p>
         ${product?.status === 'ready' ? `<button type="button" class="task-open-product-btn" data-task-id="${escapeHtml(taskId)}" ${detailState.productLoading ? 'disabled' : ''}>${detailState.productLoading ? 'Opening…' : 'Open current work product'}</button>` : ''}
         ${productId ? `<button type="button" class="task-concept-link" data-concept-id="${escapeHtml(productId)}" data-concept-name="${escapeHtml(productId)}">Inspect product concept</button>` : ''}
@@ -3950,14 +3966,15 @@ function attachTaskEventListeners() {
                 void openTaskWorkProduct(button.dataset.taskId);
             });
         });
-        root.querySelectorAll('.task-save-product-btn').forEach(button => {
+        root.querySelectorAll('.task-save-product-btn, .task-select-deployment-btn').forEach(button => {
             button.addEventListener('click', async event => {
                 event.stopPropagation();
                 const taskId = button.dataset.taskId;
-                const input = button.closest('.task-work-product').querySelector('.task-current-product-input');
+                const input = button.closest('.task-work-product')?.querySelector('.task-current-product-input');
+                const productId = button.classList.contains('task-select-deployment-btn') ? button.dataset.conceptId : (input.value.trim() || null);
                 button.disabled = true;
                 try {
-                    await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, { current_work_product_concept_id: input.value.trim() || null });
+                    await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, { current_work_product_concept_id: productId });
                     const detail = getTaskDetailState(taskId);
                     detail.product = null;
                     detail.productHtml = '';

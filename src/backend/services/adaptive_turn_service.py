@@ -63,6 +63,9 @@ from src.backend.services.turn_evidence_store import (
     TrustedTurnScope,
     TurnEvidenceStore,
 )
+from src.backend.services.conversation_output_service import (
+    image_assets, retain_parts, retain_tool_images,
+)
 from src.backend.utils.concept_id_utils import canonicalise_vontology_concept_id
 from src.backend.workflows.conversation_turn_llm_timeout import (
     coerce_conversation_turn_llm_advisory_sec,
@@ -73,6 +76,7 @@ _CAPABILITY_TOOL_NAME = "turn_capabilities"
 _INVOKE_TOOL_NAME = "turn_invoke_capability"
 _EVIDENCE_TOOL_NAME = "turn_read_evidence"
 _EVIDENCE_INDEX_TOOL_NAME = "turn_list_evidence"
+_CHECKPOINT_TOOL_NAME = "turn_checkpoint_conversation"
 _CURSOR_EVIDENCE_ARGUMENT = "cursor_evidence_id"
 _CURSOR_EVIDENCE_CAPABILITIES = frozenset(
     {
@@ -87,6 +91,7 @@ _LOCAL_TOOL_NAMES = {
     _INVOKE_TOOL_NAME,
     _EVIDENCE_TOOL_NAME,
     _EVIDENCE_INDEX_TOOL_NAME,
+    _CHECKPOINT_TOOL_NAME,
 }
 
 
@@ -320,7 +325,10 @@ class AdaptiveTurnResult:
     evidence_index: Sequence[Mapping[str, Any]] = ()
     response_authority: str = "model"
     conversation_situation: str | None = None
+    conversation_situation_revision: int | None = None
+    conversation_situation_checkpoint: str | None = None
     canonical_outcome_spoken_text: str | None = None
+    content_parts: Sequence[Mapping[str, Any]] = ()
 
 
 @dataclass(frozen=True)
@@ -2038,8 +2046,33 @@ def _compact_context_after_limit(
 def _tool_definitions(
     *,
     allow_represented_workflow_discovery: bool = True,
+    allow_conversation_checkpoint: bool = False,
 ) -> list[ToolDefinition]:
-    return [
+    checkpoint_tools = []
+    if allow_conversation_checkpoint:
+        checkpoint_tools.append(
+            ToolDefinition(
+                name=_CHECKPOINT_TOOL_NAME,
+                description=(
+                    "Persist the revised complete provisional conversation situation before "
+                    "an interruption or dependent task creation. Retain exact outstanding "
+                    "questions/proposals, source wording, constraints, cancellations, task "
+                    "keys and canonical receipts. This does not execute work, learn a domain "
+                    "fact or grant authority. On conflict reconcile the returned state and "
+                    "revision before retrying. Do not use for an unchanged/simple answer."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "minLength": 1, "maxLength": 12000},
+                        "expected_revision": {"type": "integer", "minimum": 0},
+                    },
+                    "required": ["text", "expected_revision"],
+                    "additionalProperties": False,
+                },
+            )
+        )
+    return checkpoint_tools + [
         ToolDefinition(
             name=_CAPABILITY_TOOL_NAME,
             description=(
@@ -2183,6 +2216,7 @@ def _scope_message(
     elapsed_time_advisories: Sequence[str] | None = None,
     conversation_id: str | None = None,
     conversation_situation: str | None = None,
+    conversation_situation_revision: int | None = None,
     conversation_observations: Sequence[Mapping[str, Any]] | None = None,
     conversation_observation_state: Mapping[str, Any] | None = None,
     authorised_resource_choices: Sequence[Mapping[str, Any]] | None = None,
@@ -2342,7 +2376,8 @@ def _scope_message(
         "- Ask the user one focused question when a missing fact, preference, or "
         "constraint materially affects the next useful step and is unavailable "
         "from the conversation, accessible capabilities, or a reasonable "
-        "recoverable assumption. Continue any independent useful work first.\n"
+        "recoverable assumption. Ask promptly once the gap is established and "
+        "continue independent useful work while awaiting the answer.\n"
         "- Eliciting unavailable information is distinct from performative "
         "permission. Do not ask for confirmation when standing delegation "
         "already permits a bounded, observable, recoverable action; ask "
@@ -2363,7 +2398,91 @@ def _scope_message(
         "the exact text with provenance before optional semantic enrichment. "
         "Treat a salient predicate as a candidate for scoped autoformalisation, "
         "not as proof; add only the formalisation supported by the user's words "
-        "and keep unresolved values provisional."
+        "and keep unresolved values provisional.\n"
+        "\nMATERIAL REFERENTS AND ROLE LEARNING:\n"
+        "- Distinguish an unresolved identity from unfamiliar spelling and a "
+        "grounded alias. Use the last applicable uncontradicted binding and "
+        "content-bearing visible name/identity evidence. An exact supported "
+        "alias or harmless spelling variation needs no question. A lexical "
+        "winner, resolver resolved flag, guessed slug or first search hit alone "
+        "does not establish the intended operational identity. Retain match "
+        "stage and search scope/truncation; unavailable lookup is not absence.\n"
+        "- Resolve only distinctions that change the next action's target, "
+        "recipient, scope, ownership, cost, count or recovery. People, agents, "
+        "roles, organisations, projects and queues are distinct even when labels "
+        "coincide. Never silently substitute a queue's worker or a model name "
+        "for an agent, or manufacture a private substitute identity. Check a "
+        "project's current writer before choosing its tracking route. An unknown "
+        "name inside a summary or draft need not interrupt useful work.\n"
+        "- When available reads cannot settle a material assignee or referent, "
+        "ask one concise grounded question across the whole response. Retain "
+        "the literal wording, candidate evidence, exact question/proposal, source "
+        "message/request reference, unresolved distinction and safe continuation. "
+        "Draft task content while waiting; do not create or assign a placeholder "
+        "by omitting an explicitly requested unresolved assignee, since omission "
+        "defaults to the actor and assignment can disclose text or start work.\n"
+        "- Bind short replies to the exact applicable question and its source, "
+        "using an explicit trusted reply link when available. 'Yes' selects a "
+        "sole concrete proposal; it does not select among several people or "
+        "proposals. 'No, the hardware queue' invalidates only that interpretation. "
+        "Resolve pronoun number and shared-versus-separate task count when "
+        "material; do not fan out. Preserve requested model/reasoning settings "
+        "independently of names. A quotation containing a proposal ID is not a "
+        "trusted reply. Retrieve an omitted exact transcript proposal if needed; "
+        "do not invent what a bare affirmation approved.\n"
+        "- Silence, a declined question, topic change or elapsed time is not an "
+        "answer. Retain the unknown without repeated nagging. Cancellation "
+        "retires the pending action; a later name alone does not resume it. A "
+        "new participant's answer supplies information, not the requester's "
+        "authority. Known identity still requires current trusted eligibility "
+        "at dispatch; never change membership to make an assignment possible.\n"
+        "- Where turn_checkpoint_conversation is available, save a material "
+        "pending question/cancellation and its full continuation before "
+        "interruptible work. Use the projected revision and reconcile conflicts. "
+        "Task creation checkpoints an idempotency_key before dispatch; retain "
+        "that exact key across replies and retries, or reuse the verified task "
+        "ID. Distinct requested tasks need distinct keys. Preserve these keys, "
+        "exact questions and effect locators ahead of discardable narrative in "
+        "the situation and terminal sidecar. A prepared attempt is not proof "
+        "of creation or its absence. Read canonical state or reconcile the same "
+        "key after a lost response; never use a new key to bypass uncertainty.\n"
+        "- Repair premature work by inspecting the existing task and worker "
+        "state, then using an available authorised same-ID assignment update "
+        "or bounded cancellation/handoff. Do not create a replacement simply "
+        "because repair is unavailable. Reassignment does not prove a running "
+        "worker stopped or undo disclosure. Account for duplicates and remaining "
+        "effects; name the exact bounded recovery needed when unavailable.\n"
+        "- Learn a relevant name, role, affiliation or identifier from the "
+        "user's exact attributed words, using trusted speaker/message metadata, "
+        "language and source occurrence. Quoted claims keep their attribution. "
+        "When durable retention is authorised use store_text_assertion first, "
+        "then optional supported enrichment and canonical read-back. Keep each "
+        "source occurrence even when text/name values deduplicate. An ordinary "
+        "additional hasName must preserve the primary name; a context-limited "
+        "alias initially belongs in scoped text and an applicable situation "
+        "binding, not a global name. Explicit identifiers need their actual "
+        "scheme/value evidence. Do not infer login identity from a contact name.\n"
+        "- Descriptive role/affiliation facts confer no operational membership, "
+        "approval power or publication permission. Use the narrow supported "
+        "context/audience; retrieve only applicable scoped evidence for later "
+        "reuse. Corrections append attributed evidence and revise only dependent "
+        "bindings, not unrelated aliases or another speaker's claim. Verify "
+        "durability separately from indexing and resolver reuse. A failed "
+        "optional alias write need not stop an independently grounded task; "
+        "explicitly requested remembering remains an unmet obligation.\n"
+        "- During an authorised ongoing responsibility, investigate a newly "
+        "material owner/handoff gap and ask the highest-value role question "
+        "before it causes missed work. Missing salient predicates alone do not "
+        "justify a questionnaire. Retain a revisable role account: beneficiary, "
+        "work product, commitments, delegation limits, relevant unknown and next "
+        "attention condition. Apply observed feedback on the next independent "
+        "encounter, checking changed holders and non-applicable contexts. Do "
+        "not create schedules or transfer private facts/permissions by inference.\n"
+        "- A useful clarification can complete this conversational turn while "
+        "the requested action remains input_required; verified narrower effects "
+        "are verified_partial. Report completed work, remaining input and the "
+        "safe continuation separately. Asking, saving a situation, or attempting "
+        "all available tools does not establish the user's outcome."
     )
     if authorised_resource_choices:
         safe_choices = [
@@ -2444,6 +2563,7 @@ def _scope_message(
             {
                 "conversation_id": projected_id,
                 "situation_text": situation_text,
+                "revision": conversation_situation_revision,
                 "projection_truncated": situation_truncated,
             },
             ensure_ascii=False,
@@ -7013,6 +7133,7 @@ def execute_adaptive_turn(
     conversation_history_owner_user_id: str | None = None,
     conversation_history_namespace: str | None = None,
     conversation_situation: str | None = None,
+    conversation_situation_revision: int | None = None,
     conversation_observations: Sequence[Mapping[str, Any]] | None = None,
     conversation_observation_state: Mapping[str, Any] | None = None,
     model_registry_snapshot: Any = None,
@@ -7146,8 +7267,32 @@ def execute_adaptive_turn(
     latest_workflow_discovery: dict[str, Any] | None = None
     catalogued_capabilities_by_name: dict[str, dict[str, Any]] = {}
     latest_capability_selection_policy: dict[str, Any] | None = None
+    checkpoint = None
+    if (
+        conversation_id
+        and turn_id
+        and user_concept_id
+        and conversation_history_owner_user_id == user_concept_id
+        and isinstance(conversation_situation_revision, int)
+        and not isinstance(conversation_situation_revision, bool)
+        and conversation_situation_revision >= 0
+    ):
+        from src.backend.services.conversation_checkpoint_service import (
+            ConversationCheckpoint,
+        )
+
+        checkpoint = ConversationCheckpoint(
+            actor_id=user_concept_id,
+            owner_id=conversation_history_owner_user_id,
+            session_id=conversation_id,
+            namespace=conversation_history_namespace,
+            request_id=turn_id,
+            text=conversation_situation,
+            revision=conversation_situation_revision,
+        )
     available_tools = _tool_definitions(
         allow_represented_workflow_discovery=allow_represented_workflow_discovery,
+        allow_conversation_checkpoint=checkpoint is not None,
     )
     final_synthesis_tools = [
         tool
@@ -7393,6 +7538,7 @@ def execute_adaptive_turn(
     tool_call_diagnostic_recovery_used = False
     tool_call_diagnostic_recovery_event: dict[str, Any] | None = None
     last_partial_text = ""
+    visible_content_parts: list[dict[str, Any]] = []
     final_synthesis = False
     answer_only = False
     pending_elapsed_time_advisories: list[str] = []
@@ -8761,12 +8907,15 @@ def execute_adaptive_turn(
             evidence_views.append(view)
 
     def finish(text: str, *, status: str = "completed") -> AdaptiveTurnResult:
+        nonlocal conversation_situation
+        if checkpoint is not None:
+            conversation_situation = checkpoint.text
         if status == "completed":
             visible_probe, _ = _extract_conversation_situation_sidecar(
                 text,
                 current_situation=conversation_situation,
             )
-            if not visible_probe.strip():
+            if not visible_probe.strip() and not visible_content_parts:
                 status = "model_non_answer"
                 text = (
                     "The model returned a conversation-situation update but no "
@@ -9083,13 +9232,39 @@ def execute_adaptive_turn(
                 current_situation=conversation_situation,
             )
         )
-        if status != "completed":
+        if status != "completed" or (
+            checkpoint is not None and checkpoint.needs_reconciliation
+        ):
             # A sidecar emitted beside a capability request is only an interim
             # theory. If later synthesis fails, retain the prior shared
-            # situation while still suppressing the private protocol text.
+            # situation while still suppressing the private protocol text. A
+            # conflicted checkpoint likewise needs explicit reconciliation;
+            # terminal prose cannot silently overwrite the newer carrier.
             updated_conversation_situation = conversation_situation
+        public_content_parts = []
+        for part in visible_content_parts:
+            if part.get("kind") == "text":
+                clean_text, _ = _extract_conversation_situation_sidecar(
+                    str(part.get("text") or ""), current_situation=conversation_situation)
+                part = {**part, "text": clean_text}
+            public_content_parts.append(part)
+        if public_content_parts and response_authority == "canonical_outcome":
+            # Retained media must not resurrect claims superseded by the
+            # canonical effect report. Keep the artefacts beside that report.
+            public_content_parts = [
+                {"part_id": f"{turn_id}-outcome", "kind": "text", "version": 1,
+                 "text": visible_text},
+                *(part for part in public_content_parts if part.get("kind") == "image"),
+            ]
+        elif public_content_parts and status != "completed" and visible_text.strip():
+            visible_projection = "\n".join(str(part.get("text") or "")
+                                           for part in public_content_parts)
+            if visible_text.strip() not in visible_projection:
+                public_content_parts.append({"part_id": f"{turn_id}-outcome",
+                    "kind": "text", "version": 1, "text": visible_text})
         return AdaptiveTurnResult(
             response_text=visible_text,
+            content_parts=tuple(public_content_parts),
             extra_messages=tuple(extra_messages),
             tool_invocations=tuple(reconciled_invocations),
             aux_llm_calls=tuple(aux_calls),
@@ -9106,6 +9281,12 @@ def execute_adaptive_turn(
             evidence_index=tuple(evidence_index),
             response_authority=response_authority,
             conversation_situation=updated_conversation_situation,
+            conversation_situation_revision=(
+                checkpoint.revision if checkpoint is not None else None
+            ),
+            conversation_situation_checkpoint=(
+                checkpoint.text if checkpoint is not None else None
+            ),
             canonical_outcome_spoken_text=canonical_outcome_spoken_text,
         )
 
@@ -9460,6 +9641,9 @@ def execute_adaptive_turn(
             if answer_only
             else (final_synthesis_tools if final_synthesis else available_tools)
         )
+        if checkpoint is not None:
+            conversation_situation = checkpoint.text
+            conversation_situation_revision = checkpoint.revision
         turn_system_message = _scope_message(
             scope,
             delegated_count=(len(delegated_names) + len(workflow_capabilities_by_name)),
@@ -9468,11 +9652,14 @@ def execute_adaptive_turn(
             elapsed_time_advisories=tuple(pending_elapsed_time_advisories),
             conversation_id=conversation_id,
             conversation_situation=conversation_situation,
+            conversation_situation_revision=conversation_situation_revision,
             conversation_observations=conversation_observations,
             conversation_observation_state=conversation_observation_state,
             authorised_resource_choices=authorised_resource_choices,
             learning_advice_projection=prepared_learning_advice,
         )
+        from .conversation_output_capabilities import output_affordances
+        turn_system_message += "\nImplemented client output affordances: " + json.dumps(output_affordances())
         learning_advice_rendered_for_call = bool(
             not final_synthesis
             and prepared_learning_advice is not None
@@ -9687,6 +9874,8 @@ def execute_adaptive_turn(
             if isinstance(exc, ModelExecutionEligibilityError):
                 terminal_status = exc.failure_kind
                 return finish(str(exc), status=terminal_status)
+            if getattr(exc, "failure_kind", None) == "image_generation_outcome_unknown":
+                return finish(str(exc), status="image_generation_outcome_unknown")
             if (
                 isinstance(exc, StructuredToolTransportError)
                 and answer_only
@@ -9939,6 +10128,24 @@ def execute_adaptive_turn(
             call_duration_seconds,
         )
         _usage_add(usage_totals, response.usage)
+        # Materialise successful output once, before any text-only completion
+        # test or telemetry. Native tools have already run at the provider.
+        if any(part.kind != "text" for part in response.content_parts):
+            known_parts = {part["part_id"] for part in visible_content_parts}
+            parent_ids = [asset["concept_id"] for message in current_context
+                          for asset in message.get("image_attachments", [])
+                          if isinstance(asset, Mapping) and asset.get("concept_id")]
+            retained = retain_parts([part for part in response.content_parts if part.part_id not in known_parts], actor=scope.user_concept_id,
+                                    turn_id=turn_id, parent_ids=parent_ids)
+            visible_content_parts.extend(retained)
+            assets = image_assets(retained)
+            if assets:
+                current_context.append({"role": "user", "content": "Images already produced during this turn; use the retained originals for any revision.", "image_attachments": assets})
+            _emit(progress_tracker, {"stage": "media_ready" if assets else "media_failed",
+                                     "result_summary": "Image output retained." if assets else "Image output could not be retained."})
+        elif visible_content_parts and response.text_response.strip():
+            visible_content_parts.append({"part_id": model_call_id, "kind": "text", "version": 1,
+                                          "text": response.text_response})
         provider_response_model = (
             response.model.strip()
             if isinstance(response.model, str) and response.model.strip()
@@ -10021,10 +10228,11 @@ def execute_adaptive_turn(
                 model_call_id
             )
         if not calls:
-            if response.text_response.strip():
+            if response.text_response.strip() or visible_content_parts:
                 if receive_steering(close_if_empty=True):
                     continue
-                return finish(response.text_response.strip())
+                media_failed = any(part["kind"] == "media_error" for part in visible_content_parts)
+                return finish(response.text_response.strip(), status="answer_partially_completed" if media_failed else "completed")
             if provider_tool_call_diagnostics:
                 available_tool_names = [tool.name for tool in request_tools]
                 if tool_call_diagnostic_recovery_used:
@@ -10131,6 +10339,34 @@ def execute_adaptive_turn(
 
         for index, call in enumerate(calls):
             _check_cancellation(progress_tracker)
+            if call.tool_name == _CHECKPOINT_TOOL_NAME:
+                output = (
+                    checkpoint.save(
+                        call.payload.get("text"),
+                        expected_revision=call.payload.get("expected_revision"),
+                    )
+                    if checkpoint is not None
+                    else _error_payload(
+                        "conversation_checkpoint_unavailable",
+                        "This turn has no owner-bound conversation checkpoint.",
+                    )
+                )
+                batch_results[index] = ToolResult(
+                    call_id=call.call_id,
+                    tool_name=call.tool_name,
+                    output=output,
+                    status="ok" if output.get("success") else "error",
+                )
+                tool_invocations.append(
+                    {
+                        "tool": call.tool_name,
+                        "call_id": call.call_id,
+                        "payload": dict(call.payload),
+                        "effective_payload": output,
+                        "status": "ok" if output.get("success") else "error",
+                    }
+                )
+                continue
             if call.tool_name == _EVIDENCE_INDEX_TOOL_NAME:
                 try:
                     offset = max(0, int(call.payload.get("offset") or 0))
@@ -10745,6 +10981,19 @@ def execute_adaptive_turn(
             if request_guardrail_denial is not None:
                 return index, contained(request_guardrail_denial)
 
+            if canonical_name == "task_create" and checkpoint is not None:
+                prepared_task = checkpoint.prepare_task(arguments)
+                if prepared_task.get("success") is not True:
+                    return index, contained(
+                        {
+                            **prepared_task,
+                            "status": "not_started",
+                            "mutation_outcome": "not_started",
+                            "changed": False,
+                        }
+                    )
+                arguments["idempotency_key"] = prepared_task["idempotency_key"]
+
             effect_request_signature = (
                 _effect_request_signature(canonical_name, arguments)
                 if is_effect
@@ -11053,7 +11302,10 @@ def execute_adaptive_turn(
                             arguments,
                             **invoke_kwargs,
                         )
-                raw_payload = transport_result.payload
+                raw_payload = retain_tool_images(
+                    transport_result.payload, actor=scope.user_concept_id,
+                    turn_id=turn_id, tool_name=canonical_name, call_id=call.call_id,
+                )
             except SchemaValidationError as exc:
                 output_invalid = exc.stage == "output_schema"
                 raw_payload = _error_payload(
@@ -11290,6 +11542,9 @@ def execute_adaptive_turn(
                 transport_result = contained_result.transport_result
                 arguments = contained_result.arguments
                 canonical_name = contained_result.capability_name
+                if isinstance(raw_payload, Mapping):
+                    visible_content_parts.extend(part for part in raw_payload.get("content_parts", [])
+                                                 if part.get("kind") in {"image", "media_error"})
                 is_effect = contained_result.is_effect
                 semantic_effect = contained_result.semantic_effect
                 if (

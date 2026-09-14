@@ -1,3 +1,20 @@
+import { initialiseConversationActions } from './conversationActions.js';
+import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './conversationNavigation.js';
+import { bindAttachmentComposer, imageItems, imagesBlocked, renderImageAttachments, removeSentAttachments } from '../utils/conversationImages.js';
+import { getWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
+let refreshReplyAttachments = () => {};
+let refreshNewAttachments = () => {};
+const attachmentSignatures = new Map();
+function attachmentDraftChanged(scope) {
+    const key = attachmentScope(scope);
+    const signature = JSON.stringify(imageItems(key).map(item => item.descriptor?.concept_id || item.name));
+    if (attachmentSignatures.has(key) && attachmentSignatures.get(key) !== signature) setDeliveryAttempt(scope, null);
+    attachmentSignatures.set(key, signature);
+    renderComposePendingUi(scope);
+}
+function attachmentScope(scope) {
+    return `messages:${scope}:${scope === 'reply' ? (exchangeScope() || _currentConversationUserId) : readSessionActorConceptId()}`;
+}
 import { resizeCompactDraft, shouldSubmitComposerKey } from './compactComposer.js';
 import { initializeConceptAutocomplete } from './conceptAutocomplete.js';
 import { simpleMarkdownToHtml } from '../markdownUtils.js';
@@ -41,6 +58,7 @@ let _deliveryKeySequence = 0;
 let _exchange = null;
 let _exchangeGeneration = 0;
 let _olderCursor = null;
+let _unreadJumpGeneration = null;
 let _readObserver = null;
 const _exchangeDrafts = new Map();
 const _pendingReads = new Set();
@@ -82,7 +100,7 @@ export async function openMessageExchange(row) {
     header?.querySelectorAll('.exchange-profile-button').forEach(el => el.remove());
     for (const id of row.participant_ids) {
         const b = profileButton(id, id === row.viewer_id ? 'Your profile' : 'Participant profile');
-        b.className = 'exchange-profile-button'; header?.append(b);
+        b.className = 'exchange-profile-button'; header?.querySelector('.conversation-actions-panel')?.append(b);
     }
     const input = _messagesContainer?.querySelector('#messageInput');
     if (input) {
@@ -90,6 +108,7 @@ export async function openMessageExchange(row) {
         resizeCompactDraft(input);
         input.placeholder = `Reply to ${row.session_name}`;
     }
+    refreshReplyAttachments();
     const compose = _messagesContainer?.querySelector('#messageComposeArea');
     let destination = compose?.querySelector('.message-reply-destination');
     if (compose && !destination) { destination = document.createElement('p'); destination.className = 'message-reply-destination'; compose.prepend(destination); }
@@ -140,6 +159,89 @@ function updateUnreadMarkers() {
             element.prepend(label);
         } else if (!unread) label?.remove();
     });
+    updateMessageNavigation();
+}
+
+async function jumpToMostRecentUnread() {
+    const generation = _exchangeGeneration;
+    const org = getSessionScopedOrgId();
+    if (_unreadJumpGeneration === generation || _isLoading) return;
+    _unreadJumpGeneration = generation;
+    _readObserver?.disconnect();
+    _readObserver = null;
+    const content = _messagesContainer?.querySelector('#messageViewContent');
+    content?.querySelector('.message-unread-navigation-status')?.remove();
+    const stillCurrent = () => generation === _exchangeGeneration && org === getSessionScopedOrgId();
+    updateMessageNavigation();
+    try {
+        while (stillCurrent()) {
+            const targets = content?.querySelectorAll('.is-unread[data-contribution-id]');
+            const target = targets?.[targets.length - 1];
+            if (target) {
+                target.scrollIntoView({ block: 'start' });
+                focusConversationTarget(target);
+                return;
+            }
+            if (!_olderCursor) {
+                showUnreadNavigationStatus('No unread messages remain in this conversation.');
+                return;
+            }
+            const cursor = _olderCursor;
+            const loaded = await loadConversation(_currentConversationUserId, {
+                silent: true, before: cursor, observeReads: false
+            });
+            if (!stillCurrent()) return;
+            if (!loaded || _olderCursor === cursor) {
+                showUnreadNavigationStatus('Could not load earlier unread messages. Try jumping again.');
+                return;
+            }
+        }
+    } finally {
+        if (_unreadJumpGeneration === generation) _unreadJumpGeneration = null;
+        if (stillCurrent()) {
+            updateMessageNavigation();
+            observeDisplayedMessages();
+        }
+    }
+}
+
+function showUnreadNavigationStatus(text) {
+    const status = document.createElement('div');
+    status.className = 'message-unread-navigation-status';
+    status.setAttribute('role', 'status');
+    status.textContent = text;
+    _messagesContainer?.querySelector('#messageViewContent')?.prepend(status);
+}
+
+function updateMessageNavigation() {
+    const content = _messagesContainer?.querySelector('#messageViewContent');
+    const compose = _messagesContainer?.querySelector('#messageComposeArea');
+    if (!content || !compose) return;
+    let navigation = compose.querySelector('.message-navigation');
+    if (!navigation) {
+        navigation = document.createElement('div');
+        navigation.className = 'message-navigation';
+        const unread = document.createElement('button');
+        unread.type = 'button';
+        unread.className = 'message-jump-unread';
+        unread.onclick = () => void jumpToMostRecentUnread();
+        const latest = createLatestMessageButton(() => {
+            content.scrollTop = content.scrollHeight;
+            focusConversationTarget(content.querySelector('.message-list')?.lastElementChild || content);
+            updateMessageNavigation();
+        });
+        navigation.append(unread, latest);
+        compose.prepend(navigation);
+        content.addEventListener('scroll', updateMessageNavigation, { passive: true });
+    }
+    const unread = navigation.querySelector('.message-jump-unread');
+    const jumping = _unreadJumpGeneration === _exchangeGeneration;
+    unread.textContent = jumping ? 'Loading unread messages…' : 'Jump to most recent unread';
+    unread.disabled = jumping || _isLoading;
+    unread.hidden = !jumping && !content.querySelector('.is-unread')
+        && !(_olderCursor && _exchange?.shared_unread_count > 0);
+    setNavigationVisible(navigation.querySelector('.chat-scroll-to-end-btn'),
+        content.scrollHeight - content.scrollTop - content.clientHeight > 60);
 }
 
 function observeDisplayedMessages() {
@@ -148,6 +250,12 @@ function observeDisplayedMessages() {
     const root = _messagesContainer?.querySelector('#messageViewContent');
     const generation = _exchangeGeneration;
     const org = getSessionScopedOrgId();
+    // A fixed narrow-screen composer can overlap the scroll root. Content
+    // behind it is not displayed to the reader.
+    const rootBox = root?.getBoundingClientRect();
+    const composeBox = _messagesContainer?.querySelector('#messageComposeArea')?.getBoundingClientRect();
+    const coveredBottom = rootBox && composeBox?.height
+        ? Math.max(0, Math.min(rootBox.height, rootBox.bottom - composeBox.top)) : 0;
     const observer = new IntersectionObserver(entries => {
         // Disconnected observers can still deliver entries for the old pane.
         if (observer !== _readObserver || generation !== _exchangeGeneration
@@ -181,7 +289,7 @@ function observeDisplayedMessages() {
         }).catch(() => {
             if (generation === _exchangeGeneration) showReadFailure();
         }).finally(() => ids.forEach(id => _pendingReads.delete(`${generation}:${id}`)));
-    }, { root, threshold: 0.01 });
+    }, { root, rootMargin: `0px 0px -${coveredBottom}px 0px`, threshold: 0.01 });
     _readObserver = observer;
     root?.querySelectorAll('.is-unread[data-contribution-id]').forEach(el => observer.observe(el));
 }
@@ -306,10 +414,15 @@ function renderMessagesTabContent() {
             <div class="messages-main">
                 <div id="messageViewHeader" class="message-view-header hidden">
                     <span id="conversationTitle" class="conversation-title" tabindex="0">Select a conversation</span>
-                    <button id="messageTaskPanelBtn" class="chat-export-btn" type="button" title="Open tasks panel" aria-label="Tasks">📋</button>
+                    <details class="conversation-actions">
+                      <summary>Conversation actions</summary>
+                      <div class="conversation-actions-panel">
+                    <button id="messageTaskPanelBtn" class="chat-export-btn" type="button" title="Open tasks panel" aria-label="Tasks referenced in messages">Tasks referenced in messages</button>
                     <button id="refreshMessagesBtn" class="message-refresh-btn" type="button" title="Refresh" aria-label="Refresh messages">
-                        ${renderMessagePanelIcon('refresh')}
+                        Refresh messages
                     </button>
+                      </div>
+                    </details>
                 </div>
                 <div id="messageViewContent" class="message-view-content">
                     <div class="message-empty-state" role="status" aria-live="polite">
@@ -362,11 +475,20 @@ function renderMessagesTabContent() {
         </div>
     `;
 
+    refreshReplyAttachments = bindAttachmentComposer(
+        _messagesContainer.querySelector('#messageComposeArea'), _messagesContainer.querySelector('#messageInput'),
+        () => attachmentScope(COMPOSE_SCOPE_REPLY), () => ({[WINDOW_SESSION_HEADER]: getWindowSessionId()}),
+        () => attachmentDraftChanged(COMPOSE_SCOPE_REPLY));
+    refreshNewAttachments = bindAttachmentComposer(
+        _messagesContainer.querySelector('.message-modal-body'), _messagesContainer.querySelector('#newMessageContent'),
+        () => attachmentScope(COMPOSE_SCOPE_NEW_MESSAGE), () => ({[WINDOW_SESSION_HEADER]: getWindowSessionId()}),
+        () => attachmentDraftChanged(COMPOSE_SCOPE_NEW_MESSAGE));
     _replySendFailureState = null;
     _newMessageSendFailureState = null;
 
     // Attach event listeners
     attachMessagesEventListeners();
+    initialiseConversationActions(_messagesContainer);
     initializeConceptAutocomplete(_messagesContainer.querySelector('#newMessageRecipient'));
     restoreNewMessageDeliveryAttemptForCurrentScope();
     renderComposePendingUi(COMPOSE_SCOPE_REPLY);
@@ -390,7 +512,7 @@ function attachMessagesEventListeners() {
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => {
             if (_currentConversationUserId) {
-                loadConversation(_currentConversationUserId);
+                loadConversation(_currentConversationUserId, { silent: true });
             }
         });
     }
@@ -722,6 +844,8 @@ async function loadConversation(userId, { silent = false, before = null, observe
         }
         if (before || !silent) _olderCursor = response.before || null;
         _currentUserId = response.current_user_id || null;
+        _readObserver?.disconnect();
+        _readObserver = null;
         await renderMessages();
         if (generation !== _exchangeGeneration || org !== getSessionScopedOrgId()) return;
         restoreReplyDeliveryAttemptForCurrentScope();
@@ -731,17 +855,24 @@ async function loadConversation(userId, { silent = false, before = null, observe
             contentEl.prepend(earlier);
         }
         if (contentEl && before) contentEl.scrollTop = oldTop + contentEl.scrollHeight - oldHeight;
-        else if (contentEl && silent && !nearBottom) {
-            contentEl.scrollTop = oldTop;
-            const jump = document.createElement('button'); jump.type = 'button'; jump.className = 'message-jump-latest'; jump.textContent = 'New messages · Jump to latest';
-            jump.onclick = () => { contentEl.scrollTop = contentEl.scrollHeight; jump.remove(); };
-            contentEl.append(jump);
-        }
+        else if (contentEl && silent && !nearBottom) contentEl.scrollTop = oldTop;
+        else if (contentEl) contentEl.scrollTop = contentEl.scrollHeight;
         updateUnreadMarkers();
+        // Opening starts at the first loaded unread contribution, without
+        // acknowledging earlier/unloaded or skipped contributions.
+        if (contentEl && !silent) contentEl.querySelector('.is-unread')?.scrollIntoView?.({ block: 'start' });
+        updateMessageNavigation();
         if (observeReads) observeDisplayedMessages();
+        return true;
     } catch (_) {
         if (generation === _exchangeGeneration && contentEl && !silent) contentEl.innerHTML = '<div class="message-error">Could not load this conversation. Try Refresh.</div>';
-    } finally { if (generation === _exchangeGeneration) _isLoading = false; }
+        return false;
+    } finally {
+        if (generation === _exchangeGeneration) {
+            _isLoading = false;
+            updateMessageNavigation();
+        }
+    }
 }
 
 function isPaperRecommendationMessage(message) {
@@ -1040,6 +1171,11 @@ async function renderMessages() {
         author.prepend(participantAvatar(profile));
     });
 
+    contentEl.querySelectorAll('.message-bubble').forEach(bubble => {
+        const msg = _currentMessages.find(m => m.concept_id === bubble.dataset.contributionId);
+        const attachments = msg?.concept_data?.metadata?.attachments || [];
+        renderImageAttachments(bubble.querySelector('.message-content'), attachments.map(a => ({...a, message_id:msg.concept_id})));
+    });
     const messageContentEls = Array.from(contentEl.querySelectorAll('.message-list .message-content'));
     messageContentEls.forEach((messageContentEl) => {
         // Preserve Markdown structure while decorating text nodes.
@@ -1075,8 +1211,7 @@ async function renderMessages() {
     });
     await hydrateConceptCartouchesInRoot(contentEl);
 
-    // Scroll to bottom
-    contentEl.scrollTop = contentEl.scrollHeight;
+    // The loader restores the viewport before attaching read observers.
 }
 
 function isComposePending(scope) {
@@ -1098,7 +1233,11 @@ function renderComposePendingUi(scope) {
     if (!button) return;
 
     const pending = isComposePending(scope);
-    button.disabled = pending || (scope === COMPOSE_SCOPE_REPLY && _exchange?.other_participant_ids?.length > 1);
+    if (scope === COMPOSE_SCOPE_REPLY) {
+        const composer = _messagesContainer.querySelector('#messageComposeArea');
+        if (composer) composer.dataset.hasAttachments = String(imageItems(attachmentScope(scope)).length > 0);
+    }
+    button.disabled = pending || imagesBlocked(attachmentScope(scope)) || (scope === COMPOSE_SCOPE_REPLY && _exchange?.other_participant_ids?.length > 1);
     button.textContent = pending ? 'Sending…' : 'Send';
     button.setAttribute('aria-busy', pending ? 'true' : 'false');
 
@@ -1547,7 +1686,7 @@ function syncVisibleReplyDeliveryAttempt() {
         return;
     }
 
-    if (!draft.trim()) {
+    if (!draft.trim() && !imageItems(attachmentScope(COMPOSE_SCOPE_REPLY)).length) {
         setDeliveryAttempt(COMPOSE_SCOPE_REPLY, null);
         return;
     }
@@ -2031,7 +2170,7 @@ function buildSendPayload({
         ? failureState.organisationOptions
         : [];
     const selectedOrganisationConceptId = String(
-        failureState?.selectedOrganisationConceptId || (scope === COMPOSE_SCOPE_REPLY ? _exchange?.organisation_concept_id : '') || '',
+        failureState?.selectedOrganisationConceptId || (scope === COMPOSE_SCOPE_REPLY ? _exchange?.organisation_concept_id : '') || getSessionScopedOrgId() || '',
     ).trim();
 
     if (organisationOptions.length > 0 && !selectedOrganisationConceptId) {
@@ -2043,6 +2182,8 @@ function buildSendPayload({
         return null;
     }
 
+    const attachmentIds = imageItems(attachmentScope(scope)).map(item => item.descriptor?.concept_id).filter(Boolean);
+    if (imagesBlocked(attachmentScope(scope))) return null;
     const deliveryIdempotencyKey = getOrCreateDeliveryIdempotencyKey({
         scope,
         recipientIds,
@@ -2056,6 +2197,7 @@ function buildSendPayload({
     return {
         recipient_ids: recipientIds,
         content,
+        ...(attachmentIds.length ? {attachment_ids: attachmentIds} : {}),
         delivery_idempotency_key: deliveryIdempotencyKey,
         ...(selectedOrganisationConceptId
             ? { organisation_concept_id: selectedOrganisationConceptId }
@@ -2082,7 +2224,7 @@ async function handleSendReply() {
 
     const visibleDraft = msgInput.value;
     const content = visibleDraft.trim();
-    if (!content) {
+    if (!content && !imageItems(attachmentScope(COMPOSE_SCOPE_REPLY)).length) {
         showToast('Please enter a message', 'warning');
         return;
     }
@@ -2100,9 +2242,12 @@ async function handleSendReply() {
 
     const submittedConversationUserId = _currentConversationUserId;
     const submittedGeneration = _exchangeGeneration;
+    const submittedAttachmentScope = attachmentScope(COMPOSE_SCOPE_REPLY);
     setComposePending(COMPOSE_SCOPE_REPLY, true);
     try {
         const result = await postJsonDetailed('/api/messages/', payload);
+        removeSentAttachments(submittedAttachmentScope, payload.attachment_ids || []);
+        refreshReplyAttachments(); refreshNewAttachments();
         if (submittedGeneration !== _exchangeGeneration) { document.dispatchEvent(new CustomEvent('von:conversation-contribution')); return; }
 
         resetComposeFailureUi(COMPOSE_SCOPE_REPLY);
@@ -2202,7 +2347,7 @@ async function handleSendNewMessage() {
         return;
     }
 
-    if (!content) {
+    if (!content && !imageItems(attachmentScope(COMPOSE_SCOPE_NEW_MESSAGE)).length) {
         showToast('Please enter a message', 'warning');
         contentInput.focus();
         return;
@@ -2222,9 +2367,12 @@ async function handleSendNewMessage() {
     }
 
     const submittedGeneration = _exchangeGeneration;
+    const submittedAttachmentScope = attachmentScope(COMPOSE_SCOPE_NEW_MESSAGE);
     setComposePending(COMPOSE_SCOPE_NEW_MESSAGE, true);
     try {
         const result = await postJsonDetailed('/api/messages/', payload);
+        removeSentAttachments(submittedAttachmentScope, payload.attachment_ids || []);
+        refreshReplyAttachments(); refreshNewAttachments();
         if (submittedGeneration !== _exchangeGeneration) { document.dispatchEvent(new CustomEvent('von:conversation-contribution')); return; }
 
         resetComposeFailureUi(COMPOSE_SCOPE_NEW_MESSAGE);

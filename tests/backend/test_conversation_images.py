@@ -18,6 +18,40 @@ def png():
     return stream.getvalue()
 
 
+def test_upload_preserves_original_filename_but_uses_safe_blob_key(monkeypatch):
+    from src.backend.services import blob_uploads, computer_file_copy_service
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+
+    queries, blobs, records = [], [], []
+    monkeypatch.setattr(
+        ConceptsRepository, "find_one", lambda query, *a: queries.append(query)
+    )
+
+    def put(**kwargs):
+        blobs.append(kwargs)
+        return SimpleNamespace(
+            ref=SimpleNamespace(backend="local", key=kwargs["key"], uri="blob:test")
+        )
+
+    def create(**kwargs):
+        records.append(kwargs)
+        return SimpleNamespace(concept_id="#V#original_name")
+
+    monkeypatch.setattr(blob_uploads, "put_bytes_durable", put)
+    monkeypatch.setattr(
+        computer_file_copy_service, "create_computer_file_copy_instance", create
+    )
+    filename = "Māori diagram (original).png"
+    result = images.store_image(
+        data=png(), filename=filename, user_concept_id="#V#owner"
+    )
+    assert result["filename"] == filename
+    assert records[0]["name"] == filename
+    assert queries[0]["attributes.original_filename"] == filename
+    assert blobs[0]["metadata"]["original_filename"] == filename
+    assert blobs[0]["key"].endswith("Maori_diagram_original.png")
+
+
 def test_detects_actual_media_and_rejects_corrupt_oversized_and_animated():
     data = png()
     info = images.inspect_image(data)

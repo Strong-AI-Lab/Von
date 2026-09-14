@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from flask import Flask
 
 from src.backend.services.adaptive_turn_service import AdaptiveTurnResult
@@ -40,8 +42,12 @@ def _make_app(monkeypatch, history_calls: list[dict[str, object]]) -> Flask:
         lambda: "#V#user",
     )
     monkeypatch.setattr(
+        "src.backend.security.access_control.get_effective_user_concept_id_with_source",
+        lambda: ("#V#user", "session"),
+    )
+    monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_effective_context",
-        lambda window_session_id, session_snapshot, user_concept_id: {
+        lambda window_session_id, session_snapshot, user_concept_id, **_kwargs: {
             "organisation_id": "#V#org",
             "chat_session_id": "window-session",
             "role": "member",
@@ -225,8 +231,10 @@ def test_generate_assistant_opening_uses_empty_prompt_and_persists_only_assistan
         {
             "role": "assistant",
             "content": "ok",
+            "image_attachments": [],
             "turn_kind": "assistant_opening",
             "initiation_id": "opening-1",
+            "turn_id": "a-" + app.config["_ADAPTIVE_TURN_CALLS"][0]["turn_id"],
         }
     ]
     assert completed == [
@@ -709,7 +717,7 @@ def test_generate_creates_and_binds_chat_session_when_window_scope_has_no_active
 
     monkeypatch.setattr(
         "src.backend.server.routes.von_routes.get_effective_context",
-        lambda window_session_id, session_snapshot, user_concept_id: {
+        lambda window_session_id, session_snapshot, user_concept_id, **_kwargs: {
             "organisation_id": "#V#org",
             "chat_session_id": None,
             "role": "member",
@@ -778,8 +786,10 @@ def test_generate_creates_and_binds_chat_session_when_window_scope_has_no_active
     ]
 
 
+@pytest.mark.parametrize("checkpoint_revision", [None, 6])
 def test_generate_carries_and_updates_inspectable_conversation_situation(
     monkeypatch,
+    checkpoint_revision,
 ):
     from src.backend.server.routes import von_routes
 
@@ -813,7 +823,7 @@ def test_generate_carries_and_updates_inspectable_conversation_situation(
     }
     canonical_situation = {
         "text": "We are representing the paper; its canonical identity is now known.",
-        "revision": 5,
+        "revision": (checkpoint_revision if checkpoint_revision is not None else 4) + 1,
         "source": "adaptive_turn",
         "updated_by": "#V#user",
         "updated_at": "2026-07-29T09:00:00+00:00",
@@ -868,6 +878,7 @@ def test_generate_carries_and_updates_inspectable_conversation_situation(
         adaptive_calls.append(dict(kwargs))
         return AdaptiveTurnResult(
             response_text="updated answer",
+            conversation_situation_revision=checkpoint_revision,
             extra_messages=(),
             tool_invocations=(),
             aux_llm_calls=(),
@@ -913,6 +924,8 @@ def test_generate_carries_and_updates_inspectable_conversation_situation(
         body["conversation_observation_state"]
         == canonical_observation_state
     )
+    assert adaptive_calls[0]["conversation_situation_revision"] == 4
+    assert adaptive_calls[0]["conversation_history_owner_user_id"] == "#V#user"
     assert adaptive_calls[0]["conversation_id"] == "session-situation"
     assert (
         adaptive_calls[0]["conversation_situation"]
@@ -930,7 +943,9 @@ def test_generate_carries_and_updates_inspectable_conversation_situation(
             "text": (
                 "We are representing the paper; its canonical identity is now known."
             ),
-            "expected_revision": 4,
+            "expected_revision": (
+                checkpoint_revision if checkpoint_revision is not None else 4
+            ),
             "source": "adaptive_turn",
             "updated_by": "#V#user",
             "namespace": "#V#user@org",

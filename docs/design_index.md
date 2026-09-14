@@ -80,6 +80,7 @@ live.
 |---|---|
 | Every task | [`AGENTS.md`](../AGENTS.md) |
 | Substantial, architecture-sensitive, or older-doc-dependent work | This index, then the applicable sections below |
+| Build/deployment receipts and task work products | [Build and deployment evidence](engineering/deployment_evidence.md) |
 | Task product selection and continuing a responsibility from Tasks | [Task responsibility continuation](engineering/task_responsibility_continuation.md) |
 | Subscription-backed coding task pickup on the DGX | [Codex DGX worker pilot](engineering/codex_dgx_worker.md) |
 | Coding-agent progress and completion messages in Von | [Interactive coding-agent messages](engineering/codex_dgx_worker.md#interactive-coding-agent-messages); operator-specific delivery configuration in personal `AGENTS.md` |
@@ -89,8 +90,11 @@ live.
 | Workflow or orchestration | Relevant vocabulary/semantics in the [VWL manual](engineering/von_workflow_language_manual.md); domain examples and appendices are reference material |
 | Prompts, models, routing, optimisation, or fine-tuning | [prompt programmes and model routing](engineering/prompt_programs_and_model_routing_playbook.md) |
 | Retrieval, memory, RAG, KB growth, or long-horizon state | [agent memory and enduring knowledge](engineering/agent_memory_and_enduring_knowledge.md) |
+| Semantic task search, task embeddings and task RAG context | [Task semantic retrieval](engineering/task_semantic_retrieval.md) |
 | Represented, experience- or discussion-derived learning for role, capability, workflow, tool, acquisition, introspection, message, or task decisions | Draft [represented advice design](engineering/represented_advice_design.md), including Phase 0 subtraction, Phase 0.5 non-active candidates, and the [completed bounded negative learning cycle](engineering/jvnautosci_2720_learning_cycle_2026-09-05.md) under JVNAUTOSCI-2720; then the applicable prompt, memory, evaluation, workflow, or security guidance. The cycle links source-derived formation, experimental exposure, outcome evidence, rejection and subsequent verified absence. It does not establish positive advice efficacy, an ordinary runtime consumer, production activation, represented Arm C or autonomous promotion. |
 | Private Otter archive access, conversation images or research-slide reading | [Private Otter archive and conversation images](engineering/otter_archive_and_conversation_images.md) |
+| Authenticated Figma access through coding agents; native-backend prerequisites | [Figma authenticated access](engineering/figma_authenticated_access.md) |
+| Conversational diagrams, equations, generated/tool images or visual format extension | [Conversational visual output](engineering/conversational_visual_output.md) |
 | Reusing external ontology concepts with source identity and attribution | [KnowKat ontology sources and governed adoption](engineering/knowkat_ontology_sources.md) |
 | Importing external human/agent transcripts into conversation carriers | [External conversation import](engineering/external_conversation_import.md) |
 | Unified conversation discovery, message exchanges, read state or participant avatars | [Unified conversations and participant profiles](engineering/unified_conversations_and_participant_profiles.md) |

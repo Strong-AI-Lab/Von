@@ -1,8 +1,11 @@
+import { bindConversationRowMenu } from './components/conversationRowMenu.js';
+import { initialiseConversationActions } from './components/conversationActions.js';
+import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './components/conversationNavigation.js';
 import { initialiseCompactChatComposer, isCompactComposer, resizeCompactDraft, shouldSubmitComposerKey } from './components/compactComposer.js';
 import { updateExecutionCost } from './components/executionCost.js';
 import { canUseWorkflowStudio } from './workflowStudioAccess.js';
 import { createChatSteeringControls } from './components/chatSteeringControls.js';
-import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows } from './components/conversationCatalogue.js';
+import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows, catalogueSearchActive, rankCatalogueSearchRows } from './components/conversationCatalogue.js';
 import { catalogueHasMore } from './components/conversationCatalogue.js';
 import { profileButton, participantAvatar, participantIdentityAvatar } from './components/participantProfile.js';
 import { setButtonLabel } from './utils/buttonLabel.js';
@@ -37,6 +40,8 @@ import { elements, getCurrentUserConceptId, renderSpanSuggestions } from './domU
 import { activateTab } from './tabNavigation.js';
 import { isAnnotationEnabled } from './featureFlags.js';
 import { detectMarkdown, renderMarkdownViaServer } from './markdownUtils.js';
+import { renderConversationVisuals } from './conversationVisuals.js';
+import { renderRetainedConversationContent } from './retainedConversationContent.js';
 import {
     getSpeechSynthesisVoices,
     isTextToSpeechSupported,
@@ -6691,6 +6696,7 @@ function updateSendButtonForCurrentChatState() {
         return;
     }
     updateSendButtonDraftReadiness();
+    sendButton.dataset.submitMode = 'send';
     const chatCreationInFlight = Boolean(newChatCreationInFlight);
     const uploadInFlight = !!getInFlightUploadStateForSession(activeChatSessionId);
     const imagePreparationBlocked = imagesBlocked(activeChatSessionId);
@@ -6736,7 +6742,9 @@ function updateSendButtonForCurrentChatState() {
                 const input = getPromptInputElement();
                 if (input?.value === submitted) setPromptComposerValue('', { promptInput: input });
             },
-            createId: createClientRequestId
+            createId: createClientRequestId,
+            onQueue: () => { setSelectedChatPromptQueueEntryId(null); return handleSendPrompt(); },
+            onModeChange: updateSendButtonForCurrentChatState
         });
     }
     const steeringRecord = queuedChatPrompts.find(entry =>
@@ -6746,7 +6754,10 @@ function updateSendButtonForCurrentChatState() {
     const steeringTarget = steeringRecord || (liveRequest?.promptQueueRecordId && liveRequest?.attemptId
         ? { queueId: liveRequest.promptQueueRecordId, attemptId: liveRequest.attemptId } : null);
     chatSteeringControls.update({
-        scopeKey: `${chatOrganisationGeneration}:${activeChatSessionId}`,
+        scopeKey: `${getCurrentUserConceptId()}:${chatOrganisationGeneration}:${activeChatSessionId}`,
+        actorKey: getCurrentUserConceptId(),
+        busy: sessionBusy && !readOnly && !conceptQaSession && !getSelectedChatPromptQueueEntryForSend(),
+        queueDisabled: sendButton.disabled || pendingChatOrganisationSwitchId !== null,
         target: readOnly || conceptQaSession ? null : steeringTarget,
         disabled: sendButton.disabled || pendingChatOrganisationSwitchId !== null
             || pendingFileCopyConceptIdsBySession.has(getPendingFileCopySessionKey(activeChatSessionId))
@@ -6798,6 +6809,7 @@ function updateSendButtonForCurrentChatState() {
             ? 'Queue a separate request after the current turn finishes. Use Steer to guide the active turn.'
             : 'Send Prompt';
     }
+    chatSteeringControls.present();
 }
 
 function syncActiveChatSessionThinkingState() {
@@ -15493,6 +15505,13 @@ function extractPresenterChannelsFromDisplayElements(value) {
         }
     }
 
+    const retainedText = contract.elements
+        .filter(element => element?.channel === 'screen' && element?.element_type === 'text_block'
+            && element?.provenance?.source === 'retained_content')
+        .sort((a, b) => a.order - b.order)
+        .map(element => element.payload?.text || '');
+    if (retainedText.length) screen = retainedText.join('\n');
+
     if (!(screen && screen.trim()) && !(spoken && spoken.trim())) {
         return null;
     }
@@ -19238,6 +19257,8 @@ function renderTableDisplayElementsIntoContainer(container, debugData) {
         return;
     }
 
+    renderRetainedConversationContent(container, debugData?.display_elements, renderChatMarkdownIntoContainer);
+
     const resolvedTableElements = resolveTableDisplayElements(debugData);
     const {
         inlinePrimaryTableElements,
@@ -21461,18 +21482,6 @@ function submitChatPromptImmediately() {
     }
 }
 
-function formatBytesForUi(sizeBytes) {
-    const size = Number(sizeBytes);
-    if (!Number.isFinite(size) || size < 0) return '';
-    if (size < 1024) return `${size} B`;
-    const kb = size / 1024;
-    if (kb < 1024) return `${kb.toFixed(1)} KB`;
-    const mb = kb / 1024;
-    if (mb < 1024) return `${mb.toFixed(1)} MB`;
-    const gb = mb / 1024;
-    return `${gb.toFixed(2)} GB`;
-}
-
 let uploadUiState = {
     button: null,
     statusEl: null,
@@ -21552,11 +21561,26 @@ function refreshConversationImages() {
     let panel = document.getElementById('conversationImageComposer');
     if (!panel) {
         panel = document.createElement('div'); panel.id = 'conversationImageComposer';
-        panel.setAttribute('aria-label', 'Pending image attachments');
+        panel.setAttribute('aria-label', 'Pending attachments');
         document.getElementById('chatAttachmentStatus')?.parentElement?.appendChild(panel);
     }
-    renderImageComposer(panel, activeChatSessionId, refreshConversationImages);
+    renderImageComposer(panel, activeChatSessionId, () => {
+        syncConversationAttachmentWorkflowBinding(activeChatSessionId);
+        renderPendingAttachmentState();
+    });
     updateSendButtonForCurrentChatState();
+}
+
+function syncConversationAttachmentWorkflowBinding(sessionId) {
+    const key = getPendingFileCopySessionKey(sessionId);
+    const last = imageItems(sessionId).filter(item => item.descriptor && !item.type.startsWith('image/')).at(-1);
+    if (last) {
+        pendingFileCopyConceptIdsBySession.set(key, last.descriptor.concept_id);
+        pendingFileCopyDisplayNamesBySession.set(key, last.name);
+    } else {
+        pendingFileCopyConceptIdsBySession.delete(key);
+        pendingFileCopyDisplayNamesBySession.delete(key);
+    }
 }
 
 function renderPendingAttachmentState() {
@@ -21761,22 +21785,6 @@ function rekeyUploadStateForSession(uploadState, sessionId) {
     renderActiveUploadUi();
 }
 
-function appendUploadMessageForSession(sessionId, ...appendMessageArgs) {
-    const targetSessionId = normaliseHistorySessionId(sessionId);
-    if (
-        targetSessionId
-        && targetSessionId === normaliseHistorySessionId(activeChatSessionId)
-    ) {
-        appendMessage(...appendMessageArgs);
-        return true;
-    }
-    if (targetSessionId) {
-        invalidateSessionHistoryCache(targetSessionId);
-        refreshChatSessionTabActivityIndicators();
-    }
-    return false;
-}
-
 function isFileDragEvent(event) {
     const dt = event?.dataTransfer;
     if (!dt) return false;
@@ -21889,99 +21897,6 @@ function extractImageFilesFromClipboardEvent(event) {
     return collectedFiles;
 }
 
-async function uploadSingleFileToVon(file) {
-    if (!file) {
-        throw new Error('No file provided');
-    }
-
-    const formData = new FormData();
-    formData.append('file', file, file.name || 'uploaded_file');
-
-    const response = await fetch('/von/api/files/upload', {
-        method: 'POST',
-        headers: buildChatFetchHeaders(), // Note: browser sets Content-Type with boundary for FormData
-        body: formData
-    });
-
-    let data;
-    try {
-        data = await response.json();
-    } catch (_) {
-        data = null;
-    }
-
-    if (!response.ok || !data || data.success !== true) {
-        const detail = data?.message || data?.error || `HTTP ${response.status}`;
-        const uploadError = new Error(`Upload failed: ${detail}`);
-        uploadError.uploadDiagnostics = {
-            endpoint: '/von/api/files/upload',
-            status_code: response.status,
-            response_ok: response.ok,
-            response_body: (data && typeof data === 'object') ? data : null
-        };
-        throw uploadError;
-    }
-
-    return data;
-}
-
-function buildUploadFailureDiagnosticPayload(file, error, context = {}) {
-    const fileName = String(file?.name || '').trim();
-    const contentType = String(file?.type || '').trim();
-    const lastModifiedMs = Number.isFinite(file?.lastModified) ? Number(file.lastModified) : null;
-    const uploadDiagnostics = (error && typeof error === 'object' && error.uploadDiagnostics && typeof error.uploadDiagnostics === 'object')
-        ? error.uploadDiagnostics
-        : null;
-
-    let stackPreview = null;
-    if (typeof error?.stack === 'string' && error.stack.trim()) {
-        stackPreview = error.stack
-            .split('\n')
-            .slice(0, 6)
-            .map(line => line.trim())
-            .join('\n');
-    }
-
-    return {
-        type: 'file_upload_failure',
-        generated_at_utc: new Date().toISOString(),
-        file: {
-            name: fileName || null,
-            size_bytes: Number.isFinite(file?.size) ? Number(file.size) : null,
-            content_type: contentType || null,
-            last_modified_utc: lastModifiedMs ? new Date(lastModifiedMs).toISOString() : null
-        },
-        upload_context: {
-            index: Number.isFinite(context.index) ? Number(context.index) : null,
-            total: Number.isFinite(context.total) ? Number(context.total) : null,
-            active_chat_session_id: (
-                normaliseHistorySessionId(context.targetSessionId)
-                || normaliseHistorySessionId(activeChatSessionId)
-                || null
-            )
-        },
-        error: {
-            message: String(error?.message || error || 'Upload failed'),
-            name: String(error?.name || 'Error'),
-            stack_preview: stackPreview
-        },
-        upload_request: uploadDiagnostics
-    };
-}
-
-function buildTurnDiagnosticDebugPayload(errorMessage, diagnosticPayload) {
-    const diagnosticsEvent = (diagnosticPayload && typeof diagnosticPayload === 'object') ? diagnosticPayload : null;
-    return {
-        model: 'diagnostic',
-        error: errorMessage,
-        turn_diagnostics: {
-            event_count: diagnosticsEvent ? 1 : 0,
-            categories: diagnosticsEvent ? [String(diagnosticsEvent.type || 'unknown')] : [],
-            events: diagnosticsEvent ? [diagnosticsEvent] : []
-        }
-    };
-}
-
 async function performUploadFilesToVon(list, uploadState) {
     let uploadTargetSessionId = normaliseHistorySessionId(
         uploadState?.targetSessionId
@@ -22014,96 +21929,21 @@ async function performUploadFilesToVon(list, uploadState) {
         rekeyUploadStateForSession(uploadState, uploadTargetSessionId);
     }
 
-    const total = list.length;
     let successCount = 0;
     let failureCount = 0;
-    let index = 0;
 
     for (const file of list) {
-        if (file.type?.startsWith('image/')) {
-            index += 1;
-            const uploaded = await uploadConversationImage(file, uploadTargetSessionId, buildChatFetchHeaders(), refreshConversationImages);
-            if (uploaded) successCount += 1; else failureCount += 1;
-            continue;
-        }
-        index += 1;
-        const sizeLabel = formatBytesForUi(file.size);
-        appendUploadMessageForSession(
-            uploadTargetSessionId,
-            'User',
-            `Uploading file: ${file.name}${sizeLabel ? ` (${sizeLabel})` : ''}`
-        );
-        setUploadStatusForState(
-            uploadState,
-            `Uploading ${index}/${total}: ${file.name}`,
-            'uploading'
-        );
-
-        try {
-            const result = await uploadSingleFileToVon(file);
-            const conceptId = result?.uploaded?.concept_id;
-            const blobUri = result?.storage?.uri;
-            const blobKey = result?.storage?.key;
-            const blobBackend = result?.storage?.backend;
-            const historyRecorded = result?.chat_history_recorded === true;
-
-            const downloadUrl = conceptId
-                ? `/von/api/files/${encodeURIComponent(conceptId)}/download`
-                : null;
-
-            const details = [];
-            if (blobUri) details.push(`Blob: ${blobUri}`);
-            if (blobBackend || blobKey) details.push(`Blob key: ${String(blobBackend || '')}:${String(blobKey || '')}`.replace(/^:/, ''));
-            if (historyRecorded) details.push('Recorded in Conversation history.');
-            if (downloadUrl) details.push(`[Download attachment](${downloadUrl})`);
-
-            appendUploadMessageForSession(
-                uploadTargetSessionId,
-                'Von',
-                `File uploaded and registered as ${conceptId || '(unknown)'}${details.length ? `\n${details.join('\n')}` : ''}`
-            );
-
+        const uploaded = await uploadConversationImage(file, uploadTargetSessionId, buildChatFetchHeaders(), () => {
+            syncConversationAttachmentWorkflowBinding(uploadTargetSessionId);
+            renderPendingAttachmentState();
+        });
+        if (uploaded) {
             successCount += 1;
-
-            if (conceptId) {
-                rememberPendingUploadedFileCopyConceptId(
-                    conceptId,
-                    uploadTargetSessionId,
-                    file.name
-                );
+            if (!file.type.startsWith('image/')) {
+                const item = imageItems(uploadTargetSessionId).findLast(item => item.name === file.name && item.descriptor);
+                if (item) rememberPendingUploadedFileCopyConceptId(item.descriptor.concept_id, uploadTargetSessionId, file.name);
             }
-        } catch (error) {
-            console.error('[chatTab] file upload error', error);
-            const errorMessage = `File upload failed: ${String(error?.message || error)}`;
-            const diagnosticsPayload = buildUploadFailureDiagnosticPayload(file, error, {
-                index,
-                total,
-                targetSessionId: uploadTargetSessionId
-            });
-            const errorTurnId = `e-upload-${Date.now()}-${index}`;
-            setLlmDebugDataEntry(
-                errorTurnId,
-                buildTurnDiagnosticDebugPayload(errorMessage, diagnosticsPayload)
-            );
-            appendUploadMessageForSession(
-                uploadTargetSessionId,
-                'Error',
-                errorMessage,
-                errorTurnId,
-                true,
-                false,
-                null,
-                null,
-                null,
-                { diagnosticsPayload }
-            );
-            failureCount += 1;
-            setUploadStatusForState(
-                uploadState,
-                `Upload failed: ${file.name}`,
-                'error'
-            );
-        }
+        } else failureCount += 1;
     }
 
     const summary = `Upload complete: ${successCount} succeeded${failureCount ? `, ${failureCount} failed` : ''}.`;
@@ -23034,7 +22874,8 @@ function cancelChatConceptMetaHydration() {
 
 function shouldRenderMarkdownForAssistant(message, _debugData) {
     const text = String(message ?? '');
-    return detectMarkdown(text);
+    return detectMarkdown(text) || Boolean(_debugData?.display_elements?.elements?.some(
+        element => element.provenance?.source === 'retained_content'));
 }
 
 function updateChatRenderModeBadge(badgeEl, messageTextEl, details = {}) {
@@ -23073,7 +22914,10 @@ function updateChatRenderModeBadge(badgeEl, messageTextEl, details = {}) {
 
 async function renderChatMarkdownIntoContainer(container, text) {
     const markdownText = String(text ?? '');
+    const generation = (Number(container.dataset.markdownGeneration) || 0) + 1;
+    container.dataset.markdownGeneration = String(generation);
     const html = await renderMarkdownViaServer(markdownText);
+    if (container.dataset.markdownGeneration !== String(generation)) return;
 
     // Cache rendered HTML so we can toggle without re-fetching.
     try {
@@ -23088,6 +22932,7 @@ async function renderChatMarkdownIntoContainer(container, text) {
     }
 
     container.innerHTML = html;
+    await renderConversationVisuals(container);
     convertQuotedInstructionBlockquotesToButtons(container);
     convertInlineQuotedStrongSegmentsToButtons(container);
     convertJustSayInstructionsToButtons(container);
@@ -23102,8 +22947,8 @@ async function renderChatMarkdownIntoContainer(container, text) {
     // Preserve clickable #V# tokens; cartouchify where allowed, otherwise linkify in-place.
     // Note: linkifyVontologyTokensInElement does NOT skip <pre>/<code> blocks so that #V# tokens
     // inside JSON or other code fences become clickable links with visible styling.
-    cartouchifyVontologyTokensInElement(container, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
-    linkifyVontologyTokensInElement(container, { skipSelectors: ['a', '.vontology-cartouche', 'button'] });
+    cartouchifyVontologyTokensInElement(container, { skipSelectors: ['pre', 'code', 'a', '.conversation-visual'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
+    linkifyVontologyTokensInElement(container, { skipSelectors: ['a', '.vontology-cartouche', 'button', '.conversation-visual'] });
     hydrateChatConceptCartouches(container);
     await resolveInlineVontologyAliasesInElement(container, { expectedRenderMode: 'rendered' });
 }
@@ -23144,12 +22989,13 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, _debugData) 
     const cachedHtml = messageTextEl?.dataset?.renderedHtml;
     if (cachedHtml) {
         messageTextEl.innerHTML = cachedHtml;
+        void renderConversationVisuals(messageTextEl);
         convertQuotedInstructionBlockquotesToButtons(messageTextEl);
         convertInlineQuotedStrongSegmentsToButtons(messageTextEl);
         convertJustSayInstructionsToButtons(messageTextEl);
         convertQuotedInstructionListItemsToButtons(messageTextEl);
-        cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
-        linkifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['a', '.vontology-cartouche', 'button'] });
+        cartouchifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['pre', 'code', 'a', '.conversation-visual'], allowStandaloneCodeTokens: true, allowStandaloneCodeBlockTokens: true });
+        linkifyVontologyTokensInElement(messageTextEl, { skipSelectors: ['a', '.vontology-cartouche', 'button', '.conversation-visual'] });
         hydrateChatConceptCartouches(messageTextEl);
         void resolveInlineVontologyAliasesInElement(messageTextEl, { expectedRenderMode: 'rendered' });
         renderTableDisplayElementsIntoContainer(messageTextEl, _debugData);
@@ -23925,6 +23771,7 @@ function shouldSkipInlineAliasTextNode(textNode) {
     if (!parent) {
         return true;
     }
+    if (parent.closest('.conversation-visual, svg, math, style')) return true;
 
     for (const selector of CHAT_INLINE_ALIAS_TEXT_SKIP_SELECTORS) {
         try {
@@ -23940,7 +23787,7 @@ function shouldSkipInlineAliasTextNode(textNode) {
 }
 
 function shouldSkipInlineAliasCodeElement(codeEl) {
-    if (!codeEl || codeEl.closest('pre')) {
+    if (!codeEl || codeEl.closest('pre, .conversation-visual') || codeEl.classList.contains('von-math-source')) {
         return true;
     }
     for (const selector of ['a', 'button', '.vontology-cartouche', '.vontology-inline-assertion']) {
@@ -27356,7 +27203,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
     const unreadBadge = document.getElementById('conversationUnreadBadge');
     const unreadCount = [...canonicalSessions, ...directConversationRows()].filter(row => !isConversationHidden(row.session_id) && row.shared_unread_count > 0).length;
     if (unreadBadge) { unreadBadge.hidden = !unreadCount; unreadBadge.textContent = `${unreadCount}${catalogueHasMore() ? '+' : ''}`; unreadBadge.setAttribute('aria-label', `${catalogueHasMore() ? 'At least ' : ''}${unreadCount} unread conversations`); }
-    if (canonicalSessions.length === 0 && directConversationRows().length === 0) {
+    if (canonicalSessions.length === 0 && directConversationRows().length === 0 && !catalogueSearchActive()) {
         renderChatSessionTabsPlaceholder('empty');
         mountCatalogueControls(container);
         lastRenderedSessionCount = 0;
@@ -27416,7 +27263,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         recentWindowDays: conversationHistorySettings.recentWindowDays,
         showAll: false
     });
-    let visibleSessions = Array.isArray(filteredResult.sessionsToRender)
+    let visibleSessions = catalogueSearchActive() ? sessionsAfterHiddenFilter : Array.isArray(filteredResult.sessionsToRender)
         ? filteredResult.sessionsToRender
         : [];
     const newestAgentSessionId = agentCreatedSessionVisibilityState.newestVisibleSessionId;
@@ -27501,7 +27348,9 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             return !pinnedSessionIdsInFilteredOrder.has(sid);
         })
     ];
-    const orderedVisibleSessions = [...pinnedSessions, ...unpinnedSessions];
+    const orderedVisibleSessions = catalogueSearchActive()
+        ? rankCatalogueSearchRows(visibleSessions)
+        : [...pinnedSessions, ...unpinnedSessions];
 
     container.hidden = false;
     const focusedId = container.contains(document.activeElement) ? document.activeElement?.closest('[data-session-id]')?.dataset.sessionId : null;
@@ -27582,7 +27431,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
         }
         const isPinned = isConversationPinned(sid);
         if (session.source_kind === 'message_exchange') {
-            fragment.append(renderMessageConversationRow(session, { selected: sid === activeSessionId, pinned: isPinned, togglePin: () => toggleConversationPinned(sid), hide: () => hideConversation(sid) }));
+            fragment.append(renderMessageConversationRow(session, { selected: sid === activeSessionId, pinned: isPinned, togglePin: () => toggleConversationPinned(sid), hide: () => isConversationHidden(sid) ? unhideConversation(sid) : hideConversation(sid), hidden: isConversationHidden(sid), openMenu: openChatSessionMenu }));
             return;
         }
         const isFirstPinnedTab = pinnedSessions.length > 0 && index === 0 && isPinned;
@@ -27831,11 +27680,11 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             }
             void switchToChatSession(sid);
         });
-        tab.addEventListener('dblclick', () => {
+        tab.addEventListener('dblclick', event => {
+            if (event.ctrlKey) return;
             void promptRenameChatSession(sid, session?.session_name || displayName);
         });
-        tab.addEventListener('contextmenu', (event) => {
-            event.preventDefault();
+        bindConversationRowMenu(tab, (x, y, options) => {
             // JVNAUTOSCI-1014: Build context menu with hide/unhide and optional delete
             const menuItems = [
                 {
@@ -27898,7 +27747,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
                 });
             }
 
-            openChatSessionMenu(event.clientX, event.clientY, menuItems);
+            openChatSessionMenu(x, y, menuItems, options);
         });
 
         fragment.appendChild(tab);
@@ -28234,6 +28083,19 @@ function ensureChatSessionMenu() {
     menu.setAttribute('role', 'menu');
     menu.setAttribute('aria-hidden', 'true');
     document.body.appendChild(menu);
+    menu.addEventListener('keydown', event => {
+        const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
+        const current = items.indexOf(document.activeElement);
+        let next;
+        if (event.key === 'ArrowDown') next = (current + 1) % items.length;
+        else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = items.length - 1;
+        else if (event.key === 'Tab') { closeChatSessionMenu(); return; }
+        else return;
+        event.preventDefault();
+        items[next]?.focus();
+    });
 
     document.addEventListener('click', (event) => {
         if (menu.classList.contains('open') && !menu.contains(event.target)) {
@@ -28274,12 +28136,14 @@ export function openChatSessionMenu(x, y, items, options = {}) {
     }
 
     const menu = populateChatSessionMenu(items);
+    chatSessionMenuReturnFocusEl?.setAttribute('aria-expanded', 'false');
     chatSessionMenuReturnFocusEl = options.returnFocus instanceof HTMLElement
         ? options.returnFocus
         : null;
     const padding = 8;
     menu.classList.add('open');
     menu.setAttribute('aria-hidden', 'false');
+    chatSessionMenuReturnFocusEl?.setAttribute('aria-expanded', 'true');
     const maxX = window.innerWidth - menu.offsetWidth - padding;
     const maxY = window.innerHeight - menu.offsetHeight - padding;
     const left = Math.max(padding, Math.min(x, maxX));
@@ -28302,6 +28166,7 @@ function closeChatSessionMenu() {
     chatSessionMenuEl.classList.remove('open');
     chatSessionMenuEl.setAttribute('aria-hidden', 'true');
     chatSessionMenuReturnFocusEl = null;
+    returnFocusEl?.setAttribute('aria-expanded', 'false');
     if (shouldRestoreFocus) {
         try { returnFocusEl.focus(); } catch (_) { /* ignore */ }
     }
@@ -29914,6 +29779,7 @@ function rehydrateHistory(scrollableField, historyMessages, options = {}) {
             if (msg.role === 'assistant') {
                 const merged = {
                     ...(msg.llm_debug_data && typeof msg.llm_debug_data === 'object' ? msg.llm_debug_data : {}),
+                    display_elements: msg.display_elements || msg.llm_debug_data?.display_elements,
                     llm_execution_summary: (
                         msg.llm_execution_summary && typeof msg.llm_execution_summary === 'object'
                     ) ? msg.llm_execution_summary : null,
@@ -31147,22 +31013,15 @@ function ensureScrollToEndButton(scrollableField = null) {
     }
 
     if (!(button instanceof HTMLButtonElement)) {
-        button = document.createElement('button');
-        button.type = 'button';
-        button.id = CHAT_SCROLL_TO_END_BUTTON_ID;
-        button.className = 'chat-scroll-to-end-btn';
-        button.setAttribute('aria-label', 'Scroll to latest message');
-        button.title = 'Scroll to latest message';
-        button.innerHTML = '<span aria-hidden="true">↓</span><span class="sr-only">Scroll to latest message</span>';
-        button.setAttribute('aria-hidden', 'true');
-        button.tabIndex = -1;
-        button.addEventListener('click', (event) => {
+        button = createLatestMessageButton((event) => {
             if (event?.shiftKey && scrollConversationToSessionList({ smooth: true })) {
                 event.preventDefault();
                 return;
             }
             void scrollConversationToEnd(targetField, { smooth: true });
+            focusConversationTarget(targetField.lastElementChild || targetField);
         });
+        button.id = CHAT_SCROLL_TO_END_BUTTON_ID;
         controlHost.appendChild(button);
     }
 
@@ -31249,9 +31108,7 @@ function updateScrollToEndButtonVisibility(scrollableField = null) {
     const nearBottom = isScrollableFieldNearBottom(targetField);
     const shouldShow = hasOverflow && !nearBottom;
 
-    button.classList.toggle('visible', shouldShow);
-    button.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
-    button.tabIndex = shouldShow ? 0 : -1;
+    setNavigationVisible(button, shouldShow);
 }
 
 function handleConversationScrollPositionChange(scrollableField) {
@@ -31284,15 +31141,15 @@ function setLatestUnreadBoundary(messageElement) {
     }
 
     if (latestUnreadBoundaryElement?.isConnected) {
-        latestUnreadBoundaryElement.remove();
+        return latestUnreadBoundaryElement;
     }
 
     const boundary = document.createElement('div');
     boundary.className = 'latest-unread-boundary';
     boundary.setAttribute('role', 'separator');
-    boundary.setAttribute('aria-label', 'Latest unread boundary');
+    boundary.setAttribute('aria-label', 'First new message');
     boundary.setAttribute('tabindex', '-1');
-    boundary.textContent = 'Latest unread';
+    boundary.textContent = 'New messages';
     messageElement.parentElement.insertBefore(boundary, messageElement);
     latestUnreadBoundaryElement = boundary;
     return boundary;
@@ -31338,8 +31195,8 @@ function showNewSharedMessagesIndicator() {
         indicator.type = 'button';
         indicator.id = 'newSharedMessagesIndicator';
         indicator.className = 'new-shared-messages-indicator';
-        indicator.setAttribute('aria-label', 'Jump to latest unread message');
-        indicator.textContent = 'Jump to latest unread';
+        indicator.setAttribute('aria-label', 'Jump to first new message');
+        indicator.textContent = 'New messages · Jump to first new message';
         indicator.addEventListener('click', () => {
             void jumpToLatestUnreadBoundary();
         });
@@ -33961,7 +33818,8 @@ export function initializeChatTab() {
         sessionTabsCache = normaliseConversationSessionViewModels([...new Map([...pinned, ...(selected ? [selected] : []), ...rows.map(row => ({ ...sessionTabsCache.find(previous => previous.session_id === row.session_id), ...row }))].map(row => [row.session_id, row])).values()]);
         reconcileServerConversationPreferences(sessionTabsCache);
     }, currentChat: () => sessionTabsCache.find(row => row.session_id === activeChatSessionId) });
-    document.querySelector('.chat-header-controls')?.append(profileButton());
+    document.querySelector('#conversationActions .conversation-actions-panel')?.append(profileButton());
+    initialiseConversationActions();
     console.log("Initializing chat tab...");
     bindFocusedConversationEvents();
 
@@ -34062,9 +33920,7 @@ export function initializeChatTab() {
     const inviteProjectFilter = document.getElementById('inviteProjectFilter');
     const incomingInvitesButton = document.getElementById('incomingInvitesBtn');
     const incomingInvitesCloseButton = document.getElementById('closeIncomingInvites');
-    const importExternalConversationButton = document.getElementById('importExternalConversationBtn');
     const importExternalConversationInput = document.getElementById('importExternalConversationInput');
-    const importAllExternalConversationsButton = document.getElementById('importAllExternalConversationsBtn');
     const continueImportedConversationButton = document.getElementById('continueImportedConversationBtn');
 
     if (!sendButton || !resetButton || !promptInput) {
@@ -34117,39 +33973,22 @@ export function initializeChatTab() {
     renderPendingAttachmentState();
     renderActiveUploadUi();
 
-    if (importExternalConversationButton && importExternalConversationInput) {
-        importExternalConversationButton.addEventListener('click', () => {
-            importExternalConversationInput.click();
-        });
+    if (importExternalConversationInput) {
         importExternalConversationInput.addEventListener('change', async () => {
             const file = importExternalConversationInput.files?.[0] || null;
             importExternalConversationInput.value = '';
             if (!file) {
                 return;
             }
-            importExternalConversationButton.disabled = true;
             try {
                 await handleExternalConversationFile(file);
             } catch (error) {
                 console.error('[chatTab] External conversation import failed:', error);
                 showToast(error?.message || 'Unable to import this conversation.', 'error');
-            } finally {
-                importExternalConversationButton.disabled = false;
             }
         });
     }
-    if (importAllExternalConversationsButton) {
-        importAllExternalConversationsButton.addEventListener('click', async () => {
-            importAllExternalConversationsButton.disabled = true;
-            try {
-                await startExternalConversationBulkImport();
-            } catch (error) {
-                console.error('[chatTab] Machine conversation import failed:', error);
-                showToast(error?.message || 'Unable to start the machine conversation import.', 'error');
-            } finally {
-                importAllExternalConversationsButton.disabled = false;
-            }
-        });
+    if (document.getElementById('externalConversationBulkImportPanel')) {
         document.getElementById('pauseExternalConversationBulkImportBtn')?.addEventListener('click', () => {
             void controlExternalConversationBulkImport('pause').catch((error) => showToast(error?.message || 'Unable to pause import.', 'error'));
         });
@@ -34229,13 +34068,18 @@ export function initializeChatTab() {
             event.preventDefault();
             event.stopPropagation();
 
+            const clipboardText = event.clipboardData?.getData('text/plain');
+            if (clipboardText && promptInput) {
+                promptInput.setRangeText(clipboardText, promptInput.selectionStart, promptInput.selectionEnd, 'end');
+                promptInput.dispatchEvent(new Event('input', {bubbles:true}));
+            }
             // Route clipboard images through the same upload path used for
             // drag/drop and file-picker uploads so workflow handling is
             // consistent across all attachment entry points.
             void uploadFilesToVon(pastedImageFiles);
         };
 
-        chatTab.addEventListener('paste', handleClipboardImagePaste);
+        promptInput?.addEventListener('paste', handleClipboardImagePaste);
 
         // Local UI + drop handling
         const applyDragOverState = () => {
@@ -34456,7 +34300,11 @@ export function initializeChatTab() {
     initialiseCompactChatComposer(promptInput.closest('.chat-composer'), resizePromptComposer);
 
     // Add event listeners
-    sendButton.addEventListener('click', handleSendPrompt);
+    const submitComposer = (event) => {
+        updateSendButtonForCurrentChatState();
+        if (!chatSteeringControls?.activate(event)) void handleSendPrompt();
+    };
+    sendButton.addEventListener('click', submitComposer);
     resetButton.addEventListener('click', handleResetContext);
 
     ensureAbortButtonBound();
@@ -34478,7 +34326,7 @@ export function initializeChatTab() {
     promptInput.addEventListener('keypress', function (event) {
         if (shouldSubmitComposerKey(event)) {
             event.preventDefault();
-            handleSendPrompt();
+            submitComposer(event);
         }
     });
 
@@ -35636,7 +35484,7 @@ function getSelectedChatPromptQueueEntryForSend() {
     ) {
         return null;
     }
-    if (typeof entry.promptRaw !== 'string' || !entry.promptRaw.trim()) {
+    if (typeof entry.promptRaw !== 'string' || (!entry.promptRaw.trim() && !entry.executionEnvelope?.image_attachment_ids?.length)) {
         return null;
     }
     return entry;
@@ -37234,7 +37082,7 @@ async function sendQueuedChatPromptEntry(entryId) {
     if (sessionHead?.id !== nextEntry.id) {
         return false;
     }
-    if (!nextEntry || typeof nextEntry.promptRaw !== 'string' || !nextEntry.promptRaw.trim()) {
+    if (!nextEntry || typeof nextEntry.promptRaw !== 'string' || (!nextEntry.promptRaw.trim() && !nextEntry.executionEnvelope?.image_attachment_ids?.length)) {
         queuedChatPrompts = queuedChatPrompts.filter((entry) => entry?.id !== cleanEntryId);
         renderChatTaskQueuePanel();
         refreshChatSessionTabActivityIndicators();
@@ -37396,7 +37244,7 @@ async function handleSendPrompt(options = {}) {
     const promptForSend = normaliseVontologyIdsForBackend(promptRaw);
     const promptText = promptForSend.trim();
     const assistantOpening = options?.turnKind === 'assistant_opening';
-    const allowEmptyPrompt = assistantOpening && options?.allowEmptyPrompt === true;
+    const allowEmptyPrompt = (assistantOpening && options?.allowEmptyPrompt === true) || imageItems(targetSessionId).length > 0 || options?.executionEnvelope?.image_attachment_ids?.length > 0;
     if (
         directComposerSubmission
         && (getInFlightUploadStateForSession(targetSessionId) || imagesBlocked(targetSessionId))
@@ -37478,7 +37326,7 @@ async function handleSendPrompt(options = {}) {
         if (fromQueue) {
             return;
         }
-        if (!promptText) {
+        if (!promptText && !imageItems(targetSessionId).length) {
             return;
         }
         const submissionSessionKey = getChatRequestSessionKey(targetSessionId);
@@ -37543,7 +37391,7 @@ async function handleSendPrompt(options = {}) {
     const userTurnId = buildChatRequestTurnId('user', clientRequestId);
     const assistantTurnId = buildChatRequestTurnId('assistant', clientRequestId);
     const userTurnShouldRender = Boolean(
-        !assistantOpening && !observeServerDispatch && promptText
+        !assistantOpening && !observeServerDispatch && (promptText || imageItems(targetSessionId).length || options?.executionEnvelope?.image_attachment_ids?.length)
     );
     const userTurnTimestamp = userTurnShouldRender ? new Date().toISOString() : null;
     const executionContextBinding = synchroniseLlmExecutionContext();
@@ -37735,6 +37583,9 @@ async function handleSendPrompt(options = {}) {
         if (!claimForegroundDelivery()) {
             return false;
         }
+        if (request.executionEnvelope?.image_attachment_ids?.length && isRequestVisible() && promptInput.value === request.promptRaw) {
+            setPromptComposerValue('', { promptInput });
+        }
         _acceptConversationSituationPayload(data, request.sessionId);
         const responsePresenterState = resolveResponsePresenterState(data);
         const responseChannels = responsePresenterState.presenterChannels;
@@ -37788,8 +37639,8 @@ async function handleSendPrompt(options = {}) {
         applyImmediateThinkingTerminalOutcome(request);
 
         // Store LLM debug data if available
-        if (data.llm_debug) {
-            const enriched = enrichDebugDataWithSpeechPlanning(data.llm_debug, {
+        if (data.llm_debug || displayElements) {
+            const enriched = enrichDebugDataWithSpeechPlanning(data.llm_debug || {}, {
                 presenterChannels: responseChannels,
                 screenText,
                 spokenText,
@@ -38012,7 +37863,7 @@ async function handleSendPrompt(options = {}) {
         if (promptText) {
             rememberLastSubmittedUserPrompt(promptRaw);
         }
-        setPromptComposerValue('', { promptInput });
+        if (!request.executionEnvelope?.image_attachment_ids?.length) setPromptComposerValue('', { promptInput });
     }
 
     let generateTransportInterrupted = false;
@@ -38970,7 +38821,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageText.className = 'chat-message-text';
             messageText.style.cssText = 'color: #333; white-space: pre-wrap; text-align: left; font-weight: 400; overflow-wrap: anywhere; word-break: break-word; min-width: 0;';
             const userText = String(message ?? '');
-            const shouldRenderUserMarkdown = sender === 'User' && detectMarkdown(userText);
+            const shouldRenderUserMarkdown = sender !== 'Error' && detectMarkdown(userText);
             if (shouldRenderUserMarkdown) {
                 messageText.classList.add('markdown-rendered', 'chat-markdown');
                 messageText.style.whiteSpace = 'normal';

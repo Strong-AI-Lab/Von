@@ -2728,3 +2728,12 @@ def test_restart_reconciles_existing_assistant_result_without_replaying_work():
         )
         == 0
     )
+
+
+def test_attachment_only_queue_preserves_exact_descriptor_ids():
+    scope = queue_service.build_queue_scope(user_concept_id="#V#alice", organisation_concept_id="#V#org")
+    record = _create_server_queue_record(scope=scope, submission_id="attachment-only",
+        prompt="", execution_envelope={"image_attachment_ids":["#V#file"]})
+    assert record["prompt_raw"] == ""
+    persisted = mongo_client.get_chat_prompt_queue_collection().find_one({"queue_id": record["queue_id"]})
+    assert persisted["execution_envelope"]["image_attachment_ids"] == ["#V#file"]
