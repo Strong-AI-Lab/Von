@@ -48,7 +48,8 @@ const server = http.createServer((req, res) => {
   }
   if (pathname === '/von/') { res.setHeader('Content-Type', 'text/html'); res.end(app); return; }
   let file;
-  if (pathname === '/von/outage-worker.js') file = path.join(root, 'outage/service-worker.js');
+  if (pathname === '/von/service-worker.js') file = path.join(root, 'service-worker.js');
+  else if (pathname === '/von/outage-worker.js') file = path.join(root, 'outage/service-worker.js');
   else if (pathname.startsWith('/static/')) file = path.resolve(root, pathname.slice(8));
   if (!file?.startsWith(root + path.sep) || !fs.existsSync(file)) { res.writeHead(404); res.end(); return; }
   const mime = { '.js': 'application/javascript', '.css': 'text/css', '.html': 'text/html' }[path.extname(file)];
@@ -68,6 +69,23 @@ const server = http.createServer((req, res) => {
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) await new Promise(resolve => navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true }));
     });
+    const workerLifecycle = await page.evaluate(async () => {
+      const reg = await navigator.serviceWorker.getRegistration('/von/');
+      const cache = await caches.open('von-push-state-v1');
+      await cache.put('/von/.push-binding', new Response('{}'));
+      await new Promise((resolve, reject) => {
+        const channel = new MessageChannel();
+        const timer = setTimeout(() => reject(new Error('Combined worker disable did not reply')), 5000);
+        channel.port1.onmessage = event => {
+          clearTimeout(timer);
+          event.data?.ok ? resolve() : reject(new Error('Disable failed'));
+        };
+        reg.active.postMessage({ type: 'von-push-disable' }, [channel.port2]);
+      });
+      return { script: reg.active.scriptURL, pushStateCleared: !(await caches.has('von-push-state-v1')) };
+    });
+    assert.equal(workerLifecycle.script, `${base}/von/service-worker.js`);
+    assert.equal(workerLifecycle.pushStateCleared, true);
     const draft = page.locator('#promptInput');
     await draft.fill('Unsent local acceptance draft');
     await page.evaluate(() => window.health({ hasSeenSuccessfulHealthPoll: true, failureCount: 1, firstFailureAtMs: Date.now() }));
@@ -119,7 +137,7 @@ const server = http.createServer((req, res) => {
     await expect(page.getByLabel('Recovered unsent draft')).toHaveValue('Unsent local acceptance draft');
     await expect(page.locator('#promptInput')).toHaveValue('');
     assert.equal(effects, 0);
-    const result = { surface: 'component/network fixture', viewports: 3, transientNoOverlay: true, thinkingNoOverlay: true,
+    const result = { surface: 'component/network fixture', viewports: 3, workerLifecycle, transientNoOverlay: true, thinkingNoOverlay: true,
       openDraftRetained: true, reloadDraftRecovery: true, focusRestored: true, offlineReloadAndReopen: true, reconnect: true, cachedPaths: cached, effects };
     fs.writeFileSync(path.join(evidence, 'result.json'), JSON.stringify(result, null, 2));
     console.log(JSON.stringify(result));

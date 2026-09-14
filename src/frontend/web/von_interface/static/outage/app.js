@@ -61,7 +61,7 @@ export function installOutageView() {
   void refreshStatus();
   setInterval(() => { if (dialog.open) updateText(); }, 10000);
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/von/outage-worker.js', { scope: '/von/', updateViaCache: 'none' })
+    navigator.serviceWorker.register('/von/service-worker.js', { scope: '/von/', updateViaCache: 'none' })
       .catch(() => { /* The open page still recovers if installation is unavailable. */ });
   }
 }

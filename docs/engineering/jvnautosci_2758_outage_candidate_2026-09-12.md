@@ -1,7 +1,7 @@
 # Mobile outage candidate — 12 September 2026
 
 - **Kind:** dated implementation and evidence handoff
-- **Lifecycle:** unfinished candidate
+- **Lifecycle:** release evidence
 - **Authority:** evidence only; Jira JVNAUTOSCI-2758 owns the live decision
 - **Owner:** Codex DGX, for Michael Witbrock
 - **Review trigger:** candidate validation, status-route preparation or release
@@ -15,13 +15,10 @@ The candidate adds presentation, a small public-only service-worker fallback,
 and an optional operator-bound deployment status publisher. No model calls,
 new workflow, HTTP write endpoint, credentials or database migration are involved.
 
-Merge decision: **not ready for release/merge**. Authenticated candidate outage,
-reload and draft recovery now pass (14 September continuation below). The
-remaining dependency is the operator-bound independently served production
-maintenance record and controller publisher configuration. The coding sandbox
-cannot inspect controller configuration or change live ingress. No merge or
-public deployment has occurred. Required GitHub syntax and secret-scanning
-checks passed for the published continuation.
+The initial publication was blocked on production status routing. The 14 September
+operator repair and final integration evidence below supersede that observation.
+Live delivery status belongs to JVNAUTOSCI-2758 and PR #665; deployment is performed
+and verified by the receiving controller, not this coding process.
 
 ## Candidate behaviour
 
@@ -127,7 +124,7 @@ belongs to revision `2ded69af7`; the publisher is unchanged in this continuation
 Fresh browser acceptance observed that retained record as stale and displayed
 return time unknown, rather than inventing an estimate.
 
-## Remaining bounded operator handoff
+## Historical operator handoff (superseded by repair below)
 
 The old authentication/setup blocker is resolved. Do not prepare another login
 fixture or ask Michael to sign in. The fixture proxy launcher encountered a
@@ -169,3 +166,43 @@ A cold first visit with no installed service worker, a cleared cache, and an
 expired Cloudflare Access session remain explicit infrastructure/session
 boundaries. No public ingress, controller configuration or database was changed
 by this coding run. Canonical task updates belong to the receiving controller.
+
+## 14 September production-route repair and final integration
+
+The controller supplied canonical file copy
+`#V#computer_file_copy_7f218d32c4104a0eac1cf8c6425657cd`, SHA-256
+`94dfc533c89653a2a35902e51021dc2ec6a0716432c23887d114e4ec07529dd1`.
+The archive checksum was independently verified. Its operator handoff and receipts
+record a separate fixed-file read-only status service, exact public ingress,
+controller publisher binding, coherent deployment-module installation and
+configuration rollback under the operator's `outage665-public-status-2a003`
+evidence root. Private app routes retained Access redirects; the status child
+path was denied and POST returned 405. The abandoned fixture proxy was stopped.
+The operator verified attributed planned publication and cleared it only after
+matching local/public readiness. Production was not stopped for that probe.
+A fresh coding-run anonymous GET at 03:15:53 UTC returned HTTP 200 JSON with
+`Cache-Control: no-store`, ready state and no ETA, consistent with that receipt.
+
+Current main `2b9379cfc` introduced push notifications after the previous outage
+acceptance. Integration exposed competing worker registrations for `/von/`.
+Both features now register `/von/service-worker.js`, which imports the existing
+release-scoped outage worker script. The push handler, subscription, scope and
+binding cache remain in the same registration; outage cache cleanup remains
+confined to outage caches. Both registration callers disable import caching for
+release updates. The template retains both the PWA manifest and outage styles.
+
+Final targeted checks passed: 22 backend deployment/maintenance/static tests and
+29 frontend outage/health/push tests. The Chromium component fixture now loads
+the combined production worker, verifies its active URL, delivers a real worker
+message to disable a synthetic local push binding, and then proves the outage
+cache still supports offline reload/reopen, recovery, draft retention and zero
+HTTP effects. Three mobile viewports passed and screenshots were inspected.
+Evidence: `.run/outage-release/components/`. This supplements the retained full
+authenticated acceptance above; it is not a new physical-device or push-provider
+display claim. Push privacy, duplicate suppression and click confinement are
+covered by the existing handler tests running with the imported outage script.
+
+The publication decision is recorded on PR #665. Controller deployment must
+read back the merged public/static revision and readiness and retain the actual
+maintenance publication/clearing receipt. Physical phones, cold uncached first
+visits and expired Cloudflare sessions remain the previously stated limits.
