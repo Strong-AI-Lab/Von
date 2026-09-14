@@ -28,9 +28,9 @@ const save = () => fs.writeFileSync(path.join(output, 'results.json'), JSON.stri
             await page.route('**/von/generate*', async route => {
                 const body = route.request().postDataJSON();
                 result.requests.push({ prompt: body.prompt, image_attachment_ids: body.image_attachment_ids,
-                    session_id: body.session_id, window_session: !!route.request().headers()['x-von-window-session'] });
+                    session_id: body.conversation_session_id, window_session: !!route.request().headers()['x-von-window-session'] });
                 await route.fulfill({ json: { response: 'Fixture request received.', success: true,
-                    terminal_status: 'completed', session_id: body.session_id, llm_debug: { model: 'fixture-no-model' } } });
+                    terminal_status: 'completed', session_id: body.conversation_session_id, llm_debug: { model: 'fixture-no-model' } } });
             });
             await page.goto(`${url}/von/`);
             const health = await (await context.request.get(`${url}/health`)).json();
@@ -46,7 +46,10 @@ const save = () => fs.writeFileSync(path.join(output, 'results.json'), JSON.stri
             }).catch(() => null), { timeout: 20000 }).toBe(actor);
             const created = page.waitForResponse(r => r.url().endsWith('/api/session/create_chat_session') && r.request().method() === 'POST');
             await page.getByRole('button', { name: 'New conversation', exact: true }).click();
-            assert.equal((await created).status(), 200);
+            const creation = await created;
+            assert.equal(creation.status(), 200);
+            result.created_session_id = (await creation.json()).session_id;
+            assert(result.created_session_id);
             const input = page.locator('#promptInput');
             await expect(input).toBeEnabled();
             await input.fill('Describe this screenshot\nKeep my caption');
@@ -97,6 +100,7 @@ const save = () => fs.writeFileSync(path.join(output, 'results.json'), JSON.stri
             await page.locator('#sendButton').click();
             await expect.poll(() => result.requests.length).toBe(1);
             assert.deepEqual(result.requests[0].image_attachment_ids, [replacement]);
+            assert.equal(result.requests[0].session_id, result.created_session_id);
             assert(!result.requests[0].image_attachment_ids.includes(removed));
             assert.equal(result.requests[0].prompt, 'Describe this screenshot\nKeep my caption');
             assert(result.requests[0].window_session);
@@ -115,7 +119,7 @@ const save = () => fs.writeFileSync(path.join(output, 'results.json'), JSON.stri
                 const retry = page.getByRole('button', { name: 'Retry upload of retry.png', exact: true });
                 await expect(retry).toBeVisible();
                 await expect(input).toHaveValue('Preserve this failed-upload draft');
-                await page.locator('#sendButton').click();
+                await expect(page.locator('#sendButton')).toBeDisabled();
                 assert.equal(result.requests.length, 2);
                 await page.unroute('**/von/api/images/upload');
                 const retried = page.waitForResponse(r => r.url().endsWith('/api/images/upload'));

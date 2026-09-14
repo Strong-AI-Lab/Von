@@ -217,7 +217,7 @@ makes the run partial while retaining the successful preservation receipt. A
 retry reuses the event's durable instance when one already exists. A queued or
 reused workflow does not prove its later mail, deck or paper effects succeeded.
 
-## Mobile/PWA image picker (candidate evidence, 12 September 2026)
+## Mobile/PWA image picker (local acceptance, 14 September 2026)
 
 The composer has an **Attach image** button beside the draft. Choose one or more
 photos/files, wait for previews, enter an instruction, then send. **More actions →
@@ -231,37 +231,56 @@ retry/removal. Closing the picker leaves the existing draft intact.
 The picker advertises PNG, JPEG and WebP. HEIC, animated and other unsupported
 images need conversion to a supported still format; the backend checks actual
 bytes, dimensions and size. Recognised image filenames with an empty browser MIME
-type still use that validator. Clipboard denial, cancellation, missing APIs and
-an empty clipboard provide the picker as a fallback. No clipboard permission is
-requested until **Paste image** is pressed. Native photo-library menus, clipboard
-availability and installed-PWA behaviour depend on the device/browser and have
-not been established by the local Chromium fixture below. No offline upload queue
-is supplied: retry when connectivity returns. Unsent image selections are not
-restored after a page reload.
+type still use that validator and remain image attachments rather than generic
+workflow file inputs. Clipboard denial, cancellation, missing APIs and an empty
+clipboard provide the picker as a fallback. No clipboard permission is requested
+until **Paste image** is pressed. There is no offline upload queue: retry when
+connectivity returns. Unsent image selections are not restored after a page reload.
 
-Candidate checks:
+Acceptance for PR #658, product revision
+`87f70a14f973ccedb1500b395ea554fb523dddb2`:
 
-- `tests/frontend/chatAttachmentWorkflowInput.test.js`,
-  `static/js/test/conversationImages.test.js` and `static/js/test/imagePicker.test.js`:
-  24 tests pass, including the actual chat request builder receiving only the
-  replacement image ID, and the next text request receiving none.
-- `tests/backend/test_conversation_images.py`: 15 tests pass, including the
-  authenticated upload route, byte validation, descriptor return, actor isolation,
-  original retrieval and provider-byte transport.
-- `tests/browser/imagePicker.cjs`: production template/CSS and image/compact-composer
-  modules in a localhost fixture, with stubbed upload/original endpoints. Chromium
-  passed at 360, 412 and 1440 pixels: native file chooser event, decoded preview,
-  removal/replacement, 44-pixel picker control and no composer overflow. Evidence:
-  task-worktree `.run/image-picker/results.json` and `*-preview.png`.
-- `tests/browser/composerControls.cjs`: all six desktop/touch/short-viewport
-  profiles pass with the added keyboard stop and unchanged one-row controls.
+- 34 targeted frontend tests passed across attachment request binding, image
+  validation/cancellation, picker/clipboard controls, upload recovery and compact
+  composer behaviour. All 16 `tests/backend/test_conversation_images.py` tests
+  passed, covering authenticated upload/original routes, invalid bytes, actor
+  isolation and provider-byte transport without issuing model requests.
+- `tests/browser/imagePickerAuthenticated.cjs` passed on the operator-prepared
+  disposable fixture at `http://127.0.0.1:5085`, using visible Browser test login
+  as synthetic `#V#blocked_picker658_alice` and a fresh conversation per viewport.
+  Chromium 153.0.8010.12 passed at 360, 412 and 1440 pixels: native chooser event,
+  actual uploads, SHA-256 and original-byte read-back, decoded previews,
+  removal/replacement, preserved caption, cancellation, 44-pixel attachment
+  control and no composer overflow. A failed upload disabled Send and a real
+  retry succeeded. The actual request builder submitted only the replacement ID
+  to the newly created conversation, and no image IDs on the next text request.
+- The same browser loaded the served standalone PWA manifest and exercised the
+  composer with the actual `/von/service-worker.js` controlling `/von/`. This is
+  local PWA-shell acceptance, not physical-device installation or offline upload.
+- `tests/browser/imagePicker.cjs` passed at three widths;
+  `tests/browser/composerControls.cjs` passed all six desktop/touch/short profiles.
+  `tests/browser/mobileScreenshotPaste.cjs` passed at three widths with real
+  desktop clipboard grants/denial, preserved captions, ordinary multiline text
+  paste and stubbed upload endpoints. Authenticated and component evidence is
+  retained under the task worktree's `.run/image-picker-authenticated/` and
+  `.run/image-picker-current/` respectively.
 
-These are bounded component/request-path checks, not authenticated PWA acceptance
-or a live vision-model trial. The DGX browser README's attachment profile on 5013
-was unreachable on this run and is documented as bound to another task. Before
-claiming the requested local PWA verification, the operator must prepare a separate
-localhost AgentTest profile bound to this task checkout/revision, with synthetic
-actors and disposable blob/data storage, browser-test login, and a working restart
-bridge. Keep real profiles and public port 5000 untouched. Then exercise the actual
-composer/upload/request/history path and PWA shell on that candidate. No deployment
-was requested by this task.
+The authenticated fixture deliberately disables generation. Browser submissions
+were intercepted at `/von/generate`; this does not establish a model answer or
+persisted conversation history. It verifies actual upload/storage/read-back and
+frontend request association, complemented by the targeted backend tests.
+
+The operator's Android 17 emulator evidence used Chrome 145 and Gboard 17.2,
+with native Copy/Paste image taps, a real clipboard permission prompt and native
+Allow. The unchanged PR658 helper returned a PNG that decoded to 24×16 and
+preserved captions. Source and clipboard PNG hashes differ because Chromium
+re-encodes clipboard images. The evidence archive is file copy
+`#V#computer_file_copy_7c09b5898bec45148912a9c8bb53a996`, SHA-256
+`4b4a8838656df8a3a5d8b1b360b7e1c5370b1e848120f98f6706a02531e46af2`.
+This establishes the helper's native capability, not physical Pixel, Chrome 152,
+iOS, original-byte clipboard fidelity or a fix for Gboard keyboard-tile refusal.
+The earlier fixture-repair archive is
+`#V#computer_file_copy_9e29aa91aa07485a9054d95ddb85de40`, SHA-256
+`35ed4ddb42f3a96469df16d465a9f230770904c5e402c68d9f34fde3a6ba6cd0`;
+it establishes setup recovery only. Both supplied archive checksums were verified.
+No public deployment was requested by this task.
