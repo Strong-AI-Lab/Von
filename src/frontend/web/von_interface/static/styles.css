@@ -18638,11 +18638,20 @@ body.settings-body {
     .chat-scroll-to-end-btn { transition: none; }
 }
 
-.conversation-menu-trigger {
-    margin-left: auto;
-    flex: 0 0 44px;
+.selected-conversation-options {
+    flex: 0 0 auto;
     min-height: 44px;
-    padding: 4px;
+    font-size: 12px;
+    padding: 6px 10px;
+    max-width: 100%;
+    white-space: normal;
+}
+.conversation-workspace[data-tray-collapsed="true"][data-tray-peek="false"] .selected-conversation-options { display: none; }
+.chat-session-menu button:focus-visible,
+.selected-conversation-options:focus-visible,
+.message-conversation-row:focus-visible {
+    outline: 3px solid #1d4ed8;
+    outline-offset: -3px;
 }
 
 /* Footer presentation preferences also apply to the narrow-screen details panel. */

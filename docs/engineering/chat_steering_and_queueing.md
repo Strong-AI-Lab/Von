@@ -124,3 +124,13 @@ landscape sizes with deterministic API fixtures. It checks long-receipt draft
 width, action reachability, preferences, one-shot alternatives, cancellation,
 keyboard dismissal and exchange menu bounds. This is local fixture-backed UI
 evidence, not public authentication, physical-device or deployment acceptance.
+
+Conversation rows have no ellipsis button. Right-click, Control-click,
+Shift+F10 or the Context Menu key open the existing options without selecting
+another conversation. The list's **Selected conversation options** button gives
+touch and keyboard users the same menu for the selected row. Row descriptions
+and tooltips explain these routes. The menu supports arrow keys, Home/End,
+Escape and focus return; it retains the original source-specific actions,
+including message-exchange reference copying and participant profiles.
+`tests/browser/messageConversationMenu.cjs` checks these routes, menu bounds and
+list collapse/reopening using production markup/modules with isolated transport.
