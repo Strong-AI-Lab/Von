@@ -764,6 +764,37 @@ def resolve_file_copy_blob_info(
     )
 
 
+def _file_copy_content_visible_to_actor(
+    *,
+    concept_doc: Mapping[str, Any],
+    user_concept_id: str | None,
+    organisation_concept_id: str | None,
+    namespace: str | None,
+) -> bool:
+    """Apply the same attachment binding to cached content and source bytes."""
+    image_attrs = concept_doc.get("attributes") or {}
+    if image_attrs.get("conversation_image"):
+        if not user_concept_id or image_attrs.get("user_concept_id") != user_concept_id:
+            return False
+        source = image_attrs.get("image_provenance") or {}
+        if source.get("kind") == "otter_archive":
+            from ..integrations.internal_mcp.otter_archive_proxy_mcp import (
+                otter_archive_resource_binding_for_user,
+            )
+
+            if otter_archive_resource_binding_for_user(user_concept_id) != source.get(
+                "resource_id"
+            ):
+                return False
+
+    return _file_copy_visible_to_actor(
+        concept_doc=concept_doc,
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+    )
+
+
 def fetch_file_copy_bytes(
     *,
     file_copy_concept_id: str,
@@ -778,22 +809,7 @@ def fetch_file_copy_bytes(
     if not isinstance(concept_doc, Mapping):
         return {"success": False, "error": "not_found"}
 
-    image_attrs = concept_doc.get("attributes") or {}
-    if image_attrs.get("conversation_image"):
-        if not user_concept_id or image_attrs.get("user_concept_id") != user_concept_id:
-            return {"success": False, "error": "not_found"}
-        source = image_attrs.get("image_provenance") or {}
-        if source.get("kind") == "otter_archive":
-            from ..integrations.internal_mcp.otter_archive_proxy_mcp import (
-                otter_archive_resource_binding_for_user,
-            )
-
-            if otter_archive_resource_binding_for_user(user_concept_id) != source.get(
-                "resource_id"
-            ):
-                return {"success": False, "error": "not_found"}
-
-    if not _file_copy_visible_to_actor(
+    if not _file_copy_content_visible_to_actor(
         concept_doc=concept_doc,
         user_concept_id=user_concept_id,
         organisation_concept_id=organisation_concept_id,

@@ -1042,10 +1042,21 @@ def serialise_queue_record(doc: Mapping[str, Any] | None) -> dict[str, Any] | No
         "enqueue_submission_id": doc.get("enqueue_submission_id"),
         "dispatch_mode": doc.get("dispatch_mode"),
         "dispatch_ready": doc.get("dispatch_ready"),
-        "handoff_source_queue_id": doc.get("handoff_source_queue_id"),
-        "retired_handoff_source_queue_id": doc.get(
-            "retired_handoff_source_queue_id"
+        "workflow_continuation": (
+            {
+                key: doc["workflow_continuation"].get(key)
+                for key in (
+                    "status",
+                    "source_queue_id",
+                    "source_request_id",
+                    "last_error",
+                )
+            }
+            if isinstance(doc.get("workflow_continuation"), Mapping)
+            else None
         ),
+        "handoff_source_queue_id": doc.get("handoff_source_queue_id"),
+        "retired_handoff_source_queue_id": doc.get("retired_handoff_source_queue_id"),
         "handoff_replacement_queue_id": doc.get("handoff_replacement_queue_id"),
         "handoff_source_retired_at": _serialise_datetime(
             doc.get("handoff_source_retired_at")
@@ -2003,6 +2014,7 @@ def create_queue_record(
     retry_source_queue_id: Any = None,
     retry_request_id: Any = None,
     retry_source_task_execution_concept_id: Any = None,
+    workflow_continuation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if status not in {STATUS_QUEUED, STATUS_IN_PROGRESS}:
         raise InvalidChatPromptQueueInput("status must be queued or in_progress")
@@ -2272,6 +2284,11 @@ def create_queue_record(
                 ),
             }
         )
+    if workflow_continuation is not None:
+        # Internal issuance only; HTTP enqueue never forwards this field.
+        if dispatch_mode_clean != DISPATCH_MODE_SERVER or dispatch_ready:
+            raise InvalidChatPromptQueueInput("workflow continuation must start held")
+        doc["workflow_continuation"] = dict(workflow_continuation)
     if task_concept_id_clean:
         doc["task_concept_id"] = task_concept_id_clean
     if task_execution_concept_id_clean:
@@ -3081,6 +3098,37 @@ def fail_server_dispatch_reservation(
         },
     )
     return bool(getattr(result, "matched_count", 0))
+
+
+def fail_held_workflow_continuation(*, scope, queue_id, source_request_id, error):
+    """Record a terminal dependency problem before continuation admission."""
+    now = _now()
+    return bool(
+        _collection()
+        .update_one(
+            {
+                **_scope_query(scope),
+                "queue_id": queue_id,
+                "status": STATUS_QUEUED,
+                "dispatch_mode": DISPATCH_MODE_SERVER,
+                "dispatch_ready": False,
+                "active_conversation_key": {"$exists": False},
+                "workflow_continuation.source_request_id": source_request_id,
+            },
+            {
+                "$set": {
+                    "status": STATUS_FAILED,
+                    "completed_at": now,
+                    "updated_at": now,
+                    "last_error": str(error)[:4000],
+                    "workflow_continuation.status": "failed",
+                    "purge_after": _terminal_purge_after(now),
+                },
+                "$unset": {"queued_global_slot": "", "queued_user_slot": ""},
+            },
+        )
+        .matched_count
+    )
 
 
 def _requeue_with_bounded_slots(

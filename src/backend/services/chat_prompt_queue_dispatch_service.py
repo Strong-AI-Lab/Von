@@ -347,6 +347,15 @@ class ChatPromptQueueDispatcher:
         if self._reconcile_one_handoff():
             return True
 
+        from .background_workflow_continuation_service import reconcile_one_continuation
+
+        try:
+            reconcile_one_continuation()
+        except Exception:
+            _logger.exception(
+                "[chat_prompt_dispatch] Workflow continuation reconciliation unavailable"
+            )
+
         record = chat_prompt_queue_service.reserve_next_server_dispatch(
             server_instance_id=SERVER_INSTANCE_ID,
         )

@@ -11784,6 +11784,15 @@ def submit_server_dispatched_chat_prompt(
             )
         role_in_org = _normalise_non_empty_text(membership.get("role")) or "member"
 
+    from ...services.background_workflow_continuation_service import (
+        validate_continuation_dispatch,
+    )
+
+    try:
+        validate_continuation_dispatch(record)
+    except ValueError as exc:
+        return ChatPromptDispatchOutcome(accepted=False, error=str(exc))
+
     raw_envelope = record.get("execution_envelope")
     if not isinstance(raw_envelope, Mapping):
         return ChatPromptDispatchOutcome(
