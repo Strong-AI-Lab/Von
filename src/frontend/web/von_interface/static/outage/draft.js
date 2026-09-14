@@ -28,7 +28,13 @@ export function preserveOutageDraft(getNamespace) {
       recovery.remove();
     });
     recovery.append(title, message, text, discard);
-    input.parentElement.before(recovery);
+    const composer = input.closest('.chat-composer');
+    if (composer) {
+      recovery.style.cssText = 'grid-column:1 / -1;min-width:0;width:100%;box-sizing:border-box';
+      composer.append(recovery);
+    } else {
+      input.parentElement.before(recovery);
+    }
   }
   const hideRecovery = () => {
     document.getElementById('vonRecoveredDraft')?.remove();
