@@ -878,3 +878,64 @@ class TestGetUnreadCount:
         """get_unread_count() with empty user should return 0."""
         result = get_unread_count("")
         assert result == 0
+
+
+def test_explicit_queue_retry_matches_pre_mode_delivery_identity():
+    intent = dict(
+        delivery_idempotency_key="retained-draft",
+        sender_id="#V#alice",
+        recipient_ids=["#V#worker"],
+        organisation_concept_id="#V#lab",
+        content="Keep this message independent",
+    )
+    before = build_direct_message_delivery_identity(
+        **intent, metadata={"intent": "info"}
+    )
+    after = build_direct_message_delivery_identity(
+        **intent, metadata={"intent": "info", "submit_mode": "queue"}
+    )
+    assert before == after
+
+
+@pytest.mark.parametrize("idempotent", [False, True])
+def test_service_rejects_steer_before_storage_or_workflow(idempotent):
+    from src.backend.services.message_service import DirectMessageSteeringUnavailable
+
+    intent = dict(
+        sender_id="#V#alice",
+        recipient_ids=["#V#worker"],
+        content="Scope correction",
+        metadata={"submit_mode": "steer"},
+    )
+    with pytest.raises(DirectMessageSteeringUnavailable):
+        if idempotent:
+            create_message_idempotently(
+                **intent,
+                delivery_idempotency_key="steer-1",
+                organisation_concept_id="#V#lab",
+            )
+        else:
+            create_message(**intent, org_id="#V#lab")
+
+
+@pytest.mark.parametrize("mode", ["queue", "steer", "unknown", None])
+def test_projection_preserves_recorded_mode_and_actor_scope(mode):
+    from src.backend.services.message_service import project_direct_message
+
+    row = project_direct_message(
+        {
+            "concept_id": "#V#message",
+            "relationships": {
+                PREDICATE_SENDER: ["#V#alice"],
+                PREDICATE_RECIPIENT: ["#V#worker"],
+            },
+            "concept_data": {
+                "metadata": {"submit_mode": mode},
+                "organisation_concept_id": "#V#lab",
+            },
+        }
+    )
+    assert row["submit_mode"] == mode
+    assert row["sender_id"] == "#V#alice"
+    assert row["recipient_ids"] == ["#V#worker"]
+    assert row["organisation_concept_id"] == "#V#lab"

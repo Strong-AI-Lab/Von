@@ -352,6 +352,23 @@ def prepare_attachment_inputs(config, context, run):
 
 
 def launch(config, state, lock_fd):
+    # A retained/externally-created steering message cannot be interpreted as a
+    # fresh task after its intended turn has ended. This exec route has no live
+    # turn transport yet. Report non-delivery without asking a model to execute it.
+    if state["context"]["message"].get("submit_mode", "queue") != "queue":
+        state["result"] = {
+            "answer": (
+                "This message was not applied: active steering is unavailable on "
+                "the installed DGX inbox route. The original message is retained. "
+                "Choose Queue explicitly to request separate work."
+            ),
+            "task_id": "",
+            "action": "reply",
+            "deployment_requested": False,
+            "new_task": None,
+        }
+        state["phase"] = "reporting"
+        return
     run = Path(state["run_dir"])
     run.mkdir(parents=True, exist_ok=True)
     settings = resolve_execution_settings(config, {})
@@ -420,7 +437,10 @@ def authorise_source(config, api, message):
         api.messages.project_direct_message(current), config
     ):
         raise PermissionError("Inbound message no longer available to this worker")
-    if api.messages.project_direct_message(current)["content"] != message["content"]:
+    projection = api.messages.project_direct_message(current)
+    if projection["content"] != message["content"] or projection.get(
+        "submit_mode", "queue"
+    ) != message.get("submit_mode", "queue"):
         raise PermissionError("Inbound message changed during reply")
     allowed, _ = api.messages.authorise_direct_message_participants(
         sender_id=config["agent_id"],

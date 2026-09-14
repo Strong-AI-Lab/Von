@@ -13,6 +13,7 @@ from flask.typing import ResponseReturnValue
 
 from ...services.message_service import (
     DirectMessageIdempotencyConflict,
+    DirectMessageSteeringUnavailable,
     authorise_direct_message_participants,
     create_message,
     create_message_idempotently,
@@ -27,6 +28,7 @@ from ...services.message_service import (
     normalise_direct_message_delivery_idempotency_key,
     sanitise_direct_message_delivery_metadata,
     search_messages,
+    validate_direct_message_submit_mode,
 )
 from ...services.paper_recommendation_review_service import (
     build_message_linked_paper_recommendation_review,
@@ -467,6 +469,33 @@ def send_message() -> ResponseReturnValue:
         metadata_payload = sanitise_direct_message_delivery_metadata(
             data.get("metadata") if isinstance(data.get("metadata"), dict) else None
         )
+        try:
+            mode = data.get("submit_mode", metadata_payload.get("submit_mode", "queue"))
+            if (
+                "submit_mode" in metadata_payload
+                and metadata_payload["submit_mode"] != mode
+            ):
+                raise ValueError("Conflicting submit modes")
+            if any(
+                key in data or key in metadata_payload
+                for key in ("submit_target", "submit_intent", "steering_target")
+            ):
+                raise ValueError(
+                    "Active-turn targets are not supported by this message route"
+                )
+            metadata_payload["submit_mode"] = validate_direct_message_submit_mode(mode)
+        except DirectMessageSteeringUnavailable as exc:
+            return (
+                jsonify(
+                    error=str(exc),
+                    error_code="message_steering_unavailable",
+                    effect_status="not_applied",
+                    retryable=False,
+                ),
+                409,
+            )
+        except ValueError as exc:
+            return jsonify(error=str(exc), error_code="invalid_submit_intent"), 400
         from ...services.message_attachment_service import authorise_message_attachments
 
         # Descriptors and audience are server-derived, never trusted metadata.
@@ -560,6 +589,7 @@ def send_message() -> ResponseReturnValue:
                     "reused": reused,
                     "idempotent_replay": reused,
                     "delivery_status": delivery_status,
+                    "submit_mode": metadata_payload["submit_mode"],
                     "message_id": message.get("concept_id"),
                     "conversation": conversation,
                     "sent_at": message.get("concept_data", {}).get("sent_at"),
