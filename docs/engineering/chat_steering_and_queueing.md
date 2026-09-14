@@ -75,8 +75,10 @@ TaskExecution-backed work retains the separate task continuation path.
 
 `continuation_ready_when` defaults to `workflow_terminal`. A consumer that only
 needs extracted file content can select `source_text_available`; canonical
-`hasContent` then permits continuation while indexing remains pending. Workflow
-launches also project explicit file-copy inputs into source data for consumers
+`hasContent` or the bounded byte projection then permits continuation while
+indexing remains pending, including interpretations that do not persist text.
+Cached attachment text uses the same owner/archive binding checks as bytes.
+Workflow launches also project explicit file-copy inputs into source data for consumers
 that read `prompt`/`user_prompt`. Existing extracted text is preferred; otherwise
 the bounded, effect-free byte reader is used. Source references, truncation and
 scoped failures are retained, and document text is not instruction authority.

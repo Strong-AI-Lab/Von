@@ -278,7 +278,6 @@ def reconcile_one_continuation() -> bool:
                     user_concept_id=scope["user_concept_id"],
                     organisation_concept_id=scope.get("organisation_concept_id"),
                     namespace=scope["namespace"],
-                    persisted_only=True,
                 )
                 if not sources or any(
                     item.get("status") != "available" for item in sources

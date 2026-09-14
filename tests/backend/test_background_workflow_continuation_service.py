@@ -226,9 +226,16 @@ def test_release_failure_recovers_without_another_queue_entry(scenario, monkeypa
     assert coll.count_documents({"source": "workflow_continuation"}) == 1
 
 
+@pytest.mark.parametrize(
+    "conversation_attachment,cached",
+    [(False, True), (True, True), (True, False)],
+)
 def test_extracted_text_releases_consumer_while_indexing_is_still_pending(
-    scenario, monkeypatch
+    scenario, monkeypatch, conversation_attachment, cached
 ):
+    import fitz
+    from types import SimpleNamespace
+
     scope, source, instance, workflows, register, complete, due = scenario
     receipt = register(ready_when="source_text_available")
     queue.finish_prompt_record(
@@ -238,40 +245,94 @@ def test_extracted_text_releases_consumer_while_indexing_is_still_pending(
         {"instance_id": instance.instance_id},
         {"$set": {"status": "running", "current_state": "index"}},
     )
+    text = "Workshop schedule"
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((72, 72), text)
+        data = pdf.tobytes()
     rows = []
+    available = False
+    fetches = []
+
+    def get_bytes(key):
+        fetches.append(key)
+        if not available:
+            raise FileNotFoundError(key)
+        return data
+
     monkeypatch.setattr(
         "src.backend.services.computer_file_copy_service._load_file_copy_concept_doc",
         lambda **kw: {
             "concept_id": "#V#poster",
             "relationships": {"specific_to_user": ["#V#user"]},
+            "attributes": {
+                "conversation_image": conversation_attachment,
+                "user_concept_id": "#V#user",
+                "file_copy_metadata_storage": "attributes.v1",
+                "blob_key": "poster",
+                "content_type": "application/pdf",
+                "original_filename": "schedule.pdf",
+            },
         },
     )
     monkeypatch.setattr(
         "src.backend.services.text_value_service.get_texts_for_concept",
         lambda *a, **kw: rows,
     )
-
-    def no_reprocessing(**kw):
-        raise AssertionError("The waiting consumer must not fetch or re-extract bytes")
-
     monkeypatch.setattr(
-        "src.backend.services.computer_file_copy_service.fetch_file_copy_bytes",
-        no_reprocessing,
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: SimpleNamespace(get_bytes=get_bytes),
     )
     assert not service.reconcile_one_continuation()
-    rows.append({"text": "Workshop schedule"})
+    if cached:
+        rows.append({"text": text})
+    available = True
+    fetches.clear()
     due()
+    importlib.reload(service)
     assert service.reconcile_one_continuation()
+    assert not service.reconcile_one_continuation()
     record = queue._collection().find_one({"queue_id": receipt["queue_id"]})
-    observation = record["execution_envelope"]["workflow_inputs"][
-        "background_workflow_continuation"
-    ]["observations"][0]
+    inputs = record["execution_envelope"]["workflow_inputs"]
+    observation = inputs["background_workflow_continuation"]["observations"][0]
     assert observation["status"] == "running"
-    assert observation["source_documents"][0]["text"] == "Workshop schedule"
+    document = observation["source_documents"][0]
+    assert document["text"].strip() == text
+    assert document["source"] == ("persisted_hasContent" if cached else "file_bytes")
+    assert fetches == ([] if cached else ["poster"])
     assert (
         workflows.find_one({"instance_id": instance.instance_id})["current_state"]
         == "index"
     )
+    assert workflows.count_documents({}) == 1
+    assert queue._collection().count_documents({"source": "workflow_continuation"}) == 1
+
+    # The next event consumer receives usable source text on its normal launch
+    # path even when the interpretation has never persisted hasContent.
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+        build_workflow_execution_arguments,
+    )
+
+    arguments, _ = build_workflow_execution_arguments(
+        WorkflowTurnCapability(
+            name="event",
+            workflow_id="#V#event",
+            display_name="Event",
+            description="Represent an event",
+            relevance_score=1,
+            input_schema={},
+        ),
+        {},
+        prompt="Represent this event",
+        context=[],
+        conversation_situation=None,
+        request_workflow_launch_inputs=inputs,
+        user_concept_id=scope["user_concept_id"],
+        organisation_concept_id=scope["organisation_concept_id"],
+        namespace=scope["namespace"],
+        maximum_wait_seconds=1,
+    )
+    assert text in arguments["inputs"]["prompt"]
 
 
 def test_missing_effect_readback_waits_and_foreign_effect_readback_fails(

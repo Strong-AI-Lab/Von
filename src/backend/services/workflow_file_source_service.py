@@ -16,7 +16,6 @@ def project_workflow_file_sources(
     organisation_concept_id: str | None,
     namespace: str,
     max_chars: int = 20_000,
-    persisted_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Reuse canonical extracted text, otherwise use the bounded byte reader.
 
@@ -26,7 +25,7 @@ def project_workflow_file_sources(
     """
     from .computer_file_copy_service import (
         _load_file_copy_concept_doc,
-        _file_copy_visible_to_actor,
+        _file_copy_content_visible_to_actor,
         fetch_file_copy_bytes,
     )
     from .file_bytes_text_projection_service import extract_file_bytes_text_projection
@@ -53,7 +52,7 @@ def project_workflow_file_sources(
                 continue
             try:
                 doc = _load_file_copy_concept_doc(file_copy_concept_id=concept_id)
-                if not doc or not _file_copy_visible_to_actor(
+                if not doc or not _file_copy_content_visible_to_actor(
                     concept_doc=doc,
                     user_concept_id=user_concept_id,
                     organisation_concept_id=organisation_concept_id,
@@ -63,20 +62,12 @@ def project_workflow_file_sources(
                         {**item, "status": "unavailable", "reason": "not_found"}
                     )
                     continue
-                # Conversation images have additional participant/archive
-                # binding checks in the byte service. Never bypass those by
-                # serving cached text through ordinary concept visibility.
-                image = (doc.get("attributes") or {}).get("conversation_image")
-                rows = (
-                    []
-                    if image
-                    else get_texts_for_concept(
-                        concept_id,
-                        predicate="hasContent",
-                        limit=1,
-                        recent_first=True,
-                        context_view="actor_effective",
-                    )
+                rows = get_texts_for_concept(
+                    concept_id,
+                    predicate="hasContent",
+                    limit=1,
+                    recent_first=True,
+                    context_view="actor_effective",
                 )
                 text = rows[0].get("text") if rows else None
                 if isinstance(text, str) and text.strip():
@@ -86,15 +77,6 @@ def project_workflow_file_sources(
                         text_truncated=len(text) > remaining,
                     )
                 else:
-                    if persisted_only:
-                        result.append(
-                            {
-                                **item,
-                                "status": "pending",
-                                "reason": "extracted_text_not_available",
-                            }
-                        )
-                        continue
                     fetched = fetch_file_copy_bytes(
                         file_copy_concept_id=concept_id,
                         user_concept_id=user_concept_id,

@@ -138,3 +138,43 @@ def test_cached_text_does_not_cross_file_actor_scope(monkeypatch):
     )
     assert result[0]["status"] == "unavailable"
     assert result[0]["reason"] == "not_found"
+
+
+@pytest.mark.parametrize("denial", ["owner", "archive"])
+def test_cached_attachment_text_preserves_owner_and_archive_binding(
+    monkeypatch, denial
+):
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service._load_file_copy_concept_doc",
+        lambda **kw: {
+            "concept_id": "#V#poster",
+            "relationships": {"specific_to_org": ["#V#org"]},
+            "attributes": {
+                "conversation_image": True,
+                "user_concept_id": "#V#other" if denial == "owner" else "#V#user",
+                "image_provenance": {"kind": "otter_archive", "resource_id": "archive"},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "src.backend.integrations.internal_mcp.otter_archive_proxy_mcp.otter_archive_resource_binding_for_user",
+        lambda actor: "different_archive",
+    )
+    reads = []
+    monkeypatch.setattr(
+        "src.backend.services.text_value_service.get_texts_for_concept",
+        lambda *a, **kw: reads.append("text") or [{"text": "Private cached schedule"}],
+    )
+    monkeypatch.setattr(
+        "src.backend.services.computer_file_copy_service.fetch_file_copy_bytes",
+        lambda **kw: reads.append("bytes") or {"success": False},
+    )
+    result = project_workflow_file_sources(
+        {"file_copy_concept_id": "#V#poster"},
+        user_concept_id="#V#user",
+        organisation_concept_id="#V#org",
+        namespace="#V#user@org",
+    )
+    assert result[0]["status"] == "unavailable"
+    assert result[0]["reason"] == "not_found"
+    assert reads == []
