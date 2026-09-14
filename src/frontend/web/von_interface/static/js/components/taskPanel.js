@@ -5,6 +5,8 @@
  * Tasks are stored as Vontology concepts and accessed via REST API.
  */
 
+import { copyJsonTextWithButtonFeedback } from '../utils/copyJsonButtonState.js';
+import { buildTaskLink, readTaskLink } from '../utils/taskLinks.js';
 import { openTaskRunActivity } from './taskRunActivity.js';
 import { deleteJson, getJson, patchJson, postJson, getUserContext, ensureUniqueWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
 import { activateTab } from '../tabNavigation.js';
@@ -32,6 +34,7 @@ let _taskDetailState = {};  // taskId -> detail panel state
 let _selectedTaskId = '';
 let _selectionCleared = false;
 let _pendingTaskNavigation = null;
+let _taskLinkConsumed = false;
 let _referencedGlobalTaskId = '';
 let _panelReturnFocus = null;
 let _panelTaskIds = null;
@@ -964,6 +967,22 @@ async function openGlobalTasks() {
         loadGlobalTasks({ telemetry }),
         loadTaskQueueActivity(),
     ]);
+    const linkedTaskId = !_taskLinkConsumed && readTaskLink();
+    if (!_pendingTaskNavigation && linkedTaskId) {
+        _taskLinkConsumed = true;
+        const scopeGeneration = _taskQueueActivityGeneration;
+        const loadGeneration = _globalTaskLoadGeneration;
+        try {
+            const task = await getJson(`/api/tasks/${encodeURIComponent(linkedTaskId)}`);
+            if (scopeGeneration !== _taskQueueActivityGeneration || loadGeneration !== _globalTaskLoadGeneration) return;
+            if (getTaskId(task) !== linkedTaskId) throw new Error('Task link target mismatch');
+            _pendingTaskNavigation = task;
+        } catch (_) {
+            if (scopeGeneration !== _taskQueueActivityGeneration || loadGeneration !== _globalTaskLoadGeneration) return;
+            clearTaskSelection();
+            showToast('Could not open linked task', 'error');
+        }
+    }
     if (_pendingTaskNavigation) {
         const task = _pendingTaskNavigation;
         _pendingTaskNavigation = null;
@@ -2821,6 +2840,12 @@ async function openTaskWorkProduct(taskId) {
     }
 }
 
+function renderTaskCopyLink(taskId) {
+    return `<span class="task-copy-link-control"><button type="button" class="copy-id-button task-copy-link-btn"
+        data-task-id="${escapeHtml(taskId)}" title="Copy link" aria-label="Copy link">📋</button>
+        <span class="sr-only" role="status" aria-live="polite"></span></span>`;
+}
+
 function renderTaskDetailsPanel(task, detailState) {
     const taskId = getTaskId(task);
     const detailTask = detailState.task || task;
@@ -3130,7 +3155,7 @@ function renderTaskInspector(task, detailState) {
             <div class="task-inspector-header">
                 <div class="task-inspector-heading">
                     <div class="task-inspector-eyebrow">${escapeHtml(detailTask.reference_code || taskId)}</div>
-                    <h3>${escapeHtml(detailTask.title || 'Untitled task')}</h3>
+                    <h3>${escapeHtml(detailTask.title || 'Untitled task')} ${renderTaskCopyLink(taskId)}</h3>
                     <p>${escapeHtml(detailTask.description || 'No description yet.')}</p>
                 </div>
                 <div class="task-inspector-badges">
@@ -3497,6 +3522,7 @@ function renderTaskItem(task) {
                 <span class="task-priority" title="Priority: ${priorityInfo.label}">${priorityInfo.icon}</span>
                 ${referenceCodeHtml}
                 ${titleHtml}
+                ${!_isGlobalTabMode ? renderTaskCopyLink(taskId) : ''}
                 <span class="task-status-badge" title="${escapeHtml(statusInfo.description || statusInfo.label)}">${statusInfo.icon} ${escapeHtml(statusInfo.label)}</span>
             </div>
             <div class="task-item-body">
@@ -3785,6 +3811,19 @@ function attachTaskEventListeners() {
                 event.preventDefault();
                 event.stopPropagation();
                 await executeTaskWithVon(event.currentTarget.dataset.taskId, { continuation: event.currentTarget.dataset.continue === 'true' });
+            });
+        });
+
+        root.querySelectorAll('.task-copy-link-btn').forEach((button) => {
+            button.addEventListener('click', async (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const copied = await copyJsonTextWithButtonFeedback(button, buildTaskLink(button.dataset.taskId), {
+                    successLabel: '✔', errorLabel: '✕', fallbackLabel: '📋',
+                });
+                button.parentElement.querySelector('[role="status"]').textContent = copied ? 'Link copied to clipboard' : 'Copy failed';
+                button.focus({ preventScroll: true });
+                showToast(copied ? 'Link copied to clipboard' : 'Copy failed', copied ? 'success' : 'error');
             });
         });
 
