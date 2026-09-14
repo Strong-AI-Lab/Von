@@ -1,3 +1,4 @@
+import { createMessageSubmitControls } from './messageSubmitControls.js';
 import { initialiseConversationActions } from './conversationActions.js';
 import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './conversationNavigation.js';
 import { bindAttachmentComposer, imageItems, imagesBlocked, renderImageAttachments, removeSentAttachments } from '../utils/conversationImages.js';
@@ -49,6 +50,8 @@ let _isLoading = false;
 let _unreadCount = 0;
 let _replySendFailureState = null;
 let _newMessageSendFailureState = null;
+let _replySubmitControls;
+let _newSubmitControls;
 let _replySendPending = false;
 let _newMessageSendPending = false;
 let _replyDeliveryAttempt = null;
@@ -68,6 +71,8 @@ function exchangeScope(row = _exchange) {
 }
 
 export function resetMessagePanelContext() {
+    _replySubmitControls?.dispose();
+    _newSubmitControls?.dispose();
     const input = _messagesContainer?.querySelector('#messageInput');
     if (_exchange && input) _exchangeDrafts.set(exchangeScope(), input.value);
     _exchangeGeneration += 1;
@@ -486,6 +491,15 @@ function renderMessagesTabContent() {
     _replySendFailureState = null;
     _newMessageSendFailureState = null;
 
+    _replySubmitControls?.dispose();
+    _newSubmitControls?.dispose();
+    const submitControls = (button, onSubmit) => createMessageSubmitControls({
+        button, getActor: readSessionActorConceptId, onSubmit,
+        onUnavailable: text => showToast(text, 'error')
+    });
+    _replySubmitControls = submitControls(_messagesContainer.querySelector('#sendMessageBtn'), handleSendReply);
+    _newSubmitControls = submitControls(_messagesContainer.querySelector('#sendNewMessage'), handleSendNewMessage);
+
     // Attach event listeners
     attachMessagesEventListeners();
     initialiseConversationActions(_messagesContainer);
@@ -520,7 +534,7 @@ function attachMessagesEventListeners() {
     // Send message button
     const sendBtn = _messagesContainer.querySelector('#sendMessageBtn');
     if (sendBtn) {
-        sendBtn.addEventListener('click', handleSendReply);
+        sendBtn.addEventListener('click', event => _replySubmitControls.activate(event));
     }
 
     // Message input - send on Enter (Shift+Enter for newline)
@@ -529,7 +543,7 @@ function attachMessagesEventListeners() {
         msgInput.addEventListener('keydown', (e) => {
             if (shouldSubmitComposerKey(e)) {
                 e.preventDefault();
-                handleSendReply();
+                _replySubmitControls.activate(e);
             }
         });
         msgInput.addEventListener('input', syncVisibleReplyDeliveryAttempt);
@@ -559,7 +573,7 @@ function attachMessagesEventListeners() {
 
     const sendNewBtn = _messagesContainer.querySelector('#sendNewMessage');
     if (sendNewBtn) {
-        sendNewBtn.addEventListener('click', handleSendNewMessage);
+        sendNewBtn.addEventListener('click', event => _newSubmitControls.activate(event));
     }
 
     const newMessageRecoverySelect = _messagesContainer.querySelector('#newMessageRecoverySelect');
@@ -1238,7 +1252,7 @@ function renderComposePendingUi(scope) {
         if (composer) composer.dataset.hasAttachments = String(imageItems(attachmentScope(scope)).length > 0);
     }
     button.disabled = pending || imagesBlocked(attachmentScope(scope)) || (scope === COMPOSE_SCOPE_REPLY && _exchange?.other_participant_ids?.length > 1);
-    button.textContent = pending ? 'Sending…' : 'Send';
+    (scope === COMPOSE_SCOPE_REPLY ? _replySubmitControls : _newSubmitControls)?.update(pending);
     button.setAttribute('aria-busy', pending ? 'true' : 'false');
 
     if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {
@@ -2196,6 +2210,7 @@ function buildSendPayload({
 
     return {
         recipient_ids: recipientIds,
+        submit_mode: 'queue',
         content,
         ...(attachmentIds.length ? {attachment_ids: attachmentIds} : {}),
         delivery_idempotency_key: deliveryIdempotencyKey,

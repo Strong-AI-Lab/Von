@@ -1,3 +1,5 @@
+import { getSubmitMode, setSubmitMode, selectedSubmitMode, presentSubmitMode, subscribeSubmitMode } from './submitMode.js';
+
 /** Steering is bound to the displayed actor/session and exact active attempt. */
 export function createChatSteeringControls({ sendButton, request, getDraft, clearDraft, createId, onQueue, onModeChange = () => {} }) {
     const button = document.createElement('button');
@@ -31,11 +33,9 @@ export function createChatSteeringControls({ sendButton, request, getDraft, clea
     actions.prepend(modeLabel, help, button, queueButton);
     let actorKey;
     let defaultMode = 'queue';
-    const modes = new Map();
     modeSelect.onchange = () => {
         defaultMode = modeSelect.value === 'steer' ? 'steer' : 'queue';
-        modes.set(actorKey, defaultMode);
-        try { if (actorKey) localStorage.setItem(`von:chat-submit-mode:${actorKey}`, defaultMode); } catch (_) { /* In-memory preference remains usable. */ }
+        setSubmitMode(actorKey, defaultMode);
         onModeChange();
     };
     const activity = document.createElement('details');
@@ -210,13 +210,16 @@ export function createChatSteeringControls({ sendButton, request, getDraft, clea
         }
     }
     button.onclick = submit;
+    const unsubscribe = subscribeSubmitMode(() => {
+        defaultMode = getSubmitMode(actorKey);
+        render();
+        onModeChange();
+    });
     return {
         update(options) {
             if (actorKey !== options.actorKey) {
                 actorKey = options.actorKey;
-                let stored;
-                try { if (actorKey) stored = localStorage.getItem(`von:chat-submit-mode:${actorKey}`); } catch (_) { /* Storage may be disabled. */ }
-                defaultMode = modes.get(actorKey) || (stored === 'steer' ? 'steer' : 'queue');
+                defaultMode = getSubmitMode(actorKey);
             }
             const changed = scopeKey !== options.scopeKey;
             const targetChanged = current.target?.queueId !== options.target?.queueId;
@@ -240,7 +243,7 @@ export function createChatSteeringControls({ sendButton, request, getDraft, clea
         // Only user composer activation calls this; background queue dispatch is unchanged.
         activate(event = {}) {
             if (!current.busy) return false;
-            const mode = event.shiftKey ? (defaultMode === 'queue' ? 'steer' : 'queue') : defaultMode;
+            const mode = selectedSubmitMode(actorKey, event);
             if (mode !== 'steer') return false;
             if (!current.target || current.disabled) {
                 notice = 'Steering is unavailable for this draft or turn. Draft retained; choose Queue this message in More actions to send separate work.';
@@ -250,7 +253,7 @@ export function createChatSteeringControls({ sendButton, request, getDraft, clea
         },
         present() {
             const mode = current.busy ? defaultMode : 'send';
-            sendButton.dataset.submitMode = mode;
+            presentSubmitMode(sendButton, mode);
             if (!current.busy || current.queueDisabled) return;
             const label = mode === 'steer' ? 'Guide active turn' : 'Queue message';
             sendButton.setAttribute('aria-label', label);
@@ -259,6 +262,6 @@ export function createChatSteeringControls({ sendButton, request, getDraft, clea
             sendButton.title = `${label}. Shift-click for ${mode === 'steer' ? 'Queue' : 'Steering'} once. Change the default or choose either action in More actions.`;
         },
         isSending() { return sending; },
-        dispose() { generation += 1; clearTimeout(timer); clearTimeout(toastTimer); composerObserver?.disconnect(); window.removeEventListener('resize', positionToast); window.visualViewport?.removeEventListener('resize', positionToast); button.remove(); activity.remove(); toast.remove(); modeLabel.remove(); help.remove(); queueButton.remove(); }
+        dispose() { unsubscribe(); generation += 1; clearTimeout(timer); clearTimeout(toastTimer); composerObserver?.disconnect(); window.removeEventListener('resize', positionToast); window.visualViewport?.removeEventListener('resize', positionToast); button.remove(); activity.remove(); toast.remove(); modeLabel.remove(); help.remove(); queueButton.remove(); }
     };
 }

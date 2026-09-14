@@ -83,12 +83,19 @@ def test_canonical_delivery_assignment_and_crash_recovery(
             sender_id="#V#alice",
             recipient_ids=["#V#worker"],
             org_id="#V#lab",
+            metadata={"submit_mode": "queue"},
             content=(
                 captured["message"]["content"]
                 if action == "reply"
                 else "Implement the new export control and deploy it. Use gpt-6-astra with xhigh reasoning. Fixture request."
             ),
         )
+        projected_source = messages.project_direct_message(
+            messages.get_message_for_user(source["concept_id"], "#V#worker")
+        )
+        assert projected_source["submit_mode"] == "queue"
+        assert projected_source["recipient_ids"] == ["#V#worker"]
+        assert inbox.new_messages(config, api)[0]["submit_mode"] == "queue"
         response = {
             "answer": (
                 "Read-only inspection found 20 CPU cores; GPU device access is unavailable."

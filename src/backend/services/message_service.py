@@ -69,6 +69,30 @@ class DirectMessageIdempotencyConflict(ValueError):
     """The same scoped idempotency key names a different message intent."""
 
 
+class DirectMessageSteeringUnavailable(ValueError):
+    """No receiving-controller active-turn binding is available on this route."""
+
+
+def validate_direct_message_submit_mode(mode: Any = "queue") -> str:
+    if mode not in ("queue", "steer"):
+        raise ValueError("submit_mode must be queue or steer")
+    if mode == "steer":
+        raise DirectMessageSteeringUnavailable(
+            "Active steering is unavailable on this route. Retain the draft or "
+            "explicitly choose Queue for separate work."
+        )
+    return mode
+
+
+def _validate_submit_metadata(metadata: Optional[Dict[str, Any]]) -> None:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    validate_direct_message_submit_mode(metadata.get("submit_mode", "queue"))
+    if any(
+        key in metadata for key in ("submit_target", "submit_intent", "steering_target")
+    ):
+        raise ValueError("Active-turn targets are not supported by this message route")
+
+
 @dataclass(frozen=True)
 class DirectMessageDeliveryIdentity:
     """Opaque hashes used to reconcile one actor-scoped delivery request."""
@@ -197,6 +221,7 @@ def build_direct_message_delivery_identity(
     fields is therefore conflicting key reuse rather than a second delivery.
     """
 
+    _validate_submit_metadata(metadata)
     normalised_key = normalise_direct_message_delivery_idempotency_key(
         delivery_idempotency_key
     )
@@ -246,7 +271,13 @@ def build_direct_message_delivery_identity(
                 reply_to_id,
                 field_name="reply_to_id",
             ),
-            "metadata": _material_delivery_metadata(metadata),
+            # Queue was the implicit legacy intent. Keep a retained pre-upgrade
+            # UI retry on the same identity when it now spells that mode out.
+            "metadata": {
+                key: value
+                for key, value in _material_delivery_metadata(metadata).items()
+                if not (key == "submit_mode" and value == "queue")
+            },
         }
     )
     delivery_fingerprint = _canonical_json_sha256(
@@ -334,6 +365,8 @@ def project_direct_message(message_doc: Dict[str, Any]) -> Dict[str, Any]:
     from .message_attachment_service import message_attachment_descriptors
 
     attachments = message_attachment_descriptors(message_doc)
+    metadata = concept_data.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
     return {
         **({"attachments": attachments} if attachments else {}),
         "message_id": str(message_doc.get("concept_id") or ""),
@@ -356,6 +389,9 @@ def project_direct_message(message_doc: Dict[str, Any]) -> Dict[str, Any]:
         ),
         "organisation_concept_id": concept_data.get("organisation_concept_id"),
         "attribution": concept_data.get("attribution"),
+        # Unknown/unsupported recorded modes must reach controllers unchanged;
+        # dropping them would turn old steering intents into new queued work.
+        "submit_mode": metadata.get("submit_mode", "queue"),
     }
 
 
@@ -395,6 +431,7 @@ def create_message(
     Returns:
         The created message document.
     """
+    _validate_submit_metadata(metadata)
     if not sender_id:
         raise ValueError("sender_id is required")
     if not recipient_ids:
@@ -442,6 +479,7 @@ def create_message(
         metadata_payload["attachments"] = authorise_message_attachments(
             [a["concept_id"] for a in metadata_payload["attachments"]], sender_id
         )
+    metadata_payload.setdefault("submit_mode", "queue")
     attribution = metadata_payload.get("attribution")
     if not isinstance(attribution, str) or not attribution.strip():
         attribution = f"Sent by Von on behalf of {sender_id}"
