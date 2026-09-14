@@ -11950,6 +11950,101 @@ def test_current_conversation_history_read_cannot_be_redirected_by_model() -> No
     }
 
 
+@pytest.mark.parametrize("persisted", [True, False])
+def test_pending_workflow_returns_actual_continuation_registration_receipt(
+    monkeypatch, persisted
+):
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    capability = WorkflowTurnCapability(
+        name="represented_pending",
+        workflow_id="#V#pending",
+        display_name="Pending",
+        description="Extract the document",
+        relevance_score=1,
+        input_schema={},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service.discover_turn_workflow_capabilities",
+        lambda *a, **kw: ([capability], {"status": "completed", "match_count": 1}),
+    )
+    registered = []
+
+    def register(**kwargs):
+        registered.append(kwargs)
+        return {
+            "persisted": persisted,
+            "reason": "test_receipt",
+            "queue_id": "held" if persisted else None,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.background_workflow_continuation_service.register_continuation",
+        register,
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="discover",
+                    payload={"query": "extract document"},
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke",
+                    payload={
+                        "name": capability.name,
+                        "arguments": {
+                            "continuation_prompt": "Reconcile the existing event and complete remaining representation"
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="Extraction remains pending."),
+    )
+    execute_adaptive_turn(
+        gateway=_workflow_gateway(
+            lambda **kw: {
+                "success": True,
+                "instance_id": "instance",
+                "created_new": True,
+                "final_status": "running",
+            },
+            hard_timeout_enabled=False,
+        ),
+        prompt="Represent this event",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#user@org",
+        user_concept_id="#V#user",
+        org_concept_id="#V#org",
+        turn_id="request",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+    assert len(registered) == 1
+    assert registered[0]["scope"]["user_concept_id"] == "#V#user"
+    assert registered[0]["request_id"] == "request"
+    encoded = "\n".join(
+        str(message.get("content", "")) for message in client.calls[2]["context"]
+    )
+    assert '"conversation_continuation"' in encoded
+    assert (
+        '"persisted":true' if persisted else '"persisted":false'
+    ) in encoded.replace(" ", "")
+
+
 def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     monkeypatch,
 ) -> None:
@@ -16444,7 +16539,8 @@ def test_steering_after_tool_keeps_receipt_and_does_not_repeat_effect():
 
 
 @pytest.mark.parametrize(
-    "scenario", ["direct", "recovery", "assign", "replay", "partial", "partial_replay", "failure"]
+    "scenario",
+    ["direct", "recovery", "assign", "replay", "partial", "partial_replay", "failure"],
 )
 def test_task_creation_requested_outcome_reaches_final_response(scenario: str) -> None:
     from src.backend.integrations.internal_mcp.schemas import make_error_response

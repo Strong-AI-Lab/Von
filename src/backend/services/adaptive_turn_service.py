@@ -270,6 +270,8 @@ def _resolve_turn_rename_evidence_arguments(
 
     resolved["rename_items"] = hydrated_items
     return resolved, None
+
+
 _DEFAULT_TURN_BUDGET_SECONDS = 180.0
 _DEFAULT_FINAL_RESERVE_SECONDS = 30.0
 # The answer checkpoint keeps a small live-path reserve while remaining an
@@ -437,7 +439,7 @@ def _compact_evidence_envelope(
             add_if_fits(key, envelope.get(key))
 
     omitted_fields: list[str] = []
-    for key in ("content", "matches", "projected_payload"):
+    for key in ("conversation_continuation", "content", "matches", "projected_payload"):
         if key in envelope and not add_if_fits(key, envelope.get(key)):
             omitted_fields.append(key)
 
@@ -2254,6 +2256,10 @@ def _scope_message(
         "current state, and exact handle. Do not spend repeated long observation "
         "intervals unless the user needs synchronous completion or recent "
         "progress justifies one bounded wait.\n"
+        "- To continue authorised work after a workflow outlives this turn, "
+        "supply its continuation_prompt. Promise a later continuation only "
+        "when the returned conversation_continuation confirms persisted=true. "
+        "The held queue entry can be cancelled through the conversation queue.\n"
         "- Preserve the requested outcome and effect cardinality through "
         "capability choice, retries, and fallback. Discovery and evidence reads "
         "may inspect the smallest bounded candidate set needed to identify the "
@@ -9688,6 +9694,7 @@ def execute_adaptive_turn(
                     + json.dumps(inquiry_projection, ensure_ascii=False)
                 )
         from .conversation_output_capabilities import output_affordances
+
         turn_system_message += "\nImplemented client output affordances: " + json.dumps(output_affordances())
         learning_advice_rendered_for_call = bool(
             not final_synthesis
@@ -11388,6 +11395,52 @@ def execute_adaptive_turn(
                         raw_payload,
                         capability=workflow_capability,
                     )
+                    continuation_prompt = (item.binding_diagnostics or {}).get(
+                        "continuation_prompt"
+                    )
+                    if (
+                        continuation_prompt
+                        and turn_id
+                        and isinstance(raw_payload, Mapping)
+                        and raw_payload.get("instance_id")
+                        and raw_payload.get("effect_status") == "partial"
+                    ):
+                        from .background_workflow_continuation_service import (
+                            register_continuation,
+                        )
+                        from .chat_prompt_queue_service import build_queue_scope
+
+                        try:
+                            continuation_receipt = register_continuation(
+                                scope=build_queue_scope(
+                                    user_concept_id=scope.user_concept_id,
+                                    organisation_concept_id=scope.organisation_concept_id,
+                                    namespace=scope.namespace,
+                                ),
+                                request_id=turn_id,
+                                instance_id=raw_payload["instance_id"],
+                                workflow_id=workflow_capability.workflow_id,
+                                continuation_prompt=continuation_prompt,
+                                ready_when=(item.binding_diagnostics or {}).get(
+                                    "continuation_ready_when", "workflow_terminal"
+                                ),
+                                execution_envelope={
+                                    "model": model,
+                                    "model_parameters": dict(model_parameters or {}),
+                                    "workflow_inputs": dict(
+                                        workflow_launch_inputs or {}
+                                    ),
+                                },
+                            )
+                        except Exception as exc:
+                            continuation_receipt = {
+                                "persisted": False,
+                                "reason": type(exc).__name__,
+                            }
+                        raw_payload = {
+                            **raw_payload,
+                            "conversation_continuation": continuation_receipt,
+                        }
 
             terminal_effect_status = (
                 _effect_status(
@@ -11689,6 +11742,14 @@ def execute_adaptive_turn(
                     status=effect_status or status,
                 )
                 envelope_payload = envelope.to_mapping()
+                if isinstance(raw_payload, Mapping) and isinstance(
+                    raw_payload.get("conversation_continuation"), Mapping
+                ):
+                    # This small receipt decides whether future-action language
+                    # is supported. A payload-key preview alone is insufficient.
+                    envelope_payload["conversation_continuation"] = dict(
+                        raw_payload["conversation_continuation"]
+                    )
                 if isinstance(raw_payload, Mapping) and raw_payload.get("image_attachments"):
                     # Media references must survive evidence wrapping/projection;
                     # the provider still checks access and hydrates canonical bytes.
