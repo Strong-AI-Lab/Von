@@ -4541,6 +4541,58 @@ button.unified-search-conversation-main {
     align-items: flex-end;
 }
 
+.message-attachment-input-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+}
+
+.message-compose-row.message-attachment-input-row {
+    flex-direction: row;
+    align-items: flex-end;
+}
+
+.message-attachment-input-row > .send-message-btn {
+    flex: none;
+    width: auto;
+}
+
+.message-attachment-input-row > .message-content-input {
+    margin-bottom: 0;
+}
+
+.message-attachment-input-row > textarea,
+.message-compose-row > textarea {
+    flex: 1;
+    min-width: 0;
+}
+
+.message-compose-row > .message-attachment-button,
+.message-attachment-input-row > .message-attachment-button {
+    flex: 0 0 44px;
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--border-color, #cfd9e3);
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-color, #215f8d);
+    font-size: 28px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.message-attachment-button:focus-visible {
+    outline: 2px solid #256b76;
+    outline-offset: 2px;
+}
+
+.pending-message-attachments:empty {
+    display: none;
+}
+
 .message-input {
     flex: 1;
     padding: 10px 12px;
