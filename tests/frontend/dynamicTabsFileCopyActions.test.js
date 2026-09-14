@@ -91,3 +91,37 @@ describe('deriveFileCopyActionState', () => {
     });
 });
 
+describe('file preview actions', () => {
+    beforeEach(() => {
+        document.body.innerHTML = '<div id="tabContainer"></div><div class="tab-content-area"></div><div id="header"></div>';
+    });
+
+    test('opens an encoded, sandboxed preview, reuses it and closes it', () => {
+        const { openFilePreviewTab } = require(dynamicTabsModulePath);
+        const conceptId = '#V#file_copy_report';
+        const tabId = openFilePreviewTab(conceptId, '<Report>');
+        expect(document.querySelector('iframe').getAttribute('src')).toBe('/von/api/files/%23V%23file_copy_report/preview');
+        expect(document.querySelector('iframe').getAttribute('sandbox')).not.toContain('allow-scripts');
+        expect(document.querySelector('.tab-button').textContent).toContain('<Report>');
+        expect(openFilePreviewTab(conceptId)).toBe(tabId);
+        expect(document.querySelectorAll('iframe')).toHaveLength(1);
+        document.querySelector('.close-tab').click();
+        expect(document.querySelector('iframe')).toBeNull();
+    });
+
+    test('offers both destinations alongside download for a backing file', () => {
+        const { attachAnalysisButtons } = require(dynamicTabsModulePath);
+        const header = document.getElementById('header');
+        attachAnalysisButtons(header, '#V#file_copy_actions', 'individual', {
+            raw_doc: { attributes: { blob_key: 'report.md' } }
+        });
+        const link = header.querySelector('.preview-file-copy-browser-link');
+        expect(link.getAttribute('href')).toBe('/von/api/files/%23V%23file_copy_actions/preview');
+        expect(link.target).toBe('_blank');
+        expect(link.rel).toContain('noopener');
+        header.querySelector('.preview-file-copy-button').click();
+        expect(document.querySelector('iframe')).not.toBeNull();
+        document.querySelector('.close-tab').click();
+        expect(header.querySelector('.download-file-copy-button')).not.toBeNull();
+    });
+});
