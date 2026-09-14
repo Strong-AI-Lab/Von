@@ -1,3 +1,4 @@
+import { bindConversationRowMenu } from './components/conversationRowMenu.js';
 import { initialiseConversationActions } from './components/conversationActions.js';
 import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './components/conversationNavigation.js';
 import { initialiseCompactChatComposer, isCompactComposer, resizeCompactDraft, shouldSubmitComposerKey } from './components/compactComposer.js';
@@ -27679,11 +27680,11 @@ function renderChatSessionTabs(sessions, activeSessionId) {
             }
             void switchToChatSession(sid);
         });
-        tab.addEventListener('dblclick', () => {
+        tab.addEventListener('dblclick', event => {
+            if (event.ctrlKey) return;
             void promptRenameChatSession(sid, session?.session_name || displayName);
         });
-        tab.addEventListener('contextmenu', (event) => {
-            event.preventDefault();
+        bindConversationRowMenu(tab, (x, y, options) => {
             // JVNAUTOSCI-1014: Build context menu with hide/unhide and optional delete
             const menuItems = [
                 {
@@ -27746,7 +27747,7 @@ function renderChatSessionTabs(sessions, activeSessionId) {
                 });
             }
 
-            openChatSessionMenu(event.clientX, event.clientY, menuItems);
+            openChatSessionMenu(x, y, menuItems, options);
         });
 
         fragment.appendChild(tab);
@@ -28082,6 +28083,19 @@ function ensureChatSessionMenu() {
     menu.setAttribute('role', 'menu');
     menu.setAttribute('aria-hidden', 'true');
     document.body.appendChild(menu);
+    menu.addEventListener('keydown', event => {
+        const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
+        const current = items.indexOf(document.activeElement);
+        let next;
+        if (event.key === 'ArrowDown') next = (current + 1) % items.length;
+        else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length;
+        else if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = items.length - 1;
+        else if (event.key === 'Tab') { closeChatSessionMenu(); return; }
+        else return;
+        event.preventDefault();
+        items[next]?.focus();
+    });
 
     document.addEventListener('click', (event) => {
         if (menu.classList.contains('open') && !menu.contains(event.target)) {
@@ -28122,12 +28136,14 @@ export function openChatSessionMenu(x, y, items, options = {}) {
     }
 
     const menu = populateChatSessionMenu(items);
+    chatSessionMenuReturnFocusEl?.setAttribute('aria-expanded', 'false');
     chatSessionMenuReturnFocusEl = options.returnFocus instanceof HTMLElement
         ? options.returnFocus
         : null;
     const padding = 8;
     menu.classList.add('open');
     menu.setAttribute('aria-hidden', 'false');
+    chatSessionMenuReturnFocusEl?.setAttribute('aria-expanded', 'true');
     const maxX = window.innerWidth - menu.offsetWidth - padding;
     const maxY = window.innerHeight - menu.offsetHeight - padding;
     const left = Math.max(padding, Math.min(x, maxX));
@@ -28150,6 +28166,7 @@ function closeChatSessionMenu() {
     chatSessionMenuEl.classList.remove('open');
     chatSessionMenuEl.setAttribute('aria-hidden', 'true');
     chatSessionMenuReturnFocusEl = null;
+    returnFocusEl?.setAttribute('aria-expanded', 'false');
     if (shouldRestoreFocus) {
         try { returnFocusEl.focus(); } catch (_) { /* ignore */ }
     }
