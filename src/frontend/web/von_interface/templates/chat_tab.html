@@ -247,27 +247,38 @@
 
         <details class="chat-composer-more-actions">
           <summary title="More actions"><span class="composer-more-label">More actions</span><span class="composer-more-icon" aria-hidden="true">⋯</span><span class="composer-add-icon" aria-hidden="true">+</span></summary>
-          <div class="button-row">
-            <p class="compact-speech-help">Von dictation and voice send audio and conversation context to OpenAI. Von does not save the audio. Browser recognition uses your browser’s speech service.</p>
-            <button id="voiceConversationButton" class="btn btn-secondary" type="button" aria-pressed="false" title="Have a voice conversation: speech is sent automatically and Von replies aloud. You can also Shift-click or long-press the microphone.">Start voice</button>
-            <label for="dictationEngineSelect">Dictation</label>
-            <select id="dictationEngineSelect" aria-describedby="dictationStatus">
+          <div class="button-row composer-options-panel">
+            <section class="composer-options-section" aria-labelledby="composerSpeechHeading">
+              <h3 id="composerSpeechHeading">Voice &amp; dictation</h3>
+              <div class="composer-speech-actions">
+              <button id="voiceConversationButton" class="btn btn-secondary" type="button" aria-pressed="false" title="Have a voice conversation: speech is sent automatically and Von replies aloud. You can also Shift-click or long-press the microphone.">Start voice</button>
+              </div>
+              <label for="dictationEngineSelect">Dictation</label>
+              <select id="dictationEngineSelect" aria-describedby="dictationStatus">
               <option value="streaming">Live transcription · context-aware</option>
               <option value="recorded" selected>Recorded audio · context-aware</option>
               <option value="browser">Browser recognition · limited support</option>
-            </select>
-            <button id="resetButton" class="btn btn-secondary" type="button"
-              title="End this conversation (resets Von's context while keeping the conversation view)">End
-              conversation</button>
-
-            <p id="imageAttachmentHelp">If your keyboard cannot paste a screenshot, use Paste image and allow clipboard access, or choose Attach image. Your caption stays in the draft. Attach up to eight still PNG, JPEG or WebP images, each up to 8 MiB and 25 million pixels. Review previews before sending. Remove an image to replace it.</p>
-            <button id="pasteImageButton" class="btn btn-secondary" type="button" aria-describedby="imageAttachmentHelp">Paste image</button>
-            <button id="uploadFileButton" class="btn btn-secondary" type="button"
+              </select>
+              <label class="annotation-toggle" title="Speak Von responses aloud">
+              <input type="checkbox" id="ttsToggle">
+              <span class="eye-icon" aria-hidden="true">TTS</span>
+              <span class="toggle-label">Speech</span>
+              </label>
+              <p class="compact-speech-help">Von dictation and voice send audio and conversation context to OpenAI. Von does not save the audio. Browser recognition uses your browser’s speech service.</p>
+            </section>
+            <section class="composer-options-section" aria-labelledby="composerFilesHeading">
+              <h3 id="composerFilesHeading">Images &amp; files</h3>
+              <button id="pasteImageButton" class="btn btn-secondary" type="button" aria-describedby="imageAttachmentHelp">Paste image</button>
+              <button id="uploadFileButton" class="btn btn-secondary" type="button"
               title="Upload a file, drag and drop onto the conversation, or paste an image">Upload File</button>
-            <input id="uploadFileInput" class="visually-hidden" type="file" multiple aria-label="Upload file" />
+              <input id="uploadFileInput" class="visually-hidden" type="file" multiple aria-label="Upload file" />
 
-            {% if expert_tabs_enabled %}
-            <label class="annotation-toggle" title="Enable concept annotations in chat responses">
+              <p id="imageAttachmentHelp">If your keyboard cannot paste a screenshot, use Paste image and allow clipboard access, or choose Attach image. Your caption stays in the draft. Attach up to eight still PNG, JPEG or WebP images, each up to 8 MiB and 25 million pixels. Review previews before sending. Remove an image to replace it.</p>
+            </section>
+            <section class="composer-options-section" aria-labelledby="composerConversationHeading">
+              <h3 id="composerConversationHeading">Conversation</h3>
+              {% if expert_tabs_enabled %}
+              <label class="annotation-toggle" title="Enable concept annotations in chat responses">
               <input type="checkbox" id="annotationToggle">
               <span class="eye-icon">
                 <svg aria-hidden="true" class="icon icon-annotate" viewBox="0 0 24 24" width="16" height="16"
@@ -277,14 +288,14 @@
                 </svg>
               </span>
               <span class="toggle-label">Annotations</span>
-            </label>
-            {% endif %}
+              </label>
+              {% endif %}
 
-            <label class="annotation-toggle" title="Speak Von responses aloud">
-              <input type="checkbox" id="ttsToggle">
-              <span class="eye-icon" aria-hidden="true">TTS</span>
-              <span class="toggle-label">Speech</span>
-            </label>
+              <button id="resetButton" class="btn btn-secondary" type="button"
+              title="End this conversation (resets Von's context while keeping the conversation view)">End
+              conversation</button>
+
+            </section>
           </div>
         </details>
       </div>

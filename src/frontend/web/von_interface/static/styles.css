@@ -18952,3 +18952,94 @@ html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-bu
     margin: 0;
     padding: 0;
 }
+
+/* Group the composer's secondary actions without changing their disclosure. */
+.chat-composer-more-actions[open] > .composer-options-panel {
+    display: flex;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 0;
+    padding: 0;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+}
+.composer-options-section {
+    flex-shrink: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding: 16px;
+}
+.composer-options-section + .composer-options-section {
+    border-top: 1px solid #e2e8f0;
+}
+.composer-options-section h3 {
+    flex-basis: 100%;
+    margin: 0;
+    color: #334155;
+    font-size: 0.875rem;
+    font-weight: 650;
+    line-height: 1.4;
+}
+.composer-speech-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.composer-options-section .btn,
+.composer-options-section select {
+    min-height: 44px;
+    margin: 0;
+    border-radius: 8px;
+    font-size: 0.875rem;
+}
+.composer-options-section .btn {
+    white-space: normal;
+    text-align: left;
+}
+.composer-options-section label[for="dictationEngineSelect"] {
+    flex-basis: 100%;
+    color: #475569;
+    font-size: 0.8125rem;
+}
+.composer-options-section #dictationEngineSelect {
+    width: 100%;
+    min-width: 0;
+    padding: 8px;
+    border: 1px solid #cbd5e1;
+    background: #fff;
+    color: #334155;
+}
+.composer-options-section .annotation-toggle {
+    min-height: 44px;
+    margin: 0;
+    padding: 6px 10px;
+    box-sizing: border-box;
+}
+.composer-options-section .compact-speech-help,
+.composer-options-section #imageAttachmentHelp {
+    display: block;
+    flex-basis: 100%;
+    margin: 0;
+    color: #64748b;
+    font-size: 0.75rem;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+.composer-options-section :is(button, select, input):focus-visible {
+    outline: 3px solid #2563eb;
+    outline-offset: 2px;
+}
+@media (max-width: 800px), (max-width: 1024px) and (pointer: coarse) {
+    .chat-composer-more-actions[open] > .composer-options-panel {
+        max-height: 55dvh;
+        overflow-y: auto;
+        border-radius: 8px;
+        background: #f8fafc;
+    }
+    .composer-options-section { padding: 12px; }
+}

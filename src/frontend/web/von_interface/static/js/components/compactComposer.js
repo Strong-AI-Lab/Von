@@ -34,6 +34,7 @@ export function initialiseCompactChatComposer(composer, resizeDraft = resizeComp
     const menu = composer.querySelector('.chat-composer-more-actions');
     const panel = menu?.querySelector('.button-row');
     if (!panel) return;
+    const speechActions = panel.querySelector('.composer-speech-actions') || panel;
     const summary = menu.querySelector('summary');
     const label = summary?.querySelector('.composer-more-label');
     let closeWatcher;
@@ -107,8 +108,8 @@ export function initialiseCompactChatComposer(composer, resizeDraft = resizeComp
         const compact = isCompactComposer();
         if (compact) {
             if (mic?.classList.contains('active-dictation') || voice?.getAttribute('aria-pressed') === 'true') menu.open = false;
-            place(mic, mic?.classList.contains('active-dictation') ? active : panel);
-            place(voice, voice?.getAttribute('aria-pressed') === 'true' ? active : panel);
+            place(mic, mic?.classList.contains('active-dictation') ? active : speechActions);
+            place(voice, voice?.getAttribute('aria-pressed') === 'true' ? active : speechActions);
             place(cancel, active);
             place(retry, active);
             place(status, status?.dataset.passive === 'true' ? panel : composer);
