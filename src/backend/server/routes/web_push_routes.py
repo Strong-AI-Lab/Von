@@ -236,11 +236,19 @@ def manifest():
         theme_color="#245e47",
         icons=[
             {
-                "src": f"/static/pwa-icon-{size}.png",
+                "src": f"/static/pwa-icon-{size}.png?v=20260915",
                 "sizes": f"{size}x{size}",
                 "type": "image/png",
                 "purpose": "any",
             }
             for size in (192, 512)
+        ]
+        + [
+            {
+                "src": "/static/pwa-icon-maskable-512.png?v=20260915",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "maskable",
+            }
         ],
     )
