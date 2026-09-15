@@ -4,10 +4,53 @@ import os
 import pytest
 
 from oauthlib.oauth2.rfc6749.parameters import parse_token_response
+from oauthlib.oauth2 import WebApplicationClient
 
 from src.backend.services import agent_gmail_oauth_service as oauth_module
 from src.backend.services.agent_gmail_oauth_service import AgentGmailOAuthService
 from src.backend.integrations.google import gmail_service as gs
+
+
+def test_token_exchange_uses_configured_https_callback_behind_proxy(monkeypatch):
+    callback = "https://von.example.test/von/api/agent/gmail/oauth/callback"
+    monkeypatch.setenv("VON_AGENT_GMAIL_OAUTH_REDIRECT_URI", callback)
+    monkeypatch.delenv("OAUTHLIB_INSECURE_TRANSPORT", raising=False)
+    captured = {}
+
+    class Creds:
+        expiry = None
+
+        def to_json(self):
+            return '{"token":"test-only"}'
+
+    class Flow:
+        credentials = Creds()
+
+        def fetch_token(self, authorization_response):
+            captured["response"] = authorization_response
+            # Exercise oauthlib's real HTTPS requirement and query decoding.
+            parsed = WebApplicationClient("test-client").parse_request_uri_response(
+                authorization_response, state="state-1"
+            )
+            assert parsed["code"] == "a+b/c"
+            assert "OAUTHLIB_INSECURE_TRANSPORT" not in os.environ
+
+    service = AgentGmailOAuthService()
+    monkeypatch.setattr(service, "_build_flow", lambda **kw: Flow())
+    monkeypatch.setattr(service, "_get_profile", lambda _: object())
+    monkeypatch.setattr(
+        service, "_resolve_scopes", lambda **kw: list(gs.DEFAULT_SCOPES)
+    )
+    monkeypatch.setattr(
+        service, "_get_authorised_email", lambda _: "agent@example.test"
+    )
+    monkeypatch.setattr(oauth_module, "upsert_agent_gmail_tokens", lambda **kw: None)
+    service.exchange_code_for_tokens(
+        profile_id="test-profile",
+        authorisation_response_url="http://internal.invalid/callback?state=state-1&code=a%2Bb%2Fc",
+        redirect_uri="https://untrusted.invalid/callback",
+    )
+    assert captured["response"] == callback + "?state=state-1&code=a%2Bb%2Fc"
 
 
 def test_oauthlib_scope_change_is_warning_exception() -> None:
@@ -184,9 +227,7 @@ def test_agent_gmail_oauth_allows_localhost_redirect(
         lambda self, *, profile_id, profile: list(profile.scopes),
     )
 
-    def fake_from_client_secrets_file(
-        path, *, scopes, redirect_uri, code_verifier
-    ):
+    def fake_from_client_secrets_file(path, *, scopes, redirect_uri, code_verifier):
         captured.update(
             {
                 "path": path,
