@@ -5,7 +5,7 @@ import { profileButton } from './components/participantProfile.js';
 // Removed imported populateContentSection to avoid duplicate with local implementation below
 
 import { initializeAnnotationTab } from './annotationTab.js';
-import { getJsonDetailed } from './apiService.js';
+import { getJsonDetailed, postJsonDetailed } from './apiService.js';
 import { fetchConceptListWithSuffix, fetchSubtypesWithSuffix, initializeNamesForm, loadConceptAttributes, loadConceptNames, selectConceptWithSuffix } from './conceptTab.js';
 import { getCurrentUserConceptId } from './domUtils.js';
 import { isAnnotationEnabled } from './featureFlags.js';
@@ -3622,32 +3622,26 @@ async function adaptIndividualConceptTabUI(conceptId, suffix) {
 }
 
 // Unified description: ensure the typeDescriptionSection exists under Step1 for any concept
-// Export for testing: dual-write description updater (JVNAUTOSCI-570)
+// Export for testing: governed description updater.
 export async function updateConceptDescription(conceptId, description) {
+    if (!conceptId || typeof description !== 'string') return false;
     try {
-        if (!conceptId || typeof description !== 'string') return false;
-        const encodedId = encodeURIComponent(conceptId);
-        const resp = await conceptApiFetch(`/api/concepts/${encodedId}/description`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ description })
-        });
-        if (resp.ok) {
-            const data = await resp.json().catch(() => ({}));
-            return !data.error;
-        }
-        // Fallback: legacy endpoint (will eventually be removed)
-        if (resp.status === 404 || resp.status === 405) {
-            const legacy = await fetch('/vontology/api/vontology/update_description', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ identifier: conceptId, description })
-            });
-            const legacyData = await legacy.json().catch(() => ({}));
-            return legacy.ok && legacyData && legacyData.success;
-        }
-        return false;
+        const { data } = await postJsonDetailed(
+            `/api/concepts/${encodeURIComponent(conceptId)}/description`,
+            { description },
+            { method: 'PATCH' }
+        );
+        return !!data && !data.error && data.success !== false;
     } catch (e) {
+        if (e.payload?.effect_status === 'indeterminate') {
+            const receiptId = e.payload.authority_receipt?.receipt_id;
+            throw new Error(
+                'The description may have been saved, but verification is incomplete. '
+                + 'Your draft is retained. Check the saved description before trying again.'
+                + (receiptId ? ` Receipt: ${receiptId}` : ''),
+                { cause: e }
+            );
+        }
         return false;
     }
 }
@@ -5104,8 +5098,9 @@ async function populateTypeDescription(conceptId, suffix, options = {}) {
                 return;
             }
             statusEl.textContent = 'Saving...';
+            newSave.disabled = true;
             try {
-                // JVNAUTOSCI-570 regression fix: use dedicated dual-write description endpoint
+                // Keep the draft until the governed write is verified.
                 const ok = await updateConceptDescription(conceptId, rawText);
                 if (!ok) throw new Error('Failed to persist description');
                 await loadDescription();
@@ -5119,6 +5114,8 @@ async function populateTypeDescription(conceptId, suffix, options = {}) {
                 delete textarea.dataset.originalContent;
             } catch (e) {
                 statusEl.textContent = `Error: ${e.message}`;
+            } finally {
+                newSave.disabled = false;
             }
         });
 
