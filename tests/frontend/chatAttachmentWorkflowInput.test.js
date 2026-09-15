@@ -31,6 +31,7 @@ jest.mock('../../src/frontend/web/von_interface/static/js/utils/textDecorator.js
 
 describe('chat attachment workflow input binding', () => {
     beforeEach(() => {
+        jest.resetModules();
         window.scrollTo = jest.fn();
         document.body.innerHTML = `
             <div id="scrollableField"></div>
@@ -75,6 +76,76 @@ describe('chat attachment workflow input binding', () => {
         jest.restoreAllMocks();
         delete global.fetch;
     });
+
+    test('removing the second uploading PDF unblocks the ready PDF before late completion', async () => {
+        const { __testOnly_uploadFilesToVon, sendMessage } = require(chatTabModulePath);
+        const { imageItems } = require('../../src/frontend/web/von_interface/static/js/utils/conversationImages.js');
+        const bodies = [];
+        let finish;
+        global.fetch = jest.fn(async (url, options = {}) => {
+            if (url === '/von/api/files/upload') {
+                if (options.body.get('file').name === 'program.pdf') return new Promise(resolve => { finish = resolve; });
+                return { ok: true, json: async () => ({ uploaded: { concept_id: '#V#poster' } }) };
+            }
+            if (String(url).startsWith('/von/generate')) {
+                bodies.push(JSON.parse(options.body));
+                return { ok: true, json: async () => ({ response: 'Received.', llm_debug: { model: 'test-model' } }) };
+            }
+            if (String(url).startsWith('/von/history/length')) return { ok: true, json: async () => ({ history_length: 0, authenticated: true }) };
+            return { ok: true, json: async () => ({}) };
+        });
+        document.getElementById('promptInput').value = 'Tell me about these talks';
+        const upload = __testOnly_uploadFilesToVon([
+            new File(['poster'], 'poster.pdf', { type: 'application/pdf' }),
+            new File(['program'], 'program.pdf', { type: 'application/pdf' })
+        ]);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(document.getElementById('pendingAttachmentStatus').textContent).toContain('poster.pdf');
+        expect(document.getElementById('sendButton').disabled).toBe(true);
+        await sendMessage();
+        expect(bodies).toHaveLength(0);
+        document.querySelector('[aria-label="Remove program.pdf"]').click();
+        expect(document.getElementById('sendButton').disabled).toBe(false);
+        expect(document.getElementById('uploadFileStatus').textContent).not.toContain('Uploading');
+        await sendMessage();
+        expect(bodies[0].image_attachment_ids).toEqual(['#V#poster']);
+        expect(bodies[0].workflow_inputs.file_copy_concept_id).toBe('#V#poster');
+        finish({ ok: true, json: async () => ({ uploaded: { concept_id: '#V#late-program' } }) });
+        await upload;
+        expect(imageItems('attachment-session')).toEqual([]);
+        expect(document.getElementById('pendingAttachmentStatus').classList.contains('hidden')).toBe(true);
+    }, 15000);
+
+    test('failed PDF gives a retry gate and successful retry immediately enables send', async () => {
+        const { __testOnly_uploadFilesToVon, sendMessage } = require(chatTabModulePath);
+        let attempt = 0;
+        const bodies = [];
+        global.fetch = jest.fn(async (url, options = {}) => {
+            if (url === '/von/api/files/upload') {
+                if (++attempt === 1) throw new Error('Connection lost');
+                return { ok: true, json: async () => ({ uploaded: { concept_id: '#V#retry-pdf' } }) };
+            }
+            if (String(url).startsWith('/von/generate')) {
+                bodies.push(JSON.parse(options.body));
+                return { ok: true, json: async () => ({ response: 'Received.', llm_debug: { model: 'test-model' } }) };
+            }
+            return { ok: true, json: async () => ({ history_length: 0, authenticated: true }) };
+        });
+        await __testOnly_uploadFilesToVon([new File(['pdf'], 'retry.pdf', { type: 'application/pdf' })]);
+        const send = document.getElementById('sendButton');
+        expect(send.disabled).toBe(true);
+        expect(send.title).toContain('Retry or remove');
+        expect(document.getElementById('uploadFileStatus').textContent).toContain('Retry or remove');
+        document.getElementById('promptInput').value = 'Read the PDF';
+        await sendMessage();
+        expect(bodies).toHaveLength(0);
+        document.querySelector('[aria-label="Retry upload of retry.pdf"]').click();
+        expect(send.disabled).toBe(true);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(send.disabled).toBe(false);
+        await sendMessage();
+        expect(bodies[0].image_attachment_ids).toEqual(['#V#retry-pdf']);
+    }, 15000);
 
     test('phone image without MIME binds only to its next request, after preview and removal', async () => {
         const { __testOnly_uploadFilesToVon, sendMessage } = require(chatTabModulePath);
@@ -294,7 +365,7 @@ describe('chat attachment workflow input binding', () => {
         expect(promptInput.value).toBe('Keep this draft exactly as written.');
         expect(document.getElementById('chatAttachmentStatus').classList.contains('hidden')).toBe(false);
         expect(document.getElementById('uploadFileStatus').textContent).toContain(
-            'already in progress'
+            'Uploading: slow-supervision.xlsx'
         );
         expect(document.getElementById('uploadFileButton').disabled).toBe(true);
 

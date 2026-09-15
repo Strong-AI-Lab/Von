@@ -16,10 +16,12 @@ test('a failed upload retains the file and retries in the same draft without dup
         .mockResolvedValueOnce(response('#V#retried'));
     expect(await uploadConversationImage(file, 'retry', {}, changed)).toBe(false);
     expect(imagesBlocked('retry')).toBe(true);
+    expect(imageItems('retry')[0].state).toBe('failed');
     expect(parent.textContent).toContain('image/png · 5 bytes');
     expect(parent.textContent).toContain('Network unavailable');
     const retry = parent.querySelector('[aria-label="Retry upload of diagram.png"]');
     retry.click();
+    expect(imageItems('retry')[0].state).toBe('retrying');
     // A stale double-click cannot launch a second in-flight retry.
     retry.click();
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -63,4 +65,50 @@ test('plain text paste stays native and a send acknowledgement preserves newer f
     await uploadConversationImage(new File(['b'], 'two.txt', {type:'text/plain'}), 'acknowledgement', {}, () => {});
     removeSentAttachments('acknowledgement', ['#V#sent']);
     expect(imageItems('acknowledgement').map(i=>i.descriptor.concept_id)).toEqual(['#V#newer']);
+});
+
+test('ready is terminal despite stale retry callbacks and duplicate transport settlement', async () => {
+    let finish;
+    let reject;
+    global.fetch = jest.fn(() => new Promise((resolve, fail) => { finish = resolve; reject = fail; }));
+    const upload = uploadConversationImage(new File(['x'], 'ready.pdf'), 'terminal', {}, () => {});
+    const item = imageItems('terminal')[0];
+    const staleRetry = item.retry;
+    expect(item.state).toBe('uploading');
+    finish(response('#V#ready'));
+    await upload;
+    reject(new Error('late failure'));
+    finish(response('#V#duplicate'));
+    await staleRetry();
+    expect(item.state).toBe('ready');
+    expect(item.error).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(takeImages('terminal')).toEqual(['#V#ready']);
+});
+
+test.each(['resolve', 'reject'])('removed upload ignores late %s after a replacement completes', async outcome => {
+    let finish, fail;
+    global.fetch = jest.fn().mockImplementationOnce(() => new Promise((resolve, reject) => { finish = resolve; fail = reject; }))
+        .mockResolvedValueOnce(response('#V#replacement'));
+    const parent = document.createElement('div');
+    const session = `late-${outcome}`;
+    const changed = () => renderImageComposer(parent, session, changed);
+    const upload = uploadConversationImage(new File(['x'], 'old.pdf'), session, {}, changed);
+    const item = imageItems(session)[0];
+    parent.querySelector('button').click();
+    expect(item.state).toBe('removed');
+    expect(imagesBlocked(session)).toBe(false);
+    await uploadConversationImage(new File(['y'], 'new.pdf'), session, {}, changed);
+    if (outcome === 'resolve') finish(response('#V#old'));
+    else fail(new DOMException('Cancelled', 'AbortError'));
+    expect(await upload).toBe(false);
+    expect(item.state).toBe('removed');
+    expect(takeImages(session)).toEqual(['#V#replacement']);
+});
+
+test('an invalid successful response remains failed and cannot send an unavailable attachment', async () => {
+    global.fetch = jest.fn().mockResolvedValue(response(''));
+    await uploadConversationImage(new File(['x'], 'invalid.pdf'), 'invalid', {}, () => {});
+    expect(imageItems('invalid')[0].state).toBe('failed');
+    expect(() => takeImages('invalid')).toThrow();
 });
