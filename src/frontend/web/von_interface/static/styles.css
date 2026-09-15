@@ -4473,13 +4473,15 @@ button.unified-search-conversation-main {
     align-items: center;
     justify-content: center;
     vertical-align: middle;
-    gap: 5px;
-    min-width: 32px;
-    min-height: 32px;
-    padding: 5px;
+    gap: 3px;
+    padding: 1px 5px;
+    font-size: inherit;
+    line-height: 1.2;
 }
 
 .message-copy-markdown svg {
+    width: 1em;
+    height: 1em;
     fill: none;
     stroke: currentColor;
     stroke-width: 2;
@@ -4500,7 +4502,6 @@ button.unified-search-conversation-main {
 /* Touch users cannot hover for the native tooltip. */
 @media (hover: none), (pointer: coarse) {
     .message-copy-label { display: inline; }
-    .message-copy-markdown { min-width: 44px; min-height: 44px; }
 }
 
 .message-empty-state {
