@@ -16,7 +16,7 @@ import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_NARROW_
 import { createVoiceConversation } from './voiceConversation.js';
 import { getClientContext } from './clientContext.js';
 import { createDictationController } from './dictation.js';
-import { isConversationImageFile, initialiseImagePicker, renderImageAttachments, renderImageComposer, uploadConversationImage, imagesBlocked, imageItems, takeImages, restoreImages, descriptorsForIds } from "./utils/conversationImages.js";
+import { isConversationImageFile, initialiseImagePicker, renderImageAttachments, renderImageComposer, uploadConversationImage, attachmentBlockMessage, imagesBlocked, imageItems, takeImages, restoreImages, descriptorsForIds } from "./utils/conversationImages.js";
 // Chat Tab Module
 import { annotateTurn, fetchWithTimeout, getJsonDetailed, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import {
@@ -6802,9 +6802,9 @@ function updateSendButtonForCurrentChatState() {
     if (queueSubmissionInFlight) {
         sendButton.title = 'Saving this prompt to the conversation queue.';
     } else if (imagePreparationBlocked && !uploadInFlight) {
-        sendButton.title = 'Remove the failed image attachment before sending.';
+        sendButton.title = attachmentBlockMessage(activeChatSessionId);
     } else if (uploadInFlight) {
-        sendButton.title = ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE;
+        sendButton.title = attachmentBlockMessage(activeChatSessionId);
     } else {
         sendButton.title = sessionBusy
             ? 'Queue a separate request after the current turn finishes. Use Steer to guide the active turn.'
@@ -21492,9 +21492,6 @@ let uploadUiState = {
 };
 
 const PENDING_FILE_COPY_SESSION_FALLBACK_KEY = '__pending_chat_session__';
-const ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE = (
-    'Wait for the attachment upload to finish before sending.'
-);
 const pendingFileCopyConceptIdsBySession = new Map();
 const pendingFileCopyDisplayNamesBySession = new Map();
 const uploadStatesBySession = new Map();
@@ -21502,7 +21499,8 @@ const uploadStatesBySession = new Map();
 function getInFlightUploadStateForSession(sessionId = activeChatSessionId) {
     const sessionKey = getPendingFileCopySessionKey(sessionId);
     const uploadState = uploadStatesBySession.get(sessionKey) || null;
-    return uploadState?.inFlight === true ? uploadState : null;
+    // Once registered, individual attachments own readiness, not the batch promise.
+    return uploadState?.inFlight === true && !uploadState.itemsRegistered ? uploadState : null;
 }
 
 function normaliseTrustedUploadedFileCopyConceptId(value) {
@@ -21569,7 +21567,7 @@ function refreshConversationImages() {
         syncConversationAttachmentWorkflowBinding(activeChatSessionId);
         renderPendingAttachmentState();
     });
-    updateSendButtonForCurrentChatState();
+    renderActiveUploadUi();
 }
 
 function syncConversationAttachmentWorkflowBinding(sessionId) {
@@ -21609,24 +21607,6 @@ function renderPendingAttachmentState() {
     el.title = 'This attachment will be sent with the next accepted prompt.';
     el.classList.remove('hidden');
     refreshAttachmentStatusRegionVisibility();
-}
-
-function rememberPendingUploadedFileCopyConceptId(
-    conceptId,
-    sessionId = activeChatSessionId,
-    displayName = null
-) {
-    const normalisedConceptId = normaliseTrustedUploadedFileCopyConceptId(conceptId);
-    if (!normalisedConceptId) return;
-    const targetKey = getPendingFileCopySessionKey(sessionId);
-    pendingFileCopyConceptIdsBySession.set(targetKey, normalisedConceptId);
-    const normalisedDisplayName = normalisePendingAttachmentDisplayName(displayName);
-    if (normalisedDisplayName) {
-        pendingFileCopyDisplayNamesBySession.set(targetKey, normalisedDisplayName);
-    } else {
-        pendingFileCopyDisplayNamesBySession.delete(targetKey);
-    }
-    renderPendingAttachmentState();
 }
 
 function takePendingUploadedFileCopyBinding(sessionId) {
@@ -21711,11 +21691,18 @@ function renderUploadStatus(message, type = 'info') {
 function renderActiveUploadUi() {
     const activeSessionKey = getPendingFileCopySessionKey(activeChatSessionId);
     const activeUploadState = uploadStatesBySession.get(activeSessionKey) || null;
-    renderUploadStatus(
-        activeUploadState?.message || '',
-        activeUploadState?.tone || 'info'
-    );
-    setUploadButtonBusy(activeUploadState?.inFlight === true);
+    const items = imageItems(activeChatSessionId);
+    const unfinished = items.filter(item => item.state !== 'ready');
+    const preparing = !!getInFlightUploadStateForSession(activeChatSessionId);
+    const uploading = unfinished.some(item => ['queued', 'uploading', 'retrying'].includes(item.state));
+    const failed = unfinished.some(item => item.state === 'failed');
+    const message = preparing ? activeUploadState.message
+        : failed ? attachmentBlockMessage(activeChatSessionId)
+            : uploading ? `Uploading: ${unfinished.map(item => item.name).join(', ')}`
+                : items.length ? `Upload complete: ${items.length} ready.`
+                    : activeUploadState?.tone === 'error' ? activeUploadState.message : '';
+    renderUploadStatus(message, failed ? 'error' : (preparing || uploading) ? 'uploading' : 'success');
+    setUploadButtonBusy(preparing || uploading);
     updateSendButtonForCurrentChatState();
 }
 
@@ -21930,29 +21917,14 @@ async function performUploadFilesToVon(list, uploadState) {
         rekeyUploadStateForSession(uploadState, uploadTargetSessionId);
     }
 
-    let successCount = 0;
-    let failureCount = 0;
-
-    for (const file of list) {
-        const uploaded = await uploadConversationImage(file, uploadTargetSessionId, buildChatFetchHeaders(), () => {
-            syncConversationAttachmentWorkflowBinding(uploadTargetSessionId);
-            renderPendingAttachmentState();
-        });
-        if (uploaded) {
-            successCount += 1;
-            if (!isConversationImageFile(file)) {
-                const item = imageItems(uploadTargetSessionId).findLast(item => item.name === file.name && item.descriptor);
-                if (item) rememberPendingUploadedFileCopyConceptId(item.descriptor.concept_id, uploadTargetSessionId, file.name);
-            }
-        } else failureCount += 1;
-    }
-
-    const summary = `Upload complete: ${successCount} succeeded${failureCount ? `, ${failureCount} failed` : ''}.`;
-    setUploadStatusForState(
-        uploadState,
-        summary,
-        failureCount ? 'error' : 'success'
-    );
+    // Register all files before yielding so unstarted members cannot escape the gate.
+    const uploads = list.map(file => uploadConversationImage(file, uploadTargetSessionId, buildChatFetchHeaders(), () => {
+        syncConversationAttachmentWorkflowBinding(uploadTargetSessionId);
+        renderPendingAttachmentState();
+    }));
+    uploadState.itemsRegistered = true;
+    renderActiveUploadUi();
+    await Promise.all(uploads);
     clearUploadStatusAfterDelay(uploadState);
 }
 
@@ -21973,10 +21945,14 @@ function uploadFilesToVon(files) {
     const sessionKey = getPendingFileCopySessionKey(targetSessionId);
     const selectionFingerprint = buildUploadSelectionFingerprint(list);
     const existingState = uploadStatesBySession.get(sessionKey) || null;
-    if (existingState?.inFlight && existingState.promise) {
+    if (existingState?.promise && (getInFlightUploadStateForSession(targetSessionId)
+        || imageItems(targetSessionId).some(item => ['queued', 'uploading', 'retrying'].includes(item.state)))) {
         const repeatedSelection = (
             existingState.selectionFingerprint === selectionFingerprint
         );
+        if (!repeatedSelection) {
+            showToast('Another upload is already in progress; this additional selection was not uploaded.', 'info');
+        }
         setUploadStatusForState(
             existingState,
             repeatedSelection
@@ -37317,7 +37293,7 @@ async function handleSendPrompt(options = {}) {
         directComposerSubmission
         && (getInFlightUploadStateForSession(targetSessionId) || imagesBlocked(targetSessionId))
     ) {
-        showToast(ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE, 'info');
+        showToast(attachmentBlockMessage(targetSessionId), 'info');
         updateSendButtonForCurrentChatState();
         return;
     }
