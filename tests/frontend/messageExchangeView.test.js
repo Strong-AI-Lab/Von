@@ -280,3 +280,74 @@ test('exhausting earlier pages reports stale unread counts and hides the action'
     expect(document.querySelector('.message-unread-navigation-status').textContent).toContain('No unread messages remain');
     expect(document.querySelector('.message-jump-unread').hidden).toBe(true);
 });
+
+test('default loading does not navigate to unread or to the bottom', async () => {
+    HTMLElement.prototype.scrollIntoView = jest.fn();
+    const api = require(base + 'apiService.js');
+    let finish;
+    api.postJson.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const opening = require(base + 'components/messagePanel.js').openMessageExchange(row('#V#bob'));
+    const content = document.getElementById('messageViewContent');
+    Object.defineProperty(content, 'scrollHeight', { configurable: true, value: 1000 });
+    content.scrollTop = 30;
+    finish(unreadResponse());
+    await opening;
+    expect(content.scrollTop).toBe(30);
+    expect(HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
+});
+
+test('background unread loading preserves even a near-bottom reader and scrolling during the request', async () => {
+    HTMLElement.prototype.scrollIntoView = jest.fn();
+    const panel = require(base + 'components/messagePanel.js');
+    await panel.openMessageExchange(row('#V#bob'));
+    const content = document.getElementById('messageViewContent');
+    Object.defineProperties(content, {
+        scrollHeight: { configurable: true, value: 1000 },
+        clientHeight: { configurable: true, value: 200 }
+    });
+    content.scrollTop = 790;
+    let finish;
+    require(base + 'apiService.js').postJson.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const refresh = panel.refreshOpenMessageExchange();
+    expect(content.querySelector('[data-contribution-id="one"]')).not.toBeNull();
+    expect(content.scrollTop).toBe(790);
+    content.scrollTop = 450;
+    const updated = unreadResponse();
+    updated.messages.push({ ...response('two').messages[0], created_at: '2026-09-12T12:00:00Z' });
+    finish(updated);
+    await refresh;
+    expect(content.scrollTop).toBe(450);
+    expect(HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
+});
+
+test('deferred unread navigation preserves the visible contribution across intermediate pages before jumping', async () => {
+    HTMLElement.prototype.scrollIntoView = jest.fn();
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValueOnce(page(['latest'], 'page2'));
+    await require(base + 'components/messagePanel.js').openMessageExchange({ ...row('#V#bob'), shared_unread_count: 1 });
+    const content = document.getElementById('messageViewContent');
+    content.scrollTop = 25;
+    const geometry = jest.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+        if (this.dataset.contributionId === 'latest') {
+            const top = 100 + (content.querySelector('[data-contribution-id="middle"]') ? 200 : 0) - content.scrollTop;
+            return { top, bottom: top + 100 };
+        }
+        return { top: 0, bottom: 0 };
+    });
+    let finishMiddle, finishUnread;
+    api.postJson.mockImplementationOnce(() => new Promise(resolve => { finishMiddle = resolve; }))
+        .mockImplementationOnce(() => new Promise(resolve => { finishUnread = resolve; }));
+    const jump = document.querySelector('.message-jump-unread');
+    jump.click();
+    expect(jump.textContent).toBe('Loading unread messages…');
+    expect(content.scrollTop).toBe(25);
+    content.scrollTop = 40;
+    finishMiddle(page(['middle'], 'page3')); await flush();
+    expect(content.scrollTop).toBe(240);
+    expect(content.querySelector('[data-contribution-id="latest"]').getBoundingClientRect().top).toBe(60);
+    expect(HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
+    finishUnread(page(['unread'], null, ['unread'])); await flush();
+    expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(document.activeElement.dataset.contributionId).toBe('unread');
+    geometry.mockRestore();
+});

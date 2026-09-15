@@ -6,16 +6,19 @@ const http = require('node:http');
 const path = require('node:path');
 const { chromium, expect } = require('@playwright/test');
 const root = path.resolve(__dirname, '../../src/frontend/web/von_interface');
+const markup = fs.readFileSync(path.join(root, 'templates/chat_tab.html'), 'utf8').replace(/{%[\s\S]*?%}|{{[\s\S]*?}}/g, '');
 const evidence = process.argv[2] || '.run/unread-navigation';
 fs.mkdirSync(evidence, { recursive: true });
 let cursors = [];
+let background = false;
+let pendingPage = null;
 const message = (id, unread, day) => ({ concept_id: id, created_at: `2026-09-${day}T12:00:00Z`,
     relationships: { '#V#has_sender': ['#V#bob'], '#V#has_recipient': ['#V#alice'] },
-    concept_data: { content_fallback: id, read_by: unread ? [] : ['#V#alice'] } });
+    concept_data: { content_fallback: `${id}: ${'A realistic message for checking the reading position. '.repeat(5)}`, read_by: unread ? [] : ['#V#alice'] } });
 const server = http.createServer(async (req, res) => {
     if (req.url === '/') {
         res.setHeader('Content-Type', 'text/html');
-        return res.end('<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/static/styles.css"><div id="conversationWorkspace" class="show-message-exchange"><div id="messagesContainer"></div></div>');
+        return res.end(`<!doctype html><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/static/styles.css"><link rel="stylesheet" href="/static/css/participantProfile.css">${markup}`);
     }
     if (req.url.startsWith('/static/')) {
         const file = path.resolve(root, `.${req.url}`);
@@ -28,10 +31,14 @@ const server = http.createServer(async (req, res) => {
     if (req.url === '/api/messages/exchange') {
         let body = ''; for await (const chunk of req) body += chunk;
         const { before } = JSON.parse(body); cursors.push(before);
-        const result = !before ? { messages: [message('Latest read message', false, '13')], before: 'middle' }
-            : before === 'middle' ? { messages: [message('Middle read message', false, '12')], before: 'older' }
+        const initial = Array.from({ length: 20 }, (_, index) => message(`latest-${String(index).padStart(2, '0')}`, false, '13'));
+        const result = !before ? { messages: background ? [...initial, message('Background unread', true, '14')] : initial, before: 'middle' }
+            : before === 'middle' ? { messages: Array.from({ length: 10 }, (_, index) => message(`middle-${index}`, false, '12')), before: 'older' }
                 : { messages: [message('Earlier unread', true, '10'), message('Most recent unread', true, '11')], before: null };
-        return res.end(JSON.stringify({ ...result, current_user_id: '#V#alice' }));
+        const finish = () => res.end(JSON.stringify({ ...result, current_user_id: '#V#alice' }));
+        if (before || background) pendingPage = finish;
+        else finish();
+        return;
     }
     res.end(JSON.stringify({ success: true, messages: [], profiles: [] }));
 });
@@ -42,25 +49,68 @@ const server = http.createServer(async (req, res) => {
         const results = [];
         for (const width of [390, 1280]) {
             cursors = [];
+            background = false;
             const page = await browser.newPage({ viewport: { width, height: 850 } });
             const errors = []; page.on('pageerror', error => errors.push(error.message));
             await page.goto(`http://127.0.0.1:${server.address().port}`);
             await page.evaluate(async () => {
                 // Keep read markers stable while checking navigation independently.
                 window.IntersectionObserver = undefined;
+                document.getElementById('conversationWorkspace').classList.add('show-message-exchange');
+                document.body.classList.add('viewing-message-exchange');
                 const { openMessageExchange } = await import('/static/js/components/messagePanel.js');
                 await openMessageExchange({ session_id: 'fixture', viewer_id: '#V#alice',
                     participant_ids: ['#V#alice', '#V#bob'], other_participant_ids: ['#V#bob'],
                     session_name: 'Unread pagination fixture', shared_unread_count: 2 });
             });
+            const content = page.locator('#messageViewContent');
+            assert.equal(await content.evaluate(el => el.scrollTop), 0, 'default loading preserves the top');
+            await content.evaluate(el => { el.scrollTop = el.scrollHeight - el.clientHeight - 10; });
+            const bottomPosition = await content.evaluate(el => el.scrollTop);
+            assert.ok(bottomPosition > 0, 'fixture must overflow');
+            background = true;
+            await page.evaluate(() => {
+                window.refreshDone = import('/static/js/components/messagePanel.js').then(panel => panel.refreshOpenMessageExchange());
+            });
+            await expect.poll(() => Boolean(pendingPage)).toBe(true);
+            assert.equal(await content.evaluate(el => el.scrollTop), bottomPosition, 'pending background request must preserve position');
+            pendingPage(); pendingPage = null;
+            await page.evaluate(() => window.refreshDone);
+            assert.equal(await content.evaluate(el => el.scrollTop), bottomPosition, 'background unread must not follow the bottom');
+            // Reopen the initial fixture, then traverse delayed earlier pages.
+            background = false;
+            await page.evaluate(async () => {
+                const panel = await import('/static/js/components/messagePanel.js');
+                await panel.openMessageExchange({ session_id: 'fixture', viewer_id: '#V#alice',
+                    participant_ids: ['#V#alice', '#V#bob'], other_participant_ids: ['#V#bob'],
+                    session_name: 'Unread pagination fixture', shared_unread_count: 2 });
+            });
+            cursors = [];
+            await content.evaluate(el => { el.scrollTop = 450; });
+            const anchor = await content.evaluate(el => {
+                const top = el.getBoundingClientRect().top;
+                const item = [...el.querySelectorAll('[data-contribution-id]')].find(item => item.getBoundingClientRect().bottom > top);
+                return { id: item.dataset.contributionId, offset: item.getBoundingClientRect().top - top };
+            });
+            const offset = () => page.locator(`[data-contribution-id="${anchor.id}"]`).evaluate(el =>
+                el.getBoundingClientRect().top - document.getElementById('messageViewContent').getBoundingClientRect().top);
             await page.getByRole('button', { name: 'Jump to most recent unread', exact: true }).click();
+            await expect.poll(() => Boolean(pendingPage)).toBe(true);
+            assert.equal(await offset(), anchor.offset, 'pending go-to-unread preserves the visible message');
+            pendingPage(); pendingPage = null;
+            await expect.poll(() => Boolean(pendingPage)).toBe(true);
+            await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+            assert.ok(Math.abs(await offset() - anchor.offset) <= 1, 'intermediate page preserves the visible message within one CSS pixel');
+            await expect(page.getByRole('button', { name: 'Loading unread messages…', exact: true })).toBeVisible();
+            await page.screenshot({ path: path.join(evidence, `loading-${width}.png`) });
+            pendingPage(); pendingPage = null;
             const target = page.locator('[data-contribution-id="Most recent unread"]');
             await expect(target).toBeFocused();
             await expect(target).toBeInViewport();
-            assert.deepEqual(cursors, [null, 'middle', 'older']);
+            assert.deepEqual(cursors, ['middle', 'older']);
             assert.deepEqual(errors, []);
             await page.screenshot({ path: path.join(evidence, `unread-${width}.png`) });
-            results.push({ width, cursors: [...cursors], mostRecentUnreadFocused: true, targetInViewport: true });
+            results.push({ width, cursors: [...cursors], defaultTopPreserved: true, backgroundPosition: bottomPosition, intermediateAnchorOffset: anchor.offset, mostRecentUnreadFocused: true, targetInViewport: true });
             await page.close();
         }
         fs.writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ fixture: true, results }, null, 2));

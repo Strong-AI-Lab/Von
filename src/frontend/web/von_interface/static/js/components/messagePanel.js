@@ -823,10 +823,7 @@ async function loadConversation(userId, { silent = false, before = null, observe
     const generation = _exchangeGeneration;
     const org = getSessionScopedOrgId();
     const contentEl = _messagesContainer?.querySelector('#messageViewContent');
-    const oldTop = contentEl?.scrollTop || 0;
-    const oldHeight = contentEl?.scrollHeight || 0;
-    const nearBottom = !contentEl || oldHeight - oldTop - contentEl.clientHeight < 60;
-    if (contentEl && !silent) contentEl.innerHTML = '<div class="loading">Loading conversation…</div>';
+    if (contentEl && !silent && !_currentMessages.length) contentEl.innerHTML = '<div class="loading">Loading conversation…</div>';
     try {
         const response = _exchange
             ? await postJson('/api/messages/exchange', { participant_ids: _exchange.participant_ids, organisation_concept_id: _exchange.organisation_concept_id || null, before })
@@ -854,21 +851,35 @@ async function loadConversation(userId, { silent = false, before = null, observe
         _currentUserId = response.current_user_id || null;
         _readObserver?.disconnect();
         _readObserver = null;
-        await renderMessages();
+        // Capture at render time: the reader may have scrolled during the request.
+        // Keep a visible contribution at the same offset, including when earlier
+        // pages or edits change the height above it. Never implicitly follow unread.
+        const oldTop = contentEl?.scrollTop || 0;
+        const viewportTop = contentEl?.getBoundingClientRect().top || 0;
+        const retainedIds = new Set(_currentMessages.map(message => message.concept_id));
+        const anchor = [...(contentEl?.querySelectorAll('[data-contribution-id]') || [])]
+            .find(element => retainedIds.has(element.dataset.contributionId)
+                && element.getBoundingClientRect().bottom > viewportTop);
+        const anchorId = anchor?.dataset.contributionId;
+        const anchorOffset = anchor ? anchor.getBoundingClientRect().top - viewportTop : 0;
+        await renderMessages(() => {
+            if (_olderCursor && contentEl) {
+                const earlier = document.createElement('button'); earlier.type = 'button'; earlier.textContent = 'Load earlier messages';
+                earlier.onclick = () => void loadConversation(userId, { silent: true, before: _olderCursor });
+                contentEl.prepend(earlier);
+            }
+            updateUnreadMarkers();
+            if (contentEl) {
+                const restoredAnchor = [...contentEl.querySelectorAll('[data-contribution-id]')]
+                    .find(element => element.dataset.contributionId === anchorId);
+                contentEl.scrollTop = restoredAnchor
+                    ? contentEl.scrollTop + restoredAnchor.getBoundingClientRect().top
+                        - contentEl.getBoundingClientRect().top - anchorOffset
+                    : oldTop;
+            }
+        });
         if (generation !== _exchangeGeneration || org !== getSessionScopedOrgId()) return;
         restoreReplyDeliveryAttemptForCurrentScope();
-        if (_olderCursor && contentEl) {
-            const earlier = document.createElement('button'); earlier.type = 'button'; earlier.textContent = 'Load earlier messages';
-            earlier.onclick = () => void loadConversation(userId, { silent: true, before: _olderCursor });
-            contentEl.prepend(earlier);
-        }
-        if (contentEl && before) contentEl.scrollTop = oldTop + contentEl.scrollHeight - oldHeight;
-        else if (contentEl && silent && !nearBottom) contentEl.scrollTop = oldTop;
-        else if (contentEl) contentEl.scrollTop = contentEl.scrollHeight;
-        updateUnreadMarkers();
-        // Opening starts at the first loaded unread contribution, without
-        // acknowledging earlier/unloaded or skipped contributions.
-        if (contentEl && !silent) contentEl.querySelector('.is-unread')?.scrollIntoView?.({ block: 'start' });
         updateMessageNavigation();
         if (observeReads) observeDisplayedMessages();
         return true;
@@ -1153,7 +1164,7 @@ function selectReplyContext(messageId) {
 /**
  * Render messages in the conversation view.
  */
-async function renderMessages() {
+async function renderMessages(onRendered = () => {}) {
     const contentEl = _messagesContainer?.querySelector('#messageViewContent');
     if (!contentEl) return;
 
@@ -1165,6 +1176,7 @@ async function renderMessages() {
                 <p class="message-empty-hint">Send the first message!</p>
             </div>
         `;
+        onRendered();
         return;
     }
 
@@ -1280,6 +1292,8 @@ async function renderMessages() {
             }));
         });
     });
+    // Restore before asynchronous hydration yields a frame with the new DOM.
+    onRendered();
     await hydrateConceptCartouchesInRoot(contentEl);
 
     // The loader restores the viewport before attaching read observers.
