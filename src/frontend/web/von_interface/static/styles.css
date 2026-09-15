@@ -18801,7 +18801,7 @@ html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-bu
 /* Compact status details expand in the row, preserving its scroll behaviour.
    Keep clipped text available to assistive technology even before expansion. */
 .footer-container .db-conn-badge:not(:hover):not(:focus-within) .footer-quiet-metric,
-.footer-container :is(.conversation-model-controls, .footer-user-segment, .footer-org-switcher):not(:hover):not(:focus-within) > .footer-label-inline {
+.footer-container :is(.conversation-model-controls, .footer-user-segment, .footer-org-switcher):not(.footer-reasoning-level):not(:hover):not(:focus-within) > .footer-label-inline {
     position: absolute;
     width: 1px;
     height: 1px;
