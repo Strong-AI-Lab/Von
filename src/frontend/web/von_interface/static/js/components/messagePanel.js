@@ -50,6 +50,7 @@ let _replySendFailureState = null;
 let _newMessageSendFailureState = null;
 let _replySendPending = false;
 let _newMessageSendPending = false;
+let _replyContextPrefix = null;
 let _replyDeliveryAttempt = null;
 let _newMessageDeliveryAttempt = null;
 let _deliveryKeySequence = 0;
@@ -67,6 +68,7 @@ function exchangeScope(row = _exchange) {
 }
 
 export function resetMessagePanelContext() {
+    clearReplyContext();
     const input = _messagesContainer?.querySelector('#messageInput');
     if (_exchange && input) _exchangeDrafts.set(exchangeScope(), input.value);
     _exchangeGeneration += 1;
@@ -723,6 +725,7 @@ function renderThreadList() {
  * Select a conversation to view.
  */
 async function selectConversation(userId) {
+    clearReplyContext();
     const renderedSelection = _messagesContainer?.querySelector(
         '.message-thread-item.selected',
     );
@@ -1098,6 +1101,55 @@ async function loadMessageRecommendationReview(messageId, { forceReload = false 
     }
 }
 
+// Keep the quote in the ordinary draft/body so existing persistence and retry
+// retain it, including when the original message is later unavailable.
+function clearReplyContext({ removeQuote = false } = {}) {
+    const input = _messagesContainer?.querySelector('#messageInput');
+    if (removeQuote && input && _replyContextPrefix) {
+        if (!input.value.startsWith(_replyContextPrefix)) {
+            showToast('The quote was edited. Remove it directly from your draft.', 'info');
+            return false;
+        }
+        input.value = input.value.slice(_replyContextPrefix.length);
+        resizeCompactDraft(input);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    _replyContextPrefix = null;
+    _messagesContainer?.querySelector('.message-reply-context-controls')?.remove();
+    return true;
+}
+
+function selectReplyContext(messageId) {
+    if (_replySendPending || _exchange?.other_participant_ids?.length > 1) return;
+    const input = _messagesContainer?.querySelector('#messageInput');
+    const message = _currentMessages.find(item => item.concept_id === messageId);
+    if (!input || !message) {
+        showToast('This message is no longer available. Your draft has been kept.', 'warning');
+        return;
+    }
+    if (!clearReplyContext({ removeQuote: true })) return;
+    const sender = message.relationships?.['#V#has_sender']?.[0] || '';
+    const content = message.concept_data?.content_fallback || '[Message text unavailable]';
+    _replyContextPrefix = `Replying to ${formatUserName(sender)} (${messageId}):\n${content.split(/\r?\n/u).map(line => `> ${line}`).join('\n')}\n\n`;
+    input.value = _replyContextPrefix + input.value;
+    const controls = document.createElement('div');
+    controls.className = 'message-reply-context-controls';
+    const note = document.createElement('span');
+    note.textContent = 'Quoted message included in your reply. ';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel reply context';
+    cancel.onclick = () => {
+        if (!_replySendPending) clearReplyContext({ removeQuote: true });
+    };
+    controls.append(note, cancel);
+    input.closest('#messageComposeArea').prepend(controls);
+    resizeCompactDraft(input);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+}
+
 /**
  * Render messages in the conversation view.
  */
@@ -1160,7 +1212,7 @@ async function renderMessages() {
                     <span class="message-time">${timestamp ? formatTime(timestamp) : ''}</span>
                     <button type="button" class="message-copy-markdown" data-message-id="${escapeHtml(msg.concept_id || '')}" aria-label="Copy message as Markdown" title="Copy message as Markdown">${renderMessagePanelIcon('copy')}<span class="message-copy-label">Copy</span></button>
                     <span class="message-copy-status" role="status"></span>
-                    ${msg.concept_id ? `<button type="button" class="message-discuss-btn"
+                    ${msg.concept_id ? `<button type="button" class="message-reply-context-btn" data-message-id="${escapeHtml(msg.concept_id)}" title="Quote this message in the current reply">Reply with context</button><button type="button" class="message-discuss-btn"
                         data-concept-id="${escapeHtml(msg.concept_id)}"
                         title="Discuss this message with Von">Discuss with Von</button>` : ''}
                 </div>
@@ -1208,6 +1260,10 @@ async function renderMessages() {
             const copied = await copyTextWithClipboardFallback(message.concept_data?.content_fallback || '');
             status.textContent = copied ? 'Copied' : 'Copy failed';
         };
+    });
+    contentEl.querySelectorAll('.message-reply-context-btn').forEach(button => {
+        button.disabled = Boolean(_exchange?.other_participant_ids?.length > 1);
+        button.onclick = () => selectReplyContext(button.dataset.messageId);
     });
     contentEl.querySelectorAll('.message-discuss-btn').forEach((button) => {
         button.addEventListener('click', (event) => {
@@ -2272,6 +2328,7 @@ async function handleSendReply() {
             _currentConversationUserId === submittedConversationUserId
             && activeReplyInput?.value.trim() === content
         ) {
+            clearReplyContext();
             activeReplyInput.value = '';
             resizeCompactDraft(activeReplyInput);
         }

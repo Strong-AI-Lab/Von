@@ -2047,6 +2047,7 @@ body.von-signed-out {
 
 .task-discuss-btn,
 .message-discuss-btn,
+.message-reply-context-btn,
 .concept-discuss-button {
     border: 1px solid #86efac;
     border-radius: 5px;
@@ -2061,7 +2062,8 @@ body.von-signed-out {
     font-size: 0.75rem;
 }
 
-.message-discuss-btn {
+.message-discuss-btn,
+.message-reply-context-btn {
     margin-left: 7px;
     padding: 1px 5px;
     font-size: 0.68rem;
@@ -2157,6 +2159,7 @@ body.von-signed-out {
 
 .task-discuss-btn:hover,
 .message-discuss-btn:hover,
+.message-reply-context-btn:hover,
 .concept-discuss-button:hover {
     background: #dcfce7;
     border-color: #4ade80;
