@@ -1473,7 +1473,7 @@ export async function setModelInfoFooterText() {
   const effectiveLlm = localModelUnavailable
     ? null
     : localModelPref.requestedLlm
-    ? { provider: localModelPref.requestedLlm.provider, model: localModelPref.requestedLlm.model }
+    ? localModelPref.requestedLlm
     : activeLlm;
 
   const userInfo = await getCurrentUserInfo(settings);
@@ -1784,6 +1784,26 @@ export async function setModelInfoFooterText() {
     );
     if (llmClass) modelSettingsSegment.classList.add('llm-status-badge', llmClass);
     segments.push(modelSettingsSegment);
+    // Show the configured request preference, independently of last-call model
+    // telemetry. The existing Settings selector owns supported values and writes.
+    const reasoningEffort = effectiveLlm?.model_parameters?.reasoning_effort;
+    const reasoningLabel = !effectiveLlm?.model
+      ? 'unselected'
+      : (typeof reasoningEffort === 'string' && reasoningEffort.trim()) || 'provider default';
+    const reasoningSegment = makeActionButton(
+      'Reasoning',
+      reasoningLabel,
+      () => { openSettingsForModelControls(); },
+      {
+        ariaLabel: `Configured reasoning level ${reasoningLabel}. Open language model settings`,
+        title: `Configured reasoning level for ${configuredModel || 'the next request'}: ${reasoningLabel}. `
+          + 'Provider default means no reasoning-effort override is requested. '
+          + 'Change it in language model settings where the selected model supports it. '
+          + 'This is a request preference, not confirmation of the last execution.',
+      },
+    );
+    reasoningSegment.classList.add('conversation-model-controls', 'footer-reasoning-level');
+    segments.push(reasoningSegment);
     // This is deliberately a lightweight, independently repaintable telemetry
     // segment: cost updates must not retrigger settings, DB, or auth footer loads.
     segments.push(makeConversationRuntimeCostFooterSegment());
