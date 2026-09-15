@@ -16712,15 +16712,30 @@ def test_task_creation_requested_outcome_reaches_final_response(scenario: str) -
         "description",
         "organisation_concept_id",
         "requested_model",
+        "requested_reasoning_effort",
+        "priority",
+        "due_date",
+        "notes",
         "assignee_concept_id",
         "unverified",
         "changed",
+        "partial",
         "other_type_error",
         "later_reassignment",
     ],
 )
+@pytest.mark.parametrize(
+    "invalid_field,error",
+    [
+        ("task_type_id", "Unknown task type"),
+        ("task_source_id", "Unknown task source"),
+        ("source_id", "Unknown task source"),
+    ],
+)
 def test_task_create_reconciliation_requires_matching_verified_requested_object(
     difference: str,
+    invalid_field: str,
+    error: str,
 ) -> None:
     arguments = {
         "title": "Requested work",
@@ -16728,6 +16743,11 @@ def test_task_create_reconciliation_requires_matching_verified_requested_object(
         "organisation_concept_id": "#V#org",
         "assignee_concept_id": "#V#codex_dgx",
         "requested_model": "test-model",
+        "requested_reasoning_effort": "high",
+        "priority": "high",
+        "due_date": "2026-10-01T12:00:00Z",
+        "notes": "Source: fixture-message-001",
+        "idempotency_key": "same-key-is-not-enough",
     }
     later_arguments = dict(arguments)
     fields = {"assignee_concept_id": "#V#codex_dgx"}
@@ -16741,7 +16761,7 @@ def test_task_create_reconciliation_requires_matching_verified_requested_object(
             "tool": "task_create",
             "effective_arguments": {
                 **arguments,
-                "task_type_id": "#V#task_specification",
+                invalid_field: "#V#invalid_category",
             },
         },
         {
@@ -16752,14 +16772,14 @@ def test_task_create_reconciliation_requires_matching_verified_requested_object(
     ]
     snapshot = {
         "failed": {
-            "effect_status": "failed",
+            "effect_status": "partial" if difference == "partial" else "failed",
             "changed": difference == "changed",
             "failure_fact": {
                 "error_code": "INVALID_DATA",
                 "error": (
                     "Other validation failure"
                     if difference == "other_type_error"
-                    else "Unknown task type"
+                    else error
                 ),
             },
         },

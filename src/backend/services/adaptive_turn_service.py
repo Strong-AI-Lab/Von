@@ -4896,7 +4896,7 @@ def _reconcile_task_creation_attempts(
 ) -> None:
     """Reconcile a rejected create with a verified record for the same request.
 
-    A corrected invalid type changes the handler fingerprint, so neither an
+    A corrected invalid category can change the handler fingerprint, so neither an
     exact effect ID nor a task ID exists to join the rejected attempt. Compare
     the remaining creation arguments instead; assignment may be completed by
     a later verified field update on the returned task. This is an evidence
@@ -4913,6 +4913,11 @@ def _reconcile_task_creation_attempts(
         ):
             if alias in arguments:
                 arguments.setdefault(field, arguments.pop(alias))
+        # Match the handler's source-category alias precedence, including calls
+        # that supply both spellings or an empty canonical field.
+        source_id = arguments.pop("source_id", None)
+        if source_id or arguments.get("task_source_id"):
+            arguments["task_source_id"] = arguments.get("task_source_id") or source_id
         if not arguments.get("assignee_concept_id") and arguments.get(
             "created_by_concept_id"
         ):
@@ -4937,6 +4942,10 @@ def _reconcile_task_creation_attempts(
             error_code == "INVALID_DATA"
             and "unknown task type" in str(error or "").lower()
         )
+        corrected_invalid_source = (
+            error_code == "INVALID_DATA"
+            and "unknown task source" in str(error or "").lower()
+        )
         for later_index in range(index + 1, len(tool_invocations)):
             later = tool_invocations[later_index]
             if later.get("execution_method", later.get("tool")) != "task_create":
@@ -4954,6 +4963,8 @@ def _reconcile_task_creation_attempts(
             excluded = set(assignment_fields)
             if corrected_invalid_type:
                 excluded.add("task_type_ids")
+            if corrected_invalid_source:
+                excluded.add("task_source_id")
             if {k: v for k, v in expected.items() if k not in excluded} != {
                 k: v for k, v in observed_arguments.items() if k not in excluded
             }:

@@ -45115,7 +45115,13 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 enum_values={
                     "priority": ("low", "medium", "high", "critical"),
                 },
-                description="Create a new task in Vontology.",
+                description=(
+                    "Create a new task in Vontology. task_source_id and its alias "
+                    "source_id identify a registered source category (von_native "
+                    "or jira_imported), not an external message ID or URL. For "
+                    "a task created from a message, omit the category to default "
+                    "to von_native; retain provenance in notes or reference_code."
+                ),
             ),
             output_schema=task_create_output_schema,
             category="write",
@@ -45153,6 +45159,11 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 "Priority: low, medium, high, critical. Tasks start in 'pending' status and can include "
                 "planning metadata (components, fix versions, sprint values, backlog rank), canonical "
                 "task categories, source semantics, and richer task-detail fields. "
+                "task_source_id (alias source_id) is a registered source category: "
+                "von_native or jira_imported, also accepted as canonical concept IDs. "
+                "It is not an external message ID or URL. A task created from Gmail "
+                "is von_native by default: omit the category and retain the message "
+                "reference in notes or reference_code. "
                 "For coding-agent work, preserve a user-specified model and reasoning level in "
                 "requested_model (exact model ID, e.g. gpt-6-astra) and "
                 "requested_reasoning_effort (e.g. high or xhigh; extra-high is xhigh). "
