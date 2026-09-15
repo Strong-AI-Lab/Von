@@ -1,3 +1,4 @@
+import { createTurnModelPicker } from './components/turnModelPicker.js';
 import { copyCompactConversationReference, isConversationConceptReference, conversationReferenceMetadata, readConversationReference } from './utils/conversationReference.js';
 import { bindConversationRowMenu } from './components/conversationRowMenu.js';
 import { initialiseConversationActions } from './components/conversationActions.js';
@@ -186,6 +187,7 @@ const turnEditHistory = new Map();
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
 let activeChatSessionId = null;
+let turnModelPicker = null;
 let activeChatSessionName = null;
 let activeChatSessionOwnerId = null;
 const conceptQaSessionsByChatSession = new Map();
@@ -25164,6 +25166,7 @@ function setActiveChatSession(sessionId, sessionName, externalConversation = und
     renderActiveChatSessionFocusChips(activeChatSessionFocus);
 
     if (previousSessionId !== activeChatSessionId) {
+        if (previousSessionId) turnModelPicker?.clear();
         setSelectedChatPromptQueueEntryId(null);
         chatSessionSelectionGeneration += 1;
         synchroniseLlmExecutionContext({ reason: 'conversation_session_changed' });
@@ -33856,6 +33859,22 @@ export function initializeChatTab() {
         return;
     }
     chatTabInitialised = true;
+    const turnModelSelect = document.getElementById('turnModelSelect');
+    if (turnModelSelect) {
+        turnModelPicker = createTurnModelPicker({
+            select: turnModelSelect,
+            status: document.getElementById('turnModelStatus'),
+            clearButton: document.getElementById('clearTurnModelButton'),
+            loadModels: async provider => {
+                const response = await fetch(`/api/settings/models/${provider}`, { headers: buildChatFetchHeaders() });
+                if (!response.ok) throw new Error('Model catalogue unavailable');
+                return response.json();
+            }
+        });
+        turnModelSelect.closest('details')?.addEventListener('toggle', event => {
+            if (event.target.open) void turnModelPicker.load();
+        });
+    }
     initialiseConversationCatalogue({ render: (fresh) => { if (fresh === true) reconcileServerConversationPreferences(directConversationRows()); renderChatSessionTabs(sessionTabsCache, activeChatSessionId); }, acceptChats: (rows) => {
         serverAgentCreatedSessionVisibilityState = null;
         const selected = sessionTabsCache.find(row => row.session_id === activeChatSessionId);
@@ -34330,7 +34349,7 @@ export function initializeChatTab() {
             }
         },
         onSubmit: async (text, speech) => {
-            const envelope = buildChatPromptExecutionEnvelope();
+            const envelope = buildChatPromptExecutionEnvelope({ modelFields: turnModelPicker?.take() });
             envelope.client_context = { ...envelope.client_context,
                 speech_attempt_ids: [speech.attemptId], speech_item_id: speech.itemId };
             const row = await queuePromptForLater(text, { sessionId: activeChatSessionId,
@@ -35927,7 +35946,8 @@ function buildChatPromptExecutionEnvelope({
     fileCopyConceptId = null,
     imageAttachmentIds = [],
     turnKind = null,
-    initiationId = null
+    initiationId = null,
+    modelFields = null
 } = {}) {
     const userContext = getUserContext() || {};
     const localModelRequestFields = buildLocalModelRequestFields(
@@ -35941,7 +35961,7 @@ function buildChatPromptExecutionEnvelope({
         language: (typeof userContext.language === 'string' && userContext.language.trim())
             ? userContext.language.trim()
             : 'en-NZ',
-        ...localModelRequestFields,
+        ...(modelFields || localModelRequestFields),
         ...(fileCopyConceptId ? {
             workflow_inputs: {
                 file_copy_concept_id: fileCopyConceptId
@@ -37137,7 +37157,7 @@ async function sendQueuedChatPromptEntry(entryId) {
         return false;
     }
 
-    if (getUnavailableLocalModelPreferenceForChat()) {
+    if (!nextEntry.executionEnvelope?.model && getUnavailableLocalModelPreferenceForChat()) {
         nextEntry.syncError = LOCAL_MODEL_UNAVAILABLE_CHAT_MESSAGE;
         renderChatTaskQueuePanel();
         refreshChatSessionTabActivityIndicators();
@@ -37183,6 +37203,7 @@ async function sendQueuedChatPromptEntry(entryId) {
             clientRequestId: nextEntry.clientRequestId || null,
             attemptId: nextEntry.attemptId || null,
             fileCopyConceptId: nextEntry.fileCopyConceptId || null,
+            executionEnvelope: nextEntry.executionEnvelope,
             queuedSourceEntryId: cleanEntryId
         });
         return true;
@@ -37327,7 +37348,9 @@ async function handleSendPrompt(options = {}) {
         return;
     }
 
-    if (!observeServerDispatch && getUnavailableLocalModelPreferenceForChat()) {
+    if (!observeServerDispatch && !options?.executionEnvelope?.model
+        && !(directComposerSubmission && turnModelPicker?.peek())
+        && getUnavailableLocalModelPreferenceForChat()) {
         if (!fromQueue) {
             notifyUnavailableLocalModelForChat();
         }
@@ -37390,7 +37413,8 @@ async function handleSendPrompt(options = {}) {
         );
         const executionEnvelope = buildChatPromptExecutionEnvelope({
             fileCopyConceptId: queuedFileCopyConceptId,
-            imageAttachmentIds: takeImages(targetSessionId)
+            imageAttachmentIds: takeImages(targetSessionId),
+            modelFields: directComposerSubmission ? turnModelPicker?.take() : null
         });
         refreshConversationImages();
         rememberLastSubmittedUserPrompt(promptRaw);
@@ -37462,7 +37486,12 @@ async function handleSendPrompt(options = {}) {
         fileCopyConceptId: pendingFileCopyConceptId,
         imageAttachmentIds: options?.executionEnvelope?.image_attachment_ids || (fromQueue ? [] : takeImages(targetSessionId)),
         turnKind,
-        initiationId
+        initiationId,
+        modelFields: options?.executionEnvelope?.model ? {
+            model: options.executionEnvelope.model,
+            model_provider: options.executionEnvelope.model_provider,
+            model_parameters: options.executionEnvelope.model_parameters || {}
+        } : (directComposerSubmission && !assistantOpening ? turnModelPicker?.take() : null)
     });
     refreshConversationImages();
     const claimedAtMs = Date.parse(String(options?.claimedAt || ''));
@@ -42280,3 +42309,5 @@ export function __testOnly_resetExternalConversationBulkImport() {
     externalConversationBulkImportPanelHidden = false;
 }
 export { formatChatTimestamp, showLlmDebugPopup, switchToChatSession, updateHistoryLength };
+
+export function __testOnly_setTurnModelPicker(picker) { turnModelPicker = picker; }

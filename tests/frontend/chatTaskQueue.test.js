@@ -69,6 +69,7 @@ describe('chat task queue', () => {
         try {
             const chatTab = require(chatTabModulePath);
             if (typeof chatTab.__testOnly_resetChatRequestState === 'function') {
+                chatTab.__testOnly_setTurnModelPicker(null);
                 chatTab.__testOnly_resetChatRequestState();
             }
         } catch (_) {
@@ -118,7 +119,7 @@ describe('chat task queue', () => {
         expect(dictationStatus.textContent).toBe('');
     });
 
-    test('sends the stored Gemini choice as a bare model with its exact provider', async () => {
+    test('uses a temporary model once, restores default parameters and preserves queued model choices', async () => {
         const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const { sendMessage } = require(chatTabModulePath);
         getUserContext.mockReturnValue({
@@ -177,6 +178,29 @@ describe('chat task queue', () => {
                 model_parameters: { reasoning_effort: 'high' }
             });
             expect(generateBody.model).not.toContain('gemini:');
+            const { createTurnModelPicker } = require('../../src/frontend/web/von_interface/static/js/components/turnModelPicker.js');
+            document.body.insertAdjacentHTML('beforeend', '<select id="temporaryModel"><option value="">Default</option></select><p id="temporaryStatus"></p><button id="temporaryClear"></button>');
+            const select = document.getElementById('temporaryModel');
+            const picker = createTurnModelPicker({ select,
+                status: document.getElementById('temporaryStatus'),
+                clearButton: document.getElementById('temporaryClear'),
+                loadModels: async provider => provider === 'openai' ? ['gpt-6-astra'] : [] });
+            await picker.load();
+            require(chatTabModulePath).__testOnly_setTurnModelPicker(picker);
+            select.value = JSON.stringify({ model: 'gpt-6-astra', model_provider: 'openai' });
+            select.dispatchEvent(new Event('change'));
+            document.getElementById('promptInput').value = 'Use stronger model once';
+            await sendMessage();
+            expect(generateBody).toMatchObject({ model: 'gpt-6-astra', model_provider: 'openai', model_parameters: {} });
+            expect(picker.peek()).toBeNull();
+            document.getElementById('promptInput').value = 'Use default again';
+            await sendMessage();
+            expect(generateBody).toMatchObject({ model: 'gemini-3.7-flash', model_provider: 'gemini', model_parameters: { reasoning_effort: 'high' } });
+            // A retained queue choice must survive later default changes.
+            await sendMessage({ fromQueue: true, promptOverride: 'Queued stronger turn', sessionId: 'session-1',
+                executionEnvelope: { model: 'gpt-6-astra', model_provider: 'openai', model_parameters: {} } });
+            expect(generateBody).toMatchObject({ model: 'gpt-6-astra', model_provider: 'openai', model_parameters: {} });
+            require(chatTabModulePath).__testOnly_setTurnModelPicker(null);
         } finally {
             localStorage.removeItem('von:localModelPreference');
             window.scrollTo = originalScrollTo;
@@ -267,8 +291,14 @@ describe('chat task queue', () => {
         expect(generateBodies).toHaveLength(1);
         expect(document.getElementById('sendButton').textContent).toBe('Queue Prompt');
 
+        const temporaryChoice = { model: 'gpt-6-astra', model_provider: 'openai', model_parameters: {} };
+        const picker = { peek: () => temporaryChoice, take: jest.fn(() => temporaryChoice), clear: jest.fn() };
+        require(chatTabModulePath).__testOnly_setTurnModelPicker(picker);
         promptInput.value = 'Second draft';
         await sendMessage();
+        expect(picker.take).toHaveBeenCalledTimes(1);
+        expect(queueBodies[1].execution_envelope).toMatchObject(temporaryChoice);
+        require(chatTabModulePath).__testOnly_setTurnModelPicker(null);
 
         const queuedEditor = document.querySelector('.chat-task-queue-edit');
         expect(queuedEditor).toBeTruthy();

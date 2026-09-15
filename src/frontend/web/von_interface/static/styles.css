@@ -19001,12 +19001,14 @@ html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-bu
     white-space: normal;
     text-align: left;
 }
-.composer-options-section label[for="dictationEngineSelect"] {
+.composer-options-section label[for="dictationEngineSelect"],
+.composer-options-section label[for="turnModelSelect"] {
     flex-basis: 100%;
     color: #475569;
     font-size: 0.8125rem;
 }
-.composer-options-section #dictationEngineSelect {
+.composer-options-section #dictationEngineSelect,
+.composer-options-section #turnModelSelect {
     width: 100%;
     min-width: 0;
     padding: 8px;
@@ -19021,7 +19023,8 @@ html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-bu
     box-sizing: border-box;
 }
 .composer-options-section .compact-speech-help,
-.composer-options-section #imageAttachmentHelp {
+.composer-options-section #imageAttachmentHelp,
+.composer-options-section #turnModelHelp {
     display: block;
     flex-basis: 100%;
     margin: 0;
@@ -19043,3 +19046,14 @@ html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-bu
     }
     .composer-options-section { padding: 12px; }
 }
+
+.chat-composer > #turnModelStatus {
+    grid-column: 1 / -1;
+    flex-basis: 100%;
+    margin: 0;
+    font-size: 0.875rem;
+    color: #334155;
+    overflow-wrap: anywhere;
+}
+.chat-composer > #clearTurnModelButton { grid-column: 1 / -1; }
+#turnModelStatus[hidden], #clearTurnModelButton[hidden] { display: none !important; }
