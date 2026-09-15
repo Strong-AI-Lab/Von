@@ -124,6 +124,23 @@ async function bounds(page, selector) {
                 assert.equal((await bounds(page, '.chat-composer')).height, composer.height, 'menu must not expand desktop composer');
             }
             if (evidence) await page.screenshot({ path: path.join(evidence, `${profile.name}-menu.png`), fullPage: true });
+            // Each group remains reachable within the scrolling disclosure.
+            const options = page.locator('.composer-options-panel');
+            for (const id of ['dictationEngineSelect', 'ttsToggle', 'pasteImageButton', 'uploadFileButton', 'annotationToggle', 'resetButton']) {
+                const control = page.locator(`#${id}`);
+                await control.scrollIntoViewIfNeeded();
+                await control.click({ trial: true });
+                const box = await control.boundingBox();
+                const panelBox = await options.boundingBox();
+                assert(box.x >= panelBox.x && box.x + box.width <= panelBox.x + panelBox.width + 1, `${id} fits panel`);
+            }
+            await page.locator('#ttsToggle').check();
+            await expect(page.locator('#ttsToggle')).toBeChecked();
+            await page.locator('#dictationEngineSelect').selectOption('browser');
+            await expect(page.locator('#dictationEngineSelect')).toHaveValue('browser');
+            await page.locator('#dictationEngineSelect').selectOption('recorded');
+            await page.locator('#resetButton').scrollIntoViewIfNeeded();
+            if (evidence) await page.screenshot({ path: path.join(evidence, `${profile.name}-menu-bottom.png`), fullPage: true });
             await summary.focus();
             await page.keyboard.press('Space');
             await expect(page.locator('.chat-composer-more-actions')).not.toHaveAttribute('open', '');
