@@ -248,6 +248,14 @@
         <details class="chat-composer-more-actions">
           <summary title="More actions"><span class="composer-more-label">More actions</span><span class="composer-more-icon" aria-hidden="true">⋯</span><span class="composer-add-icon" aria-hidden="true">+</span></summary>
           <div class="button-row composer-options-panel">
+            <section class="composer-options-section" aria-labelledby="composerModelHeading">
+              <h3 id="composerModelHeading">Model for next turn</h3>
+              <label for="turnModelSelect">Temporary model</label>
+              <select id="turnModelSelect" aria-describedby="turnModelHelp turnModelStatus">
+                <option value="">Use default model</option>
+              </select>
+              <p id="turnModelHelp">Choose a stronger or faster model for your next message only. Sending or queueing it restores the default for future turns.</p>
+            </section>
             <section class="composer-options-section" aria-labelledby="composerSpeechHeading">
               <h3 id="composerSpeechHeading">Voice &amp; dictation</h3>
               <div class="composer-speech-actions">
@@ -299,6 +307,8 @@
           </div>
         </details>
       </div>
+        <p id="turnModelStatus" role="status" hidden></p>
+        <button id="clearTurnModelButton" class="btn btn-secondary" type="button" hidden>Use default model</button>
       <p id="voiceConversationStatus" class="speech-settings-note" role="status" aria-live="polite"></p>
       <p id="dictationStatus" class="speech-settings-note" role="status" aria-live="polite"></p>
     </div>

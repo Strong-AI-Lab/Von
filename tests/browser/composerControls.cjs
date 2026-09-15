@@ -116,7 +116,7 @@ async function bounds(page, selector) {
             await page.keyboard.press('Enter');
             await expect(page.locator('.chat-composer-more-actions')).toHaveAttribute('open', '');
             await page.keyboard.press('Tab');
-            if (profile.desktop) await expect(page.getByRole('button', { name: 'Start voice', exact: true })).toBeFocused();
+            if (profile.desktop) await expect(page.locator('#turnModelSelect')).toBeFocused();
             await expect(page.getByRole('button', { name: 'Upload File', exact: true })).toBeVisible();
             if (profile.desktop) {
                 const panel = await bounds(page, '.chat-composer-more-actions>.button-row');
@@ -124,6 +124,32 @@ async function bounds(page, selector) {
                 assert.equal((await bounds(page, '.chat-composer')).height, composer.height, 'menu must not expand desktop composer');
             }
             if (evidence) await page.screenshot({ path: path.join(evidence, `${profile.name}-menu.png`), fullPage: true });
+            await page.evaluate(async () => {
+                const { createTurnModelPicker } = await import('/static/js/components/turnModelPicker.js');
+                window.fixtureModelPicker = createTurnModelPicker({
+                    select: document.querySelector('#turnModelSelect'), status: document.querySelector('#turnModelStatus'),
+                    clearButton: document.querySelector('#clearTurnModelButton'),
+                    loadModels: async provider => provider === 'openai' ? ['gpt-6-astra', 'gpt-5.6-luna'] : []
+                });
+                await window.fixtureModelPicker.load();
+            });
+            for (const model of ['gpt-6-astra', 'gpt-5.6-luna']) {
+                await page.locator('#turnModelSelect').selectOption({ label: model });
+                // The temporary state must remain visible with the menu closed.
+                await summary.click();
+                await expect(page.locator('#turnModelStatus')).toBeVisible();
+                await expect(page.locator('#turnModelStatus')).toContainText(`Next turn only: ${model}`);
+                const notice = await bounds(page, '#turnModelStatus');
+                assert(notice.width >= Math.min(280, profile.width - 40), 'temporary notice has a readable full row');
+                assert(notice.height < 100, 'temporary notice remains compact');
+                await page.locator('#clearTurnModelButton').click({ trial: true });
+                if (evidence) await page.screenshot({ path: path.join(evidence, `${profile.name}-${model}-temporary.png`) });
+                const request = await page.evaluate(() => window.fixtureModelPicker.take());
+                assert.equal(request.model, model);
+                assert.equal(await page.evaluate(() => window.fixtureModelPicker.take()), null);
+                await expect(page.locator('#turnModelStatus')).toBeHidden();
+                await summary.click();
+            }
             // Each group remains reachable within the scrolling disclosure.
             const options = page.locator('.composer-options-panel');
             for (const id of ['dictationEngineSelect', 'ttsToggle', 'pasteImageButton', 'uploadFileButton', 'annotationToggle', 'resetButton']) {
