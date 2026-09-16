@@ -2,7 +2,7 @@
 // API responses, navigation history, health payloads, credentials or uploaded files.
 const CACHE = 'von-outage-v1';
 const STATIC_ROOT = '/static/';
-const ASSETS = ['/static/outage/offline.html', '/static/outage/offline.js', '/static/outage/status.js', '/static/outage/outage.css'];
+const ASSETS = ['/static/outage/offline.html', '/static/outage/offline.js', '/static/outage/status.js', '/static/outage/outage.css', '/static/outage/health.js'];
 self.addEventListener('install', event => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE);

@@ -1,5 +1,6 @@
 jest.mock('../workflowStudioAccess.js', () => ({ canUseWorkflowStudio: jest.fn(() => true) }));
 import {
+    retryConversationReadsAfterConnectionRecovery,
     __testOnly_buildThinkingProgressPresentation,
     __testOnly_buildThinkingCardProgressViewModel,
     __testOnly_buildRetainedThinkingCardRequestFromDebugData,
@@ -2729,6 +2730,36 @@ describe('loadChatHistory degraded handling', () => {
         delete global.fetch;
         __testOnly_resetHistoryUiState();
         __testOnly_setActiveChatSession(null, null);
+    });
+
+    test('connection recovery retries failed reads for the same conversation without altering the draft or sending', async () => {
+        document.body.insertAdjacentHTML('beforeend', '<textarea id="promptInput">Keep this unsent text</textarea><div id="chatSessionTabs"></div>');
+        let available = false;
+        global.fetch = jest.fn(async (url) => {
+            if (!available) throw new TypeError('Failed to fetch');
+            if (url.startsWith('/von/history/sessions')) return { ok: true, json: async () => ({
+                sessions: [{ session_id: 'session-1', session_name: 'Session 1', message_count: 1 }],
+                active_session_id: 'session-1'
+            }) };
+            if (url.startsWith('/von/history?')) return { ok: true, json: async () => ({
+                history: [{ role: 'user', content: 'Recovered conversation' }],
+                segments_returned: 1, total_segments: 1
+            }) };
+            return { ok: true, json: async () => ({}) };
+        });
+        expect(await __testOnly_loadChatHistory()).toBe(false);
+        available = true;
+        await retryConversationReadsAfterConnectionRecovery();
+        expect(document.getElementById('scrollableField').textContent).toContain('Recovered conversation');
+        expect(document.getElementById('promptInput').value).toBe('Keep this unsent text');
+        expect(fetch.mock.calls.some(([url]) => url.startsWith('/von/history/sessions'))).toBe(true);
+        const historyReads = fetch.mock.calls.filter(([url]) => url.startsWith('/von/history?'));
+        expect(historyReads).toHaveLength(2);
+        expect(historyReads.every(([url]) => new URL(url, 'http://localhost').searchParams.get('session_id') === 'session-1')).toBe(true);
+        expect(fetch.mock.calls.every(([, options]) => !options?.method || options.method === 'GET')).toBe(true);
+        // Repeated successful health checks must not replace a successfully loaded transcript.
+        await retryConversationReadsAfterConnectionRecovery();
+        expect(fetch.mock.calls.filter(([url]) => url.startsWith('/von/history?'))).toHaveLength(2);
     });
 
     test('preserves rendered history and surfaces a banner when the backend reports degraded history', async () => {
