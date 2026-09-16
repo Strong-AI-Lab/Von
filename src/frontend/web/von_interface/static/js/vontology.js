@@ -3237,6 +3237,7 @@ let __vontologySearchState = {
 // JVNAUTOSCI-550 additions: queue selections before tree ready & guard init
 let __vontologyTreeReady = false;
 const __pendingTreeSelections = [];
+const __searchContentTypes = new Set(['conversations', 'concepts', 'tasks']);
 let __searchUiInitialised = false;
 let __conversationRecoveryInitialised = false;
 let __conversationRecoveryCountAbortController = null;
@@ -3384,6 +3385,27 @@ export function setupVontologySearchUI() {
     await performVontologySearch(q);
   }, 180);
 
+  const contentTypes = document.getElementById('searchContentTypes');
+  contentTypes?.addEventListener('change', (event) => {
+    const checkbox = event.target;
+    if (!checkbox.matches('input[type="checkbox"]')) return;
+    if (checkbox.checked) __searchContentTypes.add(checkbox.value);
+    else __searchContentTypes.delete(checkbox.value);
+    const count = __searchContentTypes.size;
+    contentTypes.classList.toggle('is-filtered', count !== 3);
+    contentTypes.querySelector('#searchContentTypesCount').textContent = count === 3 ? 'All' : `${count}/3`;
+    contentTypes.querySelector('summary').setAttribute('aria-label',
+      `Search content types: ${count === 3 ? 'all selected' : `${count} of 3 selected`}`);
+    if (input.value.trim()) void performVontologySearch(input.value);
+    else clearSearchResults({ invalidate: true });
+  });
+  contentTypes?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    contentTypes.open = false;
+    contentTypes.querySelector('summary').focus();
+  });
+
   // Input handlers
   const handleInput = () => {
     if (!input.value.trim()) {
@@ -3450,6 +3472,8 @@ export function setupVontologySearchUI() {
   // Click outside to close
   document.addEventListener('click', (e) => {
     const recoveryButton = document.getElementById('conversationRecoveryButton');
+    if (contentTypes?.contains(e.target)) return;
+    if (contentTypes) contentTypes.open = false;
     if (!results.contains(e.target) && e.target !== input && !recoveryButton?.contains(e.target)) {
       clearSearchResults({ invalidate: true });
       setExpanded(false);
@@ -3622,7 +3646,7 @@ export async function performVontologySearch(q) {
   setRecoveryButtonPressed(false);
   renderSearchResults();
 
-  const conceptTask = fetchConceptSearchItems(trimmedQuery, abortController.signal)
+  const conceptTask = !__searchContentTypes.has('concepts') ? Promise.resolve() : fetchConceptSearchItems(trimmedQuery, abortController.signal)
     .then(conceptItems => {
       if (!isCurrentUnifiedSearchRequest(requestGeneration)) return;
       __vontologySearchState.concepts = {
@@ -3645,7 +3669,7 @@ export async function performVontologySearch(q) {
       };
       renderSearchResults();
     });
-  const conversationTask = fetchConversationSearchPage(trimmedQuery, { signal: abortController.signal })
+  const conversationTask = !__searchContentTypes.has('conversations') ? Promise.resolve() : fetchConversationSearchPage(trimmedQuery, { signal: abortController.signal })
     .then(data => {
       if (!isCurrentUnifiedSearchRequest(requestGeneration)) return;
       const conversationItems = Array.isArray(data?.results) ? data.results : [];
@@ -3670,7 +3694,8 @@ export async function performVontologySearch(q) {
       };
       renderSearchResults();
     });
-  const taskSearch = loadTaskSearchResults({ requestGeneration, signal: abortController.signal });
+  const taskSearch = __searchContentTypes.has('tasks')
+    ? loadTaskSearchResults({ requestGeneration, signal: abortController.signal }) : Promise.resolve();
   await Promise.all([conceptTask, conversationTask, taskSearch]);
 }
 
@@ -3811,9 +3836,9 @@ function normaliseConversationSearchItem(item) {
 
 function getOrderedSearchGroups() {
   if (__vontologySearchState.mode === 'recovery') return ['conversations'];
-  return isConversationWorkspaceActive()
+  return (isConversationWorkspaceActive()
     ? ['conversations', 'concepts', 'tasks']
-    : ['concepts', 'tasks', 'conversations'];
+    : ['concepts', 'tasks', 'conversations']).filter(key => __searchContentTypes.has(key));
 }
 
 function rebuildSearchKeyboardItems() {
@@ -3989,6 +4014,9 @@ function renderSearchResults() {
     return;
   }
 
+  if (__vontologySearchState.mode === 'search' && !__searchContentTypes.size) {
+    results.appendChild(createSearchProviderNotice('Select at least one content type to search.', 'is-empty'));
+  }
   const keyboardIndexByKey = new Map(
     __vontologySearchState.items.map((item, index) => [`${item.searchType}:${item.id}`, index])
   );
