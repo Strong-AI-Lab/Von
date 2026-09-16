@@ -19080,3 +19080,39 @@ html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-bu
 }
 .chat-composer > #clearTurnModelButton { grid-column: 1 / -1; }
 #turnModelStatus[hidden], #clearTurnModelButton[hidden] { display: none !important; }
+
+/* Content filters alongside the global search field. */
+.search-content-types { position: relative; flex: 0 0 auto; }
+.search-content-types summary {
+    cursor: pointer;
+    padding: 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #fff;
+    color: #475569;
+    font-size: 14px;
+    white-space: nowrap;
+}
+.search-content-types.is-filtered summary {
+    background: #fef3c7;
+    border-color: #b45309;
+    color: #78350f;
+}
+.search-content-types summary:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+.search-content-types-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 1400;
+    width: 210px;
+    margin: 0;
+    padding: 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #fff;
+    color: #1e293b;
+    box-shadow: 0 4px 12px #0002;
+}
+.search-content-types-menu legend { font-size: 13px; background: #fff; }
+.search-content-types-menu label { display: flex; align-items: center; gap: 8px; min-height: 36px; cursor: pointer; }
+.search-content-types-menu input { margin: 0; width: auto; }
