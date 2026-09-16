@@ -1,7 +1,11 @@
+import { createDictationController } from '../dictation.js';
+import { createMessageDraftControls, SEND_ICON as SEND_MESSAGE_ICON } from './conversationDraftControls.js';
 import { initialiseConversationActions } from './conversationActions.js';
 import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './conversationNavigation.js';
 import { bindAttachmentComposer, imageItems, imagesBlocked, renderImageAttachments, removeSentAttachments } from '../utils/conversationImages.js';
 import { getWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
+const messageDictation = new Map();
+const messageHistoryCursors = new Map();
 let refreshReplyAttachments = () => {};
 let refreshNewAttachments = () => {};
 const attachmentSignatures = new Map();
@@ -15,7 +19,7 @@ function attachmentDraftChanged(scope) {
 function attachmentScope(scope) {
     return `messages:${scope}:${scope === 'reply' ? (exchangeScope() || _currentConversationUserId) : readSessionActorConceptId()}`;
 }
-import { resizeCompactDraft, shouldSubmitComposerKey } from './compactComposer.js';
+import { initialiseConversationDraft, navigateConversationDraftHistory, resizeConversationDraft as resizeCompactDraft, setConversationDraft, normaliseVontologyIdsForBackend } from './conversationDraft.js';
 import { initializeConceptAutocomplete } from './conceptAutocomplete.js';
 import { simpleMarkdownToHtml } from '../markdownUtils.js';
 import { profileButton, participantAvatar } from './participantProfile.js';
@@ -36,9 +40,6 @@ import {
     clearRecommendationReviewResults,
     renderRecommendationReviewPayload,
 } from './paperRecommendationUi.js';
-
-// Match the conversation composer’s send icon; Messages retains direct delivery semantics.
-const SEND_MESSAGE_ICON = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-7 7 7-7 7 7" /></svg>';
 
 // Message panel state
 let _messagesContainer = null;
@@ -71,6 +72,8 @@ function exchangeScope(row = _exchange) {
 }
 
 export function resetMessagePanelContext() {
+    for (const controller of messageDictation.values()) controller.cancel();
+    messageHistoryCursors.clear();
     clearReplyContext();
     const input = _messagesContainer?.querySelector('#messageInput');
     if (_exchange && input) _exchangeDrafts.set(exchangeScope(), input.value);
@@ -108,7 +111,7 @@ export async function openMessageExchange(row) {
     }
     const input = _messagesContainer?.querySelector('#messageInput');
     if (input) {
-        input.value = _exchangeDrafts.get(exchangeScope()) || '';
+        setConversationDraft(input, _exchangeDrafts.get(exchangeScope()) || '');
         resizeCompactDraft(input);
         input.placeholder = `Reply to ${row.session_name}`;
     }
@@ -392,6 +395,8 @@ function resetMessagesViewportPosition() {
  * Render the messages tab content structure.
  */
 function renderMessagesTabContent() {
+    for (const controller of messageDictation.values()) controller.dispose();
+    messageDictation.clear();
     if (!_messagesContainer) return;
 
     syncVisibleReplyDeliveryAttempt();
@@ -491,6 +496,24 @@ function renderMessagesTabContent() {
     _replySendFailureState = null;
     _newMessageSendFailureState = null;
 
+    for (const [scope, root, input, sendButton] of [
+        [COMPOSE_SCOPE_REPLY, _messagesContainer.querySelector('#messageComposeArea'), _messagesContainer.querySelector('#messageInput'), _messagesContainer.querySelector('#sendMessageBtn')],
+        [COMPOSE_SCOPE_NEW_MESSAGE, _messagesContainer.querySelector('.message-modal-body'), _messagesContainer.querySelector('#newMessageContent'), _messagesContainer.querySelector('#sendNewMessage')]
+    ]) {
+        const controls = createMessageDraftControls(root, input, sendButton);
+        messageDictation.set(scope, createDictationController({
+            input, ...controls,
+            getContext: () => ({ key: JSON.stringify([attachmentScope(scope), readSessionActorConceptId(), getSessionScopedOrgId(),
+                scope === COMPOSE_SCOPE_NEW_MESSAGE ? _messagesContainer.querySelector('#newMessageRecipient')?.value : _currentConversationUserId]),
+                text: normaliseVontologyIdsForBackend(input.value), language: navigator.language }),
+            setValue: value => {
+                setConversationDraft(input, value);
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            },
+            fetchImpl: (url, options = {}) => fetch(url, { ...options, headers: { ...options.headers, [WINDOW_SESSION_HEADER]: getWindowSessionId() } })
+        }));
+    }
+
     // Attach event listeners
     attachMessagesEventListeners();
     initialiseConversationActions(_messagesContainer);
@@ -522,26 +545,30 @@ function attachMessagesEventListeners() {
         });
     }
 
-    // Send message button
-    const sendBtn = _messagesContainer.querySelector('#sendMessageBtn');
-    if (sendBtn) {
-        sendBtn.addEventListener('click', handleSendReply);
-    }
-
-    // Message input - send on Enter (Shift+Enter for newline)
-    const msgInput = _messagesContainer.querySelector('#messageInput');
-    if (msgInput) {
-        msgInput.addEventListener('keydown', (e) => {
-            if (shouldSubmitComposerKey(e)) {
-                e.preventDefault();
-                handleSendReply();
-            }
-        });
-        msgInput.addEventListener('input', syncVisibleReplyDeliveryAttempt);
-        resizeCompactDraft(msgInput);
-        window.addEventListener('resize', resizeVisibleReplyComposer);
-        window.visualViewport?.addEventListener('resize', resizeVisibleReplyComposer);
-    }
+    initialiseConversationDraft({
+        input: _messagesContainer.querySelector('#messageInput'),
+        sendButton: _messagesContainer.querySelector('#sendMessageBtn'),
+        onSubmit: handleSendReply,
+        onInput: syncVisibleReplyDeliveryAttempt,
+        onHistory: event => {
+            const history = _currentMessages.filter(message => message.relationships?.['#V#has_sender']?.[0] === _currentUserId)
+                .map(message => message.concept_data?.content_fallback || '').filter(Boolean);
+            const key = attachmentScope(COMPOSE_SCOPE_REPLY);
+            const next = navigateConversationDraftHistory(event, event.currentTarget, history,
+                messageHistoryCursors.get(key) ?? history.length);
+            if (!next) return;
+            messageHistoryCursors.set(key, next.cursor);
+            setConversationDraft(event.currentTarget, next.value);
+            event.currentTarget.setSelectionRange(next.value.length, next.value.length);
+            syncVisibleReplyDeliveryAttempt();
+        }
+    });
+    initialiseConversationDraft({
+        input: _messagesContainer.querySelector('#newMessageContent'),
+        sendButton: _messagesContainer.querySelector('#sendNewMessage'),
+        onSubmit: handleSendNewMessage,
+        onInput: syncVisibleNewMessageDeliveryAttempt
+    });
 
     const replyRecoverySelect = _messagesContainer.querySelector('#messageComposeRecoverySelect');
     if (replyRecoverySelect) {
@@ -562,11 +589,6 @@ function attachMessagesEventListeners() {
         cancelBtn.addEventListener('click', () => hideNewMessageModal());
     }
 
-    const sendNewBtn = _messagesContainer.querySelector('#sendNewMessage');
-    if (sendNewBtn) {
-        sendNewBtn.addEventListener('click', handleSendNewMessage);
-    }
-
     const newMessageRecoverySelect = _messagesContainer.querySelector('#newMessageRecoverySelect');
     if (newMessageRecoverySelect) {
         newMessageRecoverySelect.addEventListener('change', (event) => {
@@ -583,10 +605,6 @@ function attachMessagesEventListeners() {
         });
     }
 
-    const newMessageContent = _messagesContainer.querySelector('#newMessageContent');
-    if (newMessageContent) {
-        newMessageContent.addEventListener('input', syncVisibleNewMessageDeliveryAttempt);
-    }
 }
 
 /**
@@ -735,9 +753,10 @@ async function selectConversation(userId) {
     if (renderedSelection) {
         syncVisibleReplyDeliveryAttempt();
     }
+    messageDictation.get(COMPOSE_SCOPE_REPLY)?.cancel();
     const replyInput = _messagesContainer?.querySelector('#messageInput');
     if (replyInput) {
-        replyInput.value = '';
+        setConversationDraft(replyInput, '');
         resizeCompactDraft(replyInput);
     }
     // Detach the in-memory attempt while changing scope without deleting the
@@ -1124,7 +1143,7 @@ function clearReplyContext({ removeQuote = false } = {}) {
             showToast('The quote was edited. Remove it directly from your draft.', 'info');
             return false;
         }
-        input.value = input.value.slice(_replyContextPrefix.length);
+        setConversationDraft(input, input.value.slice(_replyContextPrefix.length));
         resizeCompactDraft(input);
         input.dispatchEvent(new Event('input', { bubbles: true }));
     }
@@ -1145,7 +1164,7 @@ function selectReplyContext(messageId) {
     const sender = message.relationships?.['#V#has_sender']?.[0] || '';
     const content = message.concept_data?.content_fallback || '[Message text unavailable]';
     _replyContextPrefix = `Replying to ${formatUserName(sender)} (${messageId}):\n${content.split(/\r?\n/u).map(line => `> ${line}`).join('\n')}\n\n`;
-    input.value = _replyContextPrefix + input.value;
+    setConversationDraft(input, _replyContextPrefix + input.value);
     const controls = document.createElement('div');
     controls.className = 'message-reply-context-controls';
     const note = document.createElement('span');
@@ -1358,13 +1377,9 @@ function renderComposePendingUi(scope) {
         if (composer) composer.dataset.hasAttachments = String(imageItems(attachmentScope(scope)).length > 0);
     }
     button.disabled = pending || imagesBlocked(attachmentScope(scope)) || (scope === COMPOSE_SCOPE_REPLY && _exchange?.other_participant_ids?.length > 1);
-    if (scope === COMPOSE_SCOPE_REPLY) {
-        button.innerHTML = pending ? '<span aria-hidden="true">…</span>' : SEND_MESSAGE_ICON;
-        button.setAttribute('aria-label', pending ? 'Sending message' : 'Send message');
-        button.title = pending ? 'Sending message' : 'Send message';
-    } else {
-        button.textContent = pending ? 'Sending…' : 'Send';
-    }
+    button.innerHTML = pending ? '<span aria-hidden="true">…</span>' : SEND_MESSAGE_ICON;
+    button.setAttribute('aria-label', pending ? 'Sending message' : 'Send message');
+    button.title = pending ? 'Sending message' : 'Send message';
     button.setAttribute('aria-busy', pending ? 'true' : 'false');
 
     if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {
@@ -1792,10 +1807,6 @@ function replaceVisibleDeliveryAttempt(scope, {
     });
 }
 
-function resizeVisibleReplyComposer() {
-    resizeCompactDraft(_messagesContainer?.querySelector('#messageInput'));
-}
-
 function syncVisibleReplyDeliveryAttempt() {
     const replyInput = _messagesContainer?.querySelector('#messageInput');
     if (!replyInput) return;
@@ -1931,7 +1942,7 @@ function restoreNewMessageDeliveryAttemptForCurrentScope() {
 
     _newMessageDeliveryAttempt = persistedAttempt;
     recipientInput.value = persistedAttempt.recipient;
-    contentInput.value = persistedAttempt.draft;
+    setConversationDraft(contentInput, persistedAttempt.draft);
     modal.classList.remove('hidden');
     setComposeFailureState(COMPOSE_SCOPE_NEW_MESSAGE, persistedAttempt.recoveryState);
     return true;
@@ -1962,7 +1973,7 @@ function restoreReplyDeliveryAttemptForCurrentScope() {
     }
 
     _replyDeliveryAttempt = persistedAttempt;
-    replyInput.value = persistedAttempt.draft;
+    setConversationDraft(replyInput, persistedAttempt.draft);
     resizeCompactDraft(replyInput);
     setComposeFailureState(COMPOSE_SCOPE_REPLY, persistedAttempt.recoveryState);
     return true;
@@ -2334,7 +2345,19 @@ function buildSendPayload({
 /**
  * Handle sending a reply in the current conversation.
  */
+const finishingDictation = new Set();
+async function finishMessageDictation(scope) {
+    if (finishingDictation.has(scope)) return false;
+    const controller = messageDictation.get(scope);
+    if (!controller?.hasPendingInput()) return true;
+    finishingDictation.add(scope);
+    try { return await controller.finish(); }
+    finally { finishingDictation.delete(scope); }
+}
+
 async function handleSendReply() {
+    if (messageDictation.get(COMPOSE_SCOPE_REPLY)?.hasPendingInput()
+        && !await finishMessageDictation(COMPOSE_SCOPE_REPLY)) return;
     if (isComposePending(COMPOSE_SCOPE_REPLY)) {
         return;
     }
@@ -2349,7 +2372,7 @@ async function handleSendReply() {
     if (!msgInput) return;
 
     const visibleDraft = msgInput.value;
-    const content = visibleDraft.trim();
+    const content = normaliseVontologyIdsForBackend(visibleDraft).trim();
     if (!content && !imageItems(attachmentScope(COMPOSE_SCOPE_REPLY)).length) {
         showToast('Please enter a message', 'warning');
         return;
@@ -2369,6 +2392,7 @@ async function handleSendReply() {
     const submittedConversationUserId = _currentConversationUserId;
     const submittedGeneration = _exchangeGeneration;
     const submittedAttachmentScope = attachmentScope(COMPOSE_SCOPE_REPLY);
+    messageHistoryCursors.delete(submittedAttachmentScope);
     setComposePending(COMPOSE_SCOPE_REPLY, true);
     try {
         const result = await postJsonDetailed('/api/messages/', payload);
@@ -2381,10 +2405,10 @@ async function handleSendReply() {
         const activeReplyInput = _messagesContainer?.querySelector('#messageInput');
         if (
             _currentConversationUserId === submittedConversationUserId
-            && activeReplyInput?.value.trim() === content
+            && activeReplyInput?.value === visibleDraft
         ) {
             clearReplyContext();
-            activeReplyInput.value = '';
+            setConversationDraft(activeReplyInput, '');
             resizeCompactDraft(activeReplyInput);
         }
         _exchangeDrafts.delete(exchangeScope());
@@ -2443,7 +2467,8 @@ function hideNewMessageModal({ force = false } = {}) {
         const recipientInput = modal.querySelector('#newMessageRecipient');
         const contentInput = modal.querySelector('#newMessageContent');
         if (recipientInput) recipientInput.value = '';
-        if (contentInput) contentInput.value = '';
+        messageDictation.get(COMPOSE_SCOPE_NEW_MESSAGE)?.cancel();
+        if (contentInput) setConversationDraft(contentInput, '');
         if (_newMessageDeliveryAttempt) {
             setDeliveryAttempt(COMPOSE_SCOPE_NEW_MESSAGE, null);
         }
@@ -2454,6 +2479,8 @@ function hideNewMessageModal({ force = false } = {}) {
  * Handle sending a new message from the modal.
  */
 async function handleSendNewMessage() {
+    if (messageDictation.get(COMPOSE_SCOPE_NEW_MESSAGE)?.hasPendingInput()
+        && !await finishMessageDictation(COMPOSE_SCOPE_NEW_MESSAGE)) return;
     if (isComposePending(COMPOSE_SCOPE_NEW_MESSAGE)) {
         return;
     }
@@ -2465,8 +2492,8 @@ async function handleSendNewMessage() {
 
     const visibleRecipient = recipientInput.value;
     const visibleDraft = contentInput.value;
-    const recipient = visibleRecipient.trim();
-    const content = visibleDraft.trim();
+    const recipient = normaliseVontologyIdsForBackend(visibleRecipient).trim();
+    const content = normaliseVontologyIdsForBackend(visibleDraft).trim();
 
     if (!recipient) {
         showToast('Please enter a recipient', 'warning');

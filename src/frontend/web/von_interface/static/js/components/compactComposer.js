@@ -28,7 +28,7 @@ export function resizeCompactDraft(input) {
     input.style.overflowY = input.scrollHeight > height ? 'auto' : 'hidden';
 }
 
-export function initialiseCompactChatComposer(composer, resizeDraft = resizeCompactDraft) {
+export function initialiseCompactChatComposer(composer, resizeDraft = resizeCompactDraft, elements = {}) {
     if (!composer || composer.dataset.compactBound) return;
     composer.dataset.compactBound = 'true';
     const menu = composer.querySelector('.chat-composer-more-actions');
@@ -80,19 +80,19 @@ export function initialiseCompactChatComposer(composer, resizeDraft = resizeComp
         if (menu.isConnected && isCompactComposer() && !event.composedPath().includes(menu)) dismiss();
     });
     // Keyboard activation also dismisses before the existing submission handler.
-    composer.querySelector('#sendButton')?.addEventListener('click', () => {
+    (elements.send || composer.querySelector('#sendButton'))?.addEventListener('click', () => {
         if (isCompactComposer()) dismiss();
     }, { capture: true });
     const active = document.createElement('div');
     active.className = 'compact-composer-active';
     composer.append(active);
-    const input = composer.querySelector('#promptInput');
-    const mic = composer.querySelector('#dictateButton');
-    const voice = composer.querySelector('#voiceConversationButton');
-    const status = composer.querySelector('#dictationStatus');
-    const voiceStatus = composer.querySelector('#voiceConversationStatus');
-    const cancel = composer.querySelector('#cancelDictationButton');
-    const retry = composer.querySelector('#retryDictationButton');
+    const input = elements.input || composer.querySelector('#promptInput');
+    const mic = elements.mic || composer.querySelector('#dictateButton');
+    const voice = elements.voice || composer.querySelector('#voiceConversationButton');
+    const status = elements.status || composer.querySelector('#dictationStatus');
+    const voiceStatus = elements.voiceStatus || composer.querySelector('#voiceConversationStatus');
+    const cancel = elements.cancel || composer.querySelector('#cancelDictationButton');
+    const retry = elements.retry || composer.querySelector('#retryDictationButton');
     const homes = new Map([mic, voice, status, voiceStatus, cancel, retry].filter(Boolean).map(node => {
         const home = document.createComment(`desktop ${node.id}`);
         node.before(home);
@@ -139,7 +139,7 @@ export function initialiseCompactChatComposer(composer, resizeDraft = resizeComp
         }
     });
     menu.addEventListener('click', event => {
-        if (isCompactComposer() && event.target.closest('#dictateButton, #voiceConversationButton, #uploadFileButton')) {
+        if (isCompactComposer() && event.target.closest('#dictateButton, .conversation-dictate-button, #voiceConversationButton, #uploadFileButton')) {
             // Recording controls become visible on the controller's next render.
             dismiss(true);
         }

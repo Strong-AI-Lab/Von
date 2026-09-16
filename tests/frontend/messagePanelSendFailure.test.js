@@ -466,7 +466,7 @@ describe('message panel send failure recovery', () => {
 
         expect(postJsonDetailed).toHaveBeenCalledTimes(1);
         expect(sendButton.disabled).toBe(true);
-        expect(sendButton.textContent).toBe('Sending…');
+        expect(sendButton.getAttribute('aria-label')).toBe('Sending message');
         expect(recipientInput.disabled).toBe(true);
         expect(contentInput.disabled).toBe(true);
         sendButton.click();
@@ -500,7 +500,7 @@ describe('message panel send failure recovery', () => {
         expect(recipientInput.value).toBe('user_alice');
         expect(contentInput.value).toBe('Changed draft');
         expect(sendButton.disabled).toBe(false);
-        expect(sendButton.textContent).toBe('Send');
+        expect(sendButton.getAttribute('aria-label')).toBe('Send message');
     });
 
     test('new-message retry restores its exact recipient, draft, and key across render and module reload', async () => {
