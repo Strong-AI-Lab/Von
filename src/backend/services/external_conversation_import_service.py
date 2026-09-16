@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 EXTERNAL_CONVERSATION_PACKAGE_SCHEMA_VERSION = "external_conversation_package.v1"
-EXTERNAL_CONVERSATION_PARSER_VERSION = "2026-08-29.2"
+EXTERNAL_CONVERSATION_PARSER_VERSION = "2026-09-16.1"
 EXTERNAL_CONVERSATION_ORIGIN_KIND = "external_conversation_import"
 EXTERNAL_CONVERSATION_LINEAGE_SCHEMA_VERSION = "conversation_lineage.v1"
 MAX_EXTERNAL_CONVERSATION_SOURCE_BYTES = 32 * 1024 * 1024
@@ -504,6 +504,10 @@ def _parse_codex_records(
         locator = f"line:{record.get('__line_number')}"
         timestamp = _iso_timestamp(record.get("timestamp") or payload.get("timestamp"))
         if envelope_type == "session_meta":
+            # Forked rollouts start with their own metadata, then may include
+            # copied ancestor metadata. The ancestor is not this conversation.
+            if session_id is not None:
+                continue
             session_id = (
                 _clean_text(payload.get("id"), maximum=240)
                 or _clean_text(payload.get("session_id"), maximum=240)
@@ -835,6 +839,23 @@ def _parse_gemini_records(
     session_id = _clean_text(state.get("sessionId"), maximum=240) or (
         f"gemini-{source_sha256[:24]}"
     )
+    identity_report: dict[str, Any] = {}
+    if session_id == "a2a-server":
+        # Gemini's A2A server reuses this placeholder across distinct runs.
+        # startTime stays fixed as a journal grows; lastUpdated/content do not.
+        started_at = _iso_timestamp(state.get("startTime"))
+        identity_suffix = (
+            hashlib.sha256(started_at.encode("utf-8")).hexdigest()[:24]
+            if started_at
+            else source_sha256[:24]
+        )
+        identity_report = {
+            "source_session_id": session_id,
+            "session_identity_basis": (
+                "session_id_and_start_time" if started_at else "source_sha256"
+            ),
+        }
+        session_id = f"{session_id}-{identity_suffix}"
     messages = state.get("messages")
     messages = messages if isinstance(messages, list) else []
     events: list[ExternalConversationEvent] = []
@@ -899,6 +920,7 @@ def _parse_gemini_records(
             "assistant_message_count": assistant_count,
             "source_has_no_assistant_messages": assistant_count == 0,
             "branch_information_present": False,
+            **identity_report,
         },
     )
 

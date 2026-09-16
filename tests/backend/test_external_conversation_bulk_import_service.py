@@ -84,6 +84,24 @@ def test_discovery_is_allowlisted_and_preview_does_not_persist(
     assert "local_path" not in json.dumps(preview)
 
 
+def test_default_codex_discovery_includes_archived_conversations(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.delenv("VON_CODEX_CONVERSATION_ROOT", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    for directory in ("sessions", "archived_sessions"):
+        root = tmp_path / ".codex" / directory
+        root.mkdir(parents=True)
+        _codex_source(root / "conversation.jsonl")
+    sources, warnings = bulk.discover_local_conversations(["codex"])
+    assert {source.root_id for source in sources} == {
+        "codex:sessions",
+        "codex:archived",
+    }
+    assert len(sources) == 2
+    assert not warnings
+
+
 def test_batch_pause_resume_and_expired_lease_recovery(monkeypatch, tmp_path: Path):
     batches, items = _collections(monkeypatch)
     root = tmp_path / "codex"
