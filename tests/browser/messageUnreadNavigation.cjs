@@ -46,6 +46,13 @@ const server = http.createServer(async (req, res) => {
         };
         return;
     }
+    if (req.url.startsWith('/api/messages/conversation-catalogue')) {
+        return res.end(JSON.stringify({ conversations: ['bob', 'carol'].map(other => ({
+            session_id: `messages:#V#${other}`, source_kind: 'message_exchange', viewer_id: '#V#alice',
+            participant_ids: ['#V#alice', `#V#${other}`], other_participant_ids: [`#V#${other}`],
+            shared_unread_count: readMessages.has(`${other}-final`) ? 0 : 1
+        })) }));
+    }
     if (req.url === '/api/messages/exchange') {
         let body = ''; for await (const chunk of req) body += chunk;
         const { before, participant_ids } = JSON.parse(body); cursors.push(before);
@@ -172,7 +179,12 @@ const server = http.createServer(async (req, res) => {
                     participant_ids: ['#V#alice', other], other_participant_ids: [other],
                     session_name: other, shared_unread_count: count });
             }, { other, count });
-            await open('#V#bob', 1);
+            await reading.evaluate(async () => {
+                const { refreshMessageCatalogue } = await import('/static/js/components/conversationCatalogue.js');
+                document.addEventListener('von:conversation-contribution', () => void refreshMessageCatalogue());
+            });
+            // An outdated opening count must converge with the tile after a read.
+            await open('#V#bob', 2);
             const unreadButton = reading.locator('.message-jump-unread');
             await expect(unreadButton).toBeVisible();
             await expect.poll(() => Boolean(pendingRead)).toBe(true);
@@ -188,6 +200,7 @@ const server = http.createServer(async (req, res) => {
             pendingRead(); pendingRead = null;
             await expect(unreadButton).toBeHidden();
             results[results.length - 1].zeroUnreadHiddenWithOlderHistory = true;
+            results[results.length - 1].postReadCatalogueReconciled = true;
             results[results.length - 1].switchAndReopenCorrect = true;
             await reading.close();
         }
