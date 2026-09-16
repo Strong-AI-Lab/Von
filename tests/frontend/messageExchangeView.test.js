@@ -190,17 +190,17 @@ test('refresh and pagination preserve scroll position and unread navigation with
     api.postJson.mockResolvedValueOnce(updated);
     await panel.refreshOpenMessageExchange();
     expect(content.scrollTop).toBe(25);
-    const first = content.querySelector('.is-unread');
-    first.scrollIntoView = jest.fn();
-    document.querySelector('.message-jump-unread').click();
-    expect(first.scrollIntoView).toHaveBeenCalledWith({ block: 'start' });
-    expect(document.activeElement).toBe(first);
     const older = response('old'); older.messages[0].created_at = '2026-09-10T12:00:00Z';
     api.postJson.mockResolvedValueOnce(older);
     [...content.querySelectorAll('button')].find(b => b.textContent === 'Load earlier messages').click();
     await flush();
     expect(content.scrollTop).toBe(25);
     expect(content.querySelectorAll('[data-contribution-id]')).toHaveLength(3);
+    const first = content.querySelector('.is-unread');
+    first.scrollIntoView = jest.fn();
+    document.querySelector('.message-jump-unread').click();
+    expect(first.scrollIntoView).toHaveBeenCalledWith({ block: 'start' });
+    expect(document.activeElement).toBe(first);
     expect(api.postJson.mock.calls.some(([url]) => url.includes('/read/'))).toBe(false);
 });
 
@@ -217,29 +217,59 @@ test('the visible-read observer excludes the fixed composer overlap', async () =
     expect(global.IntersectionObserver.mock.calls[1][1].rootMargin).toBe('0px 0px -150px 0px');
 });
 
-function page(ids, before = null, unread = []) {
+function page(ids, before = null, unread = [], firstDay = 1) {
     return { current_user_id: '#V#alice', before, messages: ids.map((id, index) => ({
-        ...response(id).messages[0], created_at: `2026-09-${String(index + 1).padStart(2, '0')}T12:00:00Z`,
+        ...response(id).messages[0], created_at: `2026-09-${String(index + firstDay).padStart(2, '0')}T12:00:00Z`,
         relationships: { '#V#has_sender': ['#V#bob'], '#V#has_recipient': ['#V#alice'] },
         concept_data: { content_fallback: id, read_by: unread.includes(id) ? [] : ['#V#alice'] }
     })) };
 }
 
-test('unloaded unread count exposes navigation that pages backwards to the most recent unread', async () => {
+test('unloaded unread count exposes navigation that pages past loaded unread messages to the first unread', async () => {
     HTMLElement.prototype.scrollIntoView = jest.fn();
     const api = require(base + 'apiService.js');
-    api.postJson.mockResolvedValueOnce(page(['latest'], 'page2'))
-        .mockResolvedValueOnce(page(['middle'], 'page3'))
-        .mockResolvedValueOnce(page(['old-unread', 'recent-unread'], 'page4', ['old-unread', 'recent-unread']));
+    api.postJson.mockResolvedValueOnce(page(['latest'], 'page2', [], 15))
+        .mockResolvedValueOnce(page(['middle'], 'page3', [], 12))
+        .mockResolvedValueOnce(page(['old-unread', 'recent-unread'], 'page4', ['old-unread', 'recent-unread'], 9))
+        .mockResolvedValueOnce(page(['first-unread'], null, ['first-unread']));
     await require(base + 'components/messagePanel.js').openMessageExchange({ ...row('#V#bob'), shared_unread_count: 2 });
     const jump = document.querySelector('.message-jump-unread');
     expect(jump.hidden).toBe(false);
-    expect(jump.textContent).toBe('Jump to most recent unread');
+    expect(jump.textContent).toBe('Jump to first unread');
     jump.click(); await flush();
-    expect(document.activeElement.dataset.contributionId).toBe('recent-unread');
-    expect(api.postJson.mock.calls.map(([, body]) => body.before)).toEqual([null, 'page2', 'page3']);
-    expect(document.querySelectorAll('.is-unread')).toHaveLength(2);
+    expect(document.activeElement.dataset.contributionId).toBe('first-unread');
+    expect(api.postJson.mock.calls.map(([, body]) => body.before)).toEqual([null, 'page2', 'page3', 'page4']);
+    expect(document.querySelectorAll('.is-unread')).toHaveLength(3);
     expect(jump.disabled).toBe(false);
+});
+
+test('already loaded unread does not skip an older unread separated by a read page', async () => {
+    HTMLElement.prototype.scrollIntoView = jest.fn();
+    const observers = mockReadObserver();
+    const api = require(base + 'apiService.js');
+    const latest = page(['recent-unread'], 'read-gap', ['recent-unread'], 15);
+    api.postJson.mockResolvedValueOnce(latest)
+        .mockResolvedValueOnce(page(['read-gap'], 'oldest', [], 10))
+        .mockResolvedValueOnce(page(['first-unread'], null, ['first-unread']));
+    // A stale low count must not cause an early stop.
+    await require(base + 'components/messagePanel.js').openMessageExchange({ ...row('#V#bob'), shared_unread_count: 1 });
+    document.querySelector('.message-jump-unread').click(); await flush();
+    expect(document.activeElement.dataset.contributionId).toBe('first-unread');
+    expect(api.postJson.mock.calls.map(([, body]) => body.before)).toEqual([null, 'read-gap', 'oldest']);
+    expect(observers[0].disconnect).toHaveBeenCalled();
+    expect(observers).toHaveLength(2); // Re-arm only after the final jump.
+    expect(document.querySelectorAll('.is-unread')).toHaveLength(2);
+});
+
+test('a fully loaded conversation focuses its first unread without a request', async () => {
+    HTMLElement.prototype.scrollIntoView = jest.fn();
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValueOnce(page(['read', 'first', 'read-gap', 'last'], null, ['first', 'last']));
+    await require(base + 'components/messagePanel.js').openMessageExchange(row('#V#bob'));
+    document.querySelector('.message-jump-unread').click();
+    expect(document.activeElement.dataset.contributionId).toBe('first');
+    expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledWith({ block: 'start' });
+    expect(api.postJson).toHaveBeenCalledTimes(1);
 });
 
 test('failed unread pagination retains the action for retry', async () => {

@@ -166,7 +166,7 @@ function updateUnreadMarkers() {
     updateMessageNavigation();
 }
 
-async function jumpToMostRecentUnread() {
+async function jumpToFirstUnread() {
     const generation = _exchangeGeneration;
     const org = getSessionScopedOrgId();
     if (_unreadJumpGeneration === generation || _isLoading) return;
@@ -179,15 +179,14 @@ async function jumpToMostRecentUnread() {
     updateMessageNavigation();
     try {
         while (stillCurrent()) {
-            const targets = content?.querySelectorAll('.is-unread[data-contribution-id]');
-            const target = targets?.[targets.length - 1];
-            if (target) {
-                target.scrollIntoView({ block: 'start' });
-                focusConversationTarget(target);
-                return;
-            }
+            // Read markers can have gaps, and the catalogue count can be stale.
+            // Exhaust earlier pages before choosing the chronological first unread.
             if (!_olderCursor) {
-                showUnreadNavigationStatus('No unread messages remain in this conversation.');
+                const target = content?.querySelector('.is-unread[data-contribution-id]');
+                if (target) {
+                    target.scrollIntoView({ block: 'start' });
+                    focusConversationTarget(target);
+                } else showUnreadNavigationStatus('No unread messages remain in this conversation.');
                 return;
             }
             const cursor = _olderCursor;
@@ -228,7 +227,7 @@ function updateMessageNavigation() {
         const unread = document.createElement('button');
         unread.type = 'button';
         unread.className = 'message-jump-unread';
-        unread.onclick = () => void jumpToMostRecentUnread();
+        unread.onclick = () => void jumpToFirstUnread();
         const latest = createLatestMessageButton(() => {
             content.scrollTop = content.scrollHeight;
             focusConversationTarget(content.querySelector('.message-list')?.lastElementChild || content);
@@ -241,7 +240,7 @@ function updateMessageNavigation() {
     }
     const unread = navigation.querySelector('.message-jump-unread');
     const jumping = _unreadJumpGeneration === _exchangeGeneration;
-    unread.textContent = jumping ? 'Loading unread messages…' : 'Jump to most recent unread';
+    unread.textContent = jumping ? 'Loading unread messages…' : 'Jump to first unread';
     unread.disabled = jumping || _isLoading;
     unread.hidden = !jumping && !content.querySelector('.is-unread')
         && !(_olderCursor && _exchange?.shared_unread_count > 0);

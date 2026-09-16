@@ -39,7 +39,7 @@ const server = http.createServer(async (req, res) => {
         const { before } = JSON.parse(body); cursors.push(before);
         const initial = Array.from({ length: 20 }, (_, index) => message(`latest-${String(index).padStart(2, '0')}`, false, '13'));
         const result = !before ? { messages: background ? [...initial, message('Background unread', true, '14')] : initial, before: 'middle' }
-            : before === 'middle' ? { messages: Array.from({ length: 10 }, (_, index) => message(`middle-${index}`, false, '12')), before: 'older' }
+            : before === 'middle' ? { messages: Array.from({ length: 10 }, (_, index) => message(`middle-${index}`, index === 5, '12')), before: 'older' }
                 : { messages: [message('Earlier unread', true, '10'), message('Most recent unread', true, '11')], before: null };
         const finish = () => res.end(JSON.stringify({ ...result, current_user_id: '#V#alice' }));
         if (before || background) pendingPage = finish;
@@ -68,7 +68,7 @@ const server = http.createServer(async (req, res) => {
                 const { openMessageExchange } = await import('/static/js/components/messagePanel.js');
                 await openMessageExchange({ session_id: 'fixture', viewer_id: '#V#alice',
                     participant_ids: ['#V#alice', '#V#bob'], other_participant_ids: ['#V#bob'],
-                    session_name: 'Unread pagination fixture', shared_unread_count: 2 });
+                    session_name: 'Unread pagination fixture', shared_unread_count: 3 });
             });
             const content = page.locator('#messageViewContent');
             assert.equal(await content.evaluate(el => el.scrollTop), 0, 'default loading preserves the top');
@@ -106,7 +106,7 @@ const server = http.createServer(async (req, res) => {
                 const panel = await import('/static/js/components/messagePanel.js');
                 await panel.openMessageExchange({ session_id: 'fixture', viewer_id: '#V#alice',
                     participant_ids: ['#V#alice', '#V#bob'], other_participant_ids: ['#V#bob'],
-                    session_name: 'Unread pagination fixture', shared_unread_count: 2 });
+                    session_name: 'Unread pagination fixture', shared_unread_count: 3 });
             });
             cursors = [];
             await content.evaluate(el => { el.scrollTop = 450; });
@@ -117,7 +117,7 @@ const server = http.createServer(async (req, res) => {
             });
             const offset = () => page.locator(`[data-contribution-id="${anchor.id}"]`).evaluate(el =>
                 el.getBoundingClientRect().top - document.getElementById('messageViewContent').getBoundingClientRect().top);
-            await page.getByRole('button', { name: 'Jump to most recent unread', exact: true }).click();
+            await page.getByRole('button', { name: 'Jump to first unread', exact: true }).click();
             await expect.poll(() => Boolean(pendingPage)).toBe(true);
             assert.equal(await offset(), anchor.offset, 'pending go-to-unread preserves the visible message');
             pendingPage(); pendingPage = null;
@@ -127,17 +127,17 @@ const server = http.createServer(async (req, res) => {
             await expect(page.getByRole('button', { name: 'Loading unread messages…', exact: true })).toBeVisible();
             await page.screenshot({ path: path.join(evidence, `loading-${width}.png`) });
             pendingPage(); pendingPage = null;
-            const target = page.locator('[data-contribution-id="Most recent unread"]');
+            const target = page.locator('[data-contribution-id="Earlier unread"]');
             await expect(target).toBeFocused();
             await expect(target).toBeInViewport();
             assert.deepEqual(cursors, ['middle', 'older']);
+            await page.screenshot({ path: path.join(evidence, `unread-${width}.png`) });
             await send.click();
             await expect(input).toHaveValue('');
             assert.equal(sent.length, 1);
             assert.equal(sent[0].content, 'A reply from the up-arrow control.');
             assert.deepEqual(errors, []);
-            await page.screenshot({ path: path.join(evidence, `unread-${width}.png`) });
-            results.push({ width, cursors: [...cursors], sendArrow: true, sendTarget: box, sends: sent.length, labelledLatestNavigation: true, defaultTopPreserved: true, backgroundPosition: bottomPosition, intermediateAnchorOffset: anchor.offset, mostRecentUnreadFocused: true, targetInViewport: true });
+            results.push({ width, cursors: [...cursors], sendArrow: true, sendTarget: box, sends: sent.length, labelledLatestNavigation: true, defaultTopPreserved: true, backgroundPosition: bottomPosition, intermediateAnchorOffset: anchor.offset, firstUnreadFocused: true, targetInViewport: true });
             await page.close();
         }
         fs.writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ fixture: true, results }, null, 2));
