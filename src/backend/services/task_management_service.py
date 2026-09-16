@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..security.access_control import can_access_concept
+from .task_project_home_service import guard_task_write
 from ..security.visibility_predicates import (
     CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
     SPECIFIC_TO_ORG_PREDICATES_READ,
@@ -1307,6 +1308,7 @@ def _would_create_parent_cycle(
     return False
 
 
+@guard_task_write
 def create_task(
     title: str,
     description: str,
@@ -2265,6 +2267,18 @@ def update_task_status(
             f"Invalid status '{status}'. Must be one of: {VALID_TASK_STATUSES}"
         )
 
+    return _update_validated_task_status(
+        task_concept_id, status, actor_concept_id=actor_concept_id
+    )
+
+
+@guard_task_write
+def _update_validated_task_status(
+    task_concept_id: str,
+    status: str,
+    *,
+    actor_concept_id: str | None = None,
+) -> Dict[str, Any]:
     task_concept_id, doc = _get_task_doc(task_concept_id)
 
     existing_task = _build_task_response(doc)
@@ -2397,6 +2411,7 @@ def update_task_status(
     return updated_task
 
 
+@guard_task_write
 def assign_task(
     task_concept_id: str, assignee_concept_id: str, *, update_visibility: bool = True
 ) -> Dict[str, Any]:
@@ -3940,6 +3955,7 @@ def get_task_transitions(task_concept_id: str) -> Dict[str, Any]:
     }
 
 
+@guard_task_write
 def transition_task(
     task_concept_id: str,
     *,
@@ -4011,6 +4027,7 @@ def transition_task(
     }
 
 
+@guard_task_write
 def unassign_task(task_concept_id: str) -> Dict[str, Any]:
     task_concept_id, doc = _get_task_doc(task_concept_id)
     current_assignees = doc.get("relationships", {}).get(PREDICATE_HAS_ASSIGNEE, [])
@@ -4050,6 +4067,7 @@ def unassign_task(task_concept_id: str) -> Dict[str, Any]:
     return get_task(task_concept_id)
 
 
+@guard_task_write
 def set_task_parent(
     task_concept_id: str,
     parent_task_concept_id: str | None,
@@ -4130,6 +4148,7 @@ def set_task_parent(
     return get_task(task_concept_id)
 
 
+@guard_task_write
 def create_subtask(
     parent_task_concept_id: str,
     *,
@@ -4176,6 +4195,7 @@ def create_subtask(
     }
 
 
+@guard_task_write
 def set_task_epic(
     task_concept_id: str,
     epic_task_concept_id: str | None,
@@ -4233,6 +4253,7 @@ def set_task_epic(
     return get_task(task_concept_id)
 
 
+@guard_task_write
 def link_tasks(
     source_task_concept_id: str,
     target_task_concept_id: str,
@@ -4305,6 +4326,7 @@ def link_tasks(
     }
 
 
+@guard_task_write
 def unlink_tasks(
     source_task_concept_id: str,
     target_task_concept_id: str,
@@ -4375,6 +4397,7 @@ def unlink_tasks(
     }
 
 
+@guard_task_write
 def add_task_comment(
     task_concept_id: str,
     *,
@@ -4486,6 +4509,7 @@ def find_task_comment_by_effect_fingerprint(
     return None
 
 
+@guard_task_write
 def add_task_attachment_bytes(
     task_concept_id: str,
     *,
@@ -4559,6 +4583,7 @@ def add_task_attachment_bytes(
     )
 
 
+@guard_task_write
 def add_task_attachment(
     task_concept_id: str,
     *,
@@ -4690,6 +4715,7 @@ def list_task_attachments(
     }
 
 
+@guard_task_write
 def add_task_worklog(
     task_concept_id: str,
     *,
@@ -4742,6 +4768,7 @@ def add_task_worklog(
     return entry
 
 
+@guard_task_write
 def record_task_history_event(
     task_concept_id: str,
     *,
@@ -4825,6 +4852,7 @@ def get_task_history(
     }
 
 
+@guard_task_write
 def update_task_fields(
     task_concept_id: str,
     *,
@@ -5594,6 +5622,7 @@ def find_task_by_external_reference(
     return _build_task_response(doc)
 
 
+@guard_task_write
 def upsert_task_external_reference(
     task_concept_id: str,
     *,
@@ -5705,6 +5734,7 @@ def _task_doc_has_bulk_collection(
     )
 
 
+@guard_task_write
 def backfill_jira_migration_bulk_task_collections(
     *,
     dry_run: bool = True,
@@ -5837,6 +5867,7 @@ def backfill_jira_migration_bulk_task_collections(
     }
 
 
+@guard_task_write
 def bulk_update_tasks(
     task_concept_ids: Iterable[str],
     *,
@@ -5890,6 +5921,7 @@ def bulk_update_tasks(
     }
 
 
+@guard_task_write
 def delete_task(task_concept_id: str) -> bool:
     """Delete (archive) a task.
 
@@ -5989,6 +6021,7 @@ __all__ = [
 ]
 
 
+@guard_task_write
 def refresh_coding_supervision_context(
     repair_task_id: str,
     *,
