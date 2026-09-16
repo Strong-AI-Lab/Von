@@ -249,7 +249,10 @@ class ConceptsRepository:
             raise RuntimeError("Concepts collection not available")
         prepared = dict(document)
         prepared.setdefault("embedding_status", _EMBEDDING_STATUS_PENDING)
-        return coll.insert_one(prepared)
+        from ...services.task_project_home_service import concept_mutation
+
+        with concept_mutation(coll, {}, document=prepared):
+            return coll.insert_one(prepared)
 
     @staticmethod
     def update_one(
@@ -261,7 +264,10 @@ class ConceptsRepository:
         update = _sanitize_update_payload(update)
         update = _prepare_concept_embedding_status(update)
         query = apply_concept_query_filter(filter or {})
-        return coll.update_one(query, update, upsert=upsert)
+        from ...services.task_project_home_service import concept_mutation
+
+        with concept_mutation(coll, query, update=update, many=False) as fenced_query:
+            return coll.update_one(fenced_query, update, upsert=upsert)
 
     @staticmethod
     def update_many(filter: Dict[str, Any], update: Dict[str, Any]):
@@ -271,7 +277,10 @@ class ConceptsRepository:
         update = _sanitize_update_payload(update)
         update = _prepare_concept_embedding_status(update)
         query = apply_concept_query_filter(filter or {})
-        return coll.update_many(query, update)
+        from ...services.task_project_home_service import concept_mutation
+
+        with concept_mutation(coll, query, update=update, many=True) as fenced_query:
+            return coll.update_many(fenced_query, update)
 
     @staticmethod
     def find_one_and_update(
@@ -283,9 +292,12 @@ class ConceptsRepository:
         update = _sanitize_update_payload(update)
         update = _prepare_concept_embedding_status(update)
         query = apply_concept_query_filter(filter or {})
-        result = coll.find_one_and_update(
-            query, update, return_document=return_document
-        )
+        from ...services.task_project_home_service import concept_mutation
+
+        with concept_mutation(coll, query, update=update) as fenced_query:
+            result = coll.find_one_and_update(
+                fenced_query, update, return_document=return_document
+            )
         return sanitize_concept_document(result)
 
     @staticmethod
@@ -294,7 +306,10 @@ class ConceptsRepository:
         if coll is None:
             raise RuntimeError("Concepts collection not available")
         query = apply_concept_query_filter(filter or {})
-        return coll.delete_one(query)
+        from ...services.task_project_home_service import concept_mutation
+
+        with concept_mutation(coll, query, many=False) as fenced_query:
+            return coll.delete_one(fenced_query)
 
     @staticmethod
     def delete_many(filter: Dict[str, Any]):
@@ -302,7 +317,10 @@ class ConceptsRepository:
         if coll is None:
             raise RuntimeError("Concepts collection not available")
         query = apply_concept_query_filter(filter or {})
-        return coll.delete_many(query)
+        from ...services.task_project_home_service import concept_mutation
+
+        with concept_mutation(coll, query, many=True) as fenced_query:
+            return coll.delete_many(fenced_query)
 
     @staticmethod
     def count_documents(filter: Dict[str, Any]) -> int:
@@ -459,6 +477,7 @@ class ConceptsRepository:
                 from ...services.concept_predicate_metadata_service import (
                     get_relationship_kinds,
                 )
+
                 kinds: tuple[str, ...] = get_relationship_kinds()
             except Exception:
                 kinds = RELATIONSHIP_KINDS

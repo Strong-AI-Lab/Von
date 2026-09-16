@@ -1,4 +1,3 @@
-import copy
 from datetime import UTC, datetime
 
 import mongomock
@@ -25,6 +24,7 @@ def fixture(monkeypatch, tmp_path):
         transfer.TextValuesRepository, "collection", lambda: database.text_values
     )
     monkeypatch.setattr(transfer, "can_access_concept", lambda concept_id: True)
+    monkeypatch.setattr(transfer, "filter_accessible_concept_ids", lambda ids: set(ids))
     monkeypatch.setattr(transfer, "get_effective_user_concept_id", lambda: USER)
     monkeypatch.setattr(transfer, "get_project_home", lambda project_id: None)
     secret = tmp_path / "key"
@@ -130,6 +130,9 @@ def test_same_slug_is_not_an_audience_identity_proof(fixture):
 def test_inaccessible_member_prevents_partial_export(fixture, monkeypatch):
     _, source, _ = fixture
     monkeypatch.setattr(transfer, "can_access_concept", lambda cid: cid != TASK)
+    monkeypatch.setattr(
+        transfer, "filter_accessible_concept_ids", lambda ids: set(ids) - {TASK}
+    )
     with pytest.raises(PermissionError, match="inaccessible record"):
         transfer.capture_project(PROJECT, config=source, recipient="dgx")
 

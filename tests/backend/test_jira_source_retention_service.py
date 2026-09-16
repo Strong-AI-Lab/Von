@@ -242,3 +242,35 @@ def test_archive_read_requires_access_and_verifies_bytes(monkeypatch):
         retention.read_source_archive(
             {**ref, "blob_sha256": "wrong"}, actor_concept_id="#V#owner"
         )
+
+
+def test_archive_blob_identity_is_independent_of_platform_gzip_header(monkeypatch):
+    from src.backend.services import computer_file_copy_service as copies
+
+    raw_compress = gzip.compress
+    calls = []
+    monkeypatch.setattr(
+        copies,
+        "import_bytes_file_copy",
+        lambda **kwargs: calls.append(kwargs)
+        or {"success": True, "concept_id": "#V#archive"},
+    )
+    archive = {
+        "schema": "jira_source_archive.v1",
+        "kind": "project",
+        "complete": True,
+        "source": {"id": "42"},
+    }
+    for os_byte in (3, 255):
+
+        def compress(data, *, mtime, value=os_byte):
+            packed = raw_compress(data, mtime=mtime)
+            return packed[:9] + bytes([value]) + packed[10:]
+
+        monkeypatch.setattr(retention.gzip, "compress", compress)
+        retention.store_source_archive(archive, actor_concept_id="#V#owner")
+    assert calls[0]["data"] == calls[1]["data"]
+    assert calls[0]["blob_key"] == calls[1]["blob_key"]
+    assert calls[0]["blob_key"].endswith(
+        hashlib.sha256(calls[0]["data"]).hexdigest() + ".json.gz"
+    )

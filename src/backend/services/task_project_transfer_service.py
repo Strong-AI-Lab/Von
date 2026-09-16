@@ -18,7 +18,11 @@ from ..db.repositories.text_value_repository import (
     TextRelationsRepository,
     TextValuesRepository,
 )
-from ..security.access_control import can_access_concept, get_effective_user_concept_id
+from ..security.access_control import (
+    can_access_concept,
+    filter_accessible_concept_ids,
+    get_effective_user_concept_id,
+)
 from ..security.visibility_predicates import (
     get_specific_to_org_values,
     get_specific_to_user_values,
@@ -31,6 +35,7 @@ MAX_CONCEPTS = 20000
 MAX_BYTES = 256 * 1024 * 1024
 # Dispatch, supervision and execution state must be established at the new home.
 EXECUTION_METADATA = {
+    "dispatch_requested",
     "coding_supervision",
     "coding_dispatch",
     "dispatch_authority",
@@ -117,6 +122,7 @@ def capture_project(project_id: str, *, config: dict, recipient: str) -> dict:
         raise PermissionError("Task project export is not admitted")
     if not can_access_concept(project_id):
         raise PermissionError("Task project is inaccessible")
+    initial_home = get_project_home(project_id)
     collection = ConceptsRepository.collection()
     project = collection.find_one({"concept_id": project_id})
     record = ((project or {}).get("attributes") or {}).get("task_project")
@@ -136,9 +142,9 @@ def capture_project(project_id: str, *, config: dict, recipient: str) -> dict:
     if not set(collection_ids).issubset(ids):
         raise ValueError("Project collection inventory is incomplete")
     audiences = set(settings.get("audiences", []))
+    if filter_accessible_concept_ids(ids) != ids:
+        raise PermissionError("Project contains an inaccessible record")
     for document in documents:
-        if not can_access_concept(document["concept_id"]):
-            raise PermissionError("Project contains an inaccessible record")
         scope = _scope(document)
         keys = {f"user:{v}" for v in scope["users"]} | {
             f"org:{v}" for v in scope["organisations"]
@@ -146,14 +152,17 @@ def capture_project(project_id: str, *, config: dict, recipient: str) -> dict:
         if not keys or not keys.intersection(audiences):
             raise PermissionError("Task record has no admitted private audience")
     semantic = [_semantic_concept(d) for d in documents]
-    files = []
-    for file_id in sorted(referenced_file_ids(semantic)):
-        if not can_access_concept(file_id):
-            raise PermissionError("A task source file is inaccessible")
-        document = collection.find_one({"concept_id": file_id})
-        if not document:
-            raise ValueError("Missing task source file")
-        files.append(_semantic_concept(document))
+    file_ids = referenced_file_ids(semantic)
+    if len(file_ids) > MAX_CONCEPTS:
+        raise ValueError("Task project exceeds the bounded file inventory")
+    if filter_accessible_concept_ids(file_ids) != file_ids:
+        raise PermissionError("A task source file is inaccessible")
+    file_documents = list(collection.find({"concept_id": {"$in": sorted(file_ids)}}))
+    if {d["concept_id"] for d in file_documents} != file_ids:
+        raise ValueError("Missing task source file")
+    files = sorted(
+        (_semantic_concept(d) for d in file_documents), key=lambda d: d["concept_id"]
+    )
     relations = list(
         TextRelationsRepository.collection().find(
             {
@@ -187,6 +196,8 @@ def capture_project(project_id: str, *, config: dict, recipient: str) -> dict:
     if len(encode(body)) > MAX_BYTES:
         raise ValueError("Task project exceeds the bounded snapshot size")
     home = get_project_home(project_id)
+    if home != initial_home:
+        raise ValueError("Project home changed during snapshot capture; retry")
     payload = {
         "schema_version": VERSION,
         "origin": config["node_id"],
@@ -243,6 +254,22 @@ def verify_snapshot(envelope: dict, *, config: dict, origin: str) -> dict:
         elif record.get("metadata", {}).get("project_concept_id") != project_id:
             raise ValueError("Unrelated concept in task project snapshot")
     subject_ids = {r["concept_id"] for r in [*records, *body["files"]]}
+    if (
+        len(subject_ids) != len(records) + len(body["files"])
+        or len(body["files"]) > MAX_CONCEPTS
+    ):
+        raise ValueError("Duplicate or excessive snapshot concept identifiers")
+    if not collection_ids.issubset({r["concept_id"] for r in records}):
+        raise ValueError("Incomplete task collection inventory")
+    values = decoded(body["text_values"])
+    value_ids = {str(r["_id"]) for r in values}
+    relations = decoded(body["text_relations"])
+    if len(value_ids) != len(values) or value_ids != {
+        str(r["object_text_id"]) for r in relations
+    }:
+        raise ValueError("Incomplete or duplicate task text value inventory")
+    if len({str(r["_id"]) for r in relations}) != len(relations):
+        raise ValueError("Duplicate task text relation identifiers")
     if any(r["subject_concept_id"] not in subject_ids for r in body["text_relations"]):
         raise ValueError("Unrelated task text relation")
     if {r["concept_id"] for r in body["files"]} != referenced_file_ids(records):

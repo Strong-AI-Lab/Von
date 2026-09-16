@@ -640,12 +640,17 @@ class TestUpdateTaskStatus:
 class TestAssignTask:
     """Tests for assign_task function."""
 
+    @patch(
+        "src.backend.services.task_dispatch_authority_service.record_assignment",
+        return_value=None,
+    )
     @patch("src.backend.services.task_management_service.get_task")
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     def test_assign_task_success(
         self,
         mock_repo: MagicMock,
         mock_get_task: MagicMock,
+        mock_record_assignment: MagicMock,
     ) -> None:
         """assign_task() should update assignee relationship."""
         mock_repo.find_one.return_value = {

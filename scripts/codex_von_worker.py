@@ -187,15 +187,29 @@ def require_task_execution_preferences(task):
 
 
 def authorised_task(task, config):
-    return (
-        task.get("assignee_concept_id") == config["agent_id"]
+    if (
+        task.get("assignee_concept_id") != config["agent_id"]
+        or task.get("organisation_concept_id") not in (None, config["organisation_id"])
+    ):
+        return False
+    if not config.get("supervision_enabled") and task.get(
+        "report_to_concept_id"
+    ) not in (None, config["delegator_id"]):
+        return False
+    from src.backend.services.task_dispatch_authority_service import (
+        has_assignment_record,
+        is_authorised_assignment,
+    )
+    if (
+        not task.get("federation")
         and task.get("organisation_concept_id") == config["organisation_id"]
         and task.get("created_by_concept_id") == config["delegator_id"]
-        and (
-            config.get("supervision_enabled")
-            or task.get("report_to_concept_id") in (None, config["delegator_id"])
-        )
-    )
+        and not has_assignment_record(task["task_concept_id"])
+    ):
+        return True
+    if not task.get("dispatch_requested"):
+        return False
+    return is_authorised_assignment(task, config["delegator_id"])
 
 
 def referenced_tasks(config, api, supplied, task_ids=()):
@@ -435,8 +449,8 @@ def check_task(config, api, task_id):
     while True:
         page = api.tasks.search_tasks(
             assignee_concept_id=config["agent_id"],
-            created_by_concept_id=config["delegator_id"],
             organisation_concept_id=config["organisation_id"],
+            organisation_scope_mode="current_plus_unscoped",
             statuses=[task["status"]],
             limit=200,
             offset=offset,
@@ -504,10 +518,18 @@ class Von:
     def native_writer(self, task):
         project_id = task.get("project_concept_id")
         if project_id:
-            from src.backend.services.task_project_service import get_task_project
+            from src.backend.services.task_project_service import task_execution_home
 
-            project = get_task_project(project_id)
-            return bool(project and project.get("writer") == "von")
+            project = task_execution_home(task["task_concept_id"])
+            home = project.get("write_home") if project else None
+            return bool(
+                project
+                and project.get("writer") == "von"
+                and (
+                    home is None
+                    or home.get("writable_here") is True
+                )
+            )
         return not task.get("is_imported_jira_task", False)
 
     def pending(self):
@@ -515,8 +537,8 @@ class Von:
         while True:
             page = self.tasks.search_tasks(
                 assignee_concept_id=self.config["agent_id"],
-                created_by_concept_id=self.config["delegator_id"],
                 organisation_concept_id=self.config["organisation_id"],
+                organisation_scope_mode="current_plus_unscoped",
                 statuses=sorted(ACTIVE),
                 limit=200,
                 offset=offset,

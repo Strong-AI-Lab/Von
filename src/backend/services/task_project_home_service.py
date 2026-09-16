@@ -62,7 +62,6 @@ def guard_task_write(function):
     @wraps(function)
     def guarded(*args, **kwargs):
         from .task_management_service import _get_task_doc
-        from ..security.access_control import can_access_concept
 
         arguments = signature.bind(*args, **kwargs).arguments
         project_ids = {arguments.get("project_concept_id")}
@@ -93,8 +92,6 @@ def guard_task_write(function):
             )
         with ExitStack() as stack:
             for project_id in sorted(project_ids - {None, ""}):
-                if not can_access_concept(project_id):
-                    raise PermissionError("Task project is not accessible")
                 stack.enter_context(project_write(project_id))
             return function(*args, **kwargs)
 
@@ -284,6 +281,7 @@ def transfer_frozen_home(
                 "state": "replica",
                 "snapshot_digest": snapshot_digest,
                 "transfer_receipt": receipt,
+                "source_captured_at": receipt.get("source_captured_at"),
                 "updated_at": datetime.now(UTC),
             },
             "$inc": {"epoch": 1},
@@ -304,3 +302,171 @@ def transfer_frozen_home(
             return current
         raise TaskProjectHomeError("task_home_transfer_conflict", current)
     return get_project_home(project_id)
+
+
+def _document_project(document: dict) -> str | None:
+    attributes = document.get("attributes") or {}
+    if "task_project" in attributes:
+        return document.get("concept_id")
+    return (document.get("metadata") or {}).get("project_concept_id") or (
+        attributes.get("task_collection") or {}
+    ).get("project_concept_id")
+
+
+@contextmanager
+def concept_mutation(
+    collection,
+    query: dict,
+    *,
+    update: dict | None = None,
+    document: dict | None = None,
+    many: bool = False,
+):
+    """Keep generic concept/relationship writes inside the same home barrier.
+
+    Derived embedding maintenance does not change represented task content.
+    This is a canonical repository boundary, not protection from arbitrary
+    administrator database access or a pre-upgrade process.
+    """
+    if update:
+        fields = {
+            field
+            for value in update.values()
+            if isinstance(value, dict)
+            for field in value
+        }
+        if fields and fields <= {
+            "embedding_status",
+            "embedding_updated_at",
+            "embedding_error",
+        }:
+            yield query
+            return
+    projection = {
+        "concept_id": 1,
+        "metadata.project_concept_id": 1,
+        "attributes.task_project": 1,
+        "attributes.task_collection.project_concept_id": 1,
+    }
+    docs = (
+        [document]
+        if document is not None
+        else list(collection.find(query, projection).limit(0 if many else 1))
+    )
+    project_ids = {_document_project(doc) for doc in docs}
+    if update:
+        changes = update.get("$set", update)
+        project_ids.add(changes.get("metadata.project_concept_id"))
+        project_ids.add((changes.get("metadata") or {}).get("project_concept_id"))
+    with ExitStack() as stack:
+        for project_id in sorted(project_ids - {None, ""}):
+            stack.enter_context(project_write(project_id))
+        # A concurrent project move must not turn this admitted write into a
+        # mutation of a different, possibly already frozen home.
+        preimages = [
+            {
+                "_id": doc["_id"],
+                "metadata.project_concept_id": (doc.get("metadata") or {}).get(
+                    "project_concept_id"
+                ),
+            }
+            for doc in docs
+            if "_id" in doc
+        ]
+        # Preserve ordinary upsert semantics when no preimage exists.
+        constraint = {"$or": preimages} if preimages else None
+        yield (
+            {"$and": [query, constraint]} if document is None and constraint else query
+        )
+
+
+@contextmanager
+def text_relation_mutation(
+    collection, query: dict, *, document: dict | None = None, update: dict | None = None
+):
+    """Text deletion/replacement must obey the owning task-project home too."""
+    from ..db.repositories.concepts_repository import ConceptsRepository
+
+    rows = (
+        [document]
+        if document is not None
+        else list(collection.find(query, {"subject_concept_id": 1}))
+    )
+    ids = {row.get("subject_concept_id") for row in rows} - {None}
+    # Upserts and subject changes have no corresponding preimage yet.
+    for fields in (
+        query,
+        update or {},
+        (update or {}).get("$set", {}),
+        (update or {}).get("$setOnInsert", {}),
+    ):
+        subject = fields.get("subject_concept_id")
+        if isinstance(subject, str):
+            ids.add(subject)
+    if not ids:
+        yield query
+        return
+    with concept_mutation(
+        ConceptsRepository.collection(), {"concept_id": {"$in": sorted(ids)}}, many=True
+    ):
+        preimages = [
+            {"_id": row["_id"], "subject_concept_id": row.get("subject_concept_id")}
+            for row in rows
+            if "_id" in row
+        ]
+        yield (
+            {"$and": [query, {"$or": preimages}]}
+            if document is None and preimages
+            else query
+        )
+
+
+def workflow_home_allows_execution(document: dict, *, database=None) -> bool:
+    """Home routing adds no actor authority; existing claim checks still apply."""
+    inputs = document.get("inputs") or {}
+    task_id = inputs.get("task_concept_id") or inputs.get("task_id")
+    if not isinstance(task_id, str) or not task_id:
+        return True
+    if database is None:
+        from ..db.mongo_client import get_db
+
+        database = get_db()
+    if database is None:
+        return False
+    task = database.concepts.find_one(
+        {"concept_id": task_id}, {"metadata.project_concept_id": 1}
+    )
+    project_id = ((task or {}).get("metadata") or {}).get("project_concept_id")
+    if not project_id:
+        return True
+    home = database[COLLECTION].find_one({"_id": project_id})
+    return home is None or (
+        home.get("state") == "active" and home.get("home_node_id") == local_node_id()
+    )
+
+
+def project_home_summaries(project_ids: list[str]) -> dict[str, dict]:
+    """Bounded route/freshness projection after caller checks project visibility."""
+    rows = _collection().find(
+        {"_id": {"$in": project_ids}},
+        {
+            "home_node_id": 1,
+            "home_url": 1,
+            "epoch": 1,
+            "state": 1,
+            "source_captured_at": 1,
+            "updated_at": 1,
+        },
+    )
+    return {
+        row["_id"]: {
+            "node_id": row.get("home_node_id"),
+            "url": row.get("home_url"),
+            "state": row.get("state"),
+            "epoch": row.get("epoch"),
+            "writable_here": row.get("state") == "active"
+            and row.get("home_node_id") == local_node_id(),
+            "snapshot_at": row.get("source_captured_at"),
+        }
+        for row in rows
+    }

@@ -1742,6 +1742,24 @@ def create_task(
         logger.debug("Failed to append task_created history event: %s", e)
 
     workflow_event_launch: dict[str, Any] | None = None
+    # A native create-and-assign by its current creator is deliberate dispatch.
+    # Historical/imported attribution does not supply that actor authority.
+    from ..security.access_control import get_effective_user_concept_id
+
+    if (
+        assignee_concept_id
+        and canonical_task_source_id == DEFAULT_TASK_SOURCE_ID
+        and created_by_concept_id
+        and get_effective_user_concept_id() == created_by_concept_id
+    ):
+        from .task_dispatch_authority_service import record_assignment
+
+        if record_assignment(result):
+            ConceptsRepository.update_one(
+                {"concept_id": task_concept_id},
+                {"$set": {"metadata.dispatch_requested": True}},
+            )
+            result["dispatch_requested"] = True
     # Event-driven workflow launch is best-effort and must not block task writes.
     try:
         workflow_event_launch = maybe_launch_task_created_workflow(
@@ -2230,6 +2248,8 @@ def _build_task_response(
         "history_count": len(history),
         "external_references": external_references,
         "project_concept_id": metadata.get("project_concept_id"),
+        "federation": metadata.get("federation"),
+        "dispatch_requested": bool(metadata.get("dispatch_requested")),
         "collection_concept_ids": metadata.get("collection_concept_ids", []),
         "bulk_task_collections": bulk_task_collections,
         "hidden_by_default_bulk_task_collections": (
@@ -2490,7 +2510,18 @@ def assign_task(
         )
     except Exception as e:
         logger.debug("Failed to append task assignment history event: %s", e)
-    return get_task(task_concept_id)
+    assigned = get_task(task_concept_id)
+    if update_visibility and assigned.get("assignee_concept_id") == assignee_concept_id:
+        from .task_dispatch_authority_service import record_assignment
+
+        receipt = record_assignment(assigned)
+        if receipt:
+            ConceptsRepository.update_one(
+                {"concept_id": task_concept_id},
+                {"$set": {"metadata.dispatch_requested": True}},
+            )
+            assigned["dispatch_requested"] = True
+    return assigned
 
 
 def get_tasks_for_user(
@@ -3476,6 +3507,7 @@ def _search_tasks(
     updated_to: str | None = None,
     dependency_state: str | None = None,
     organisation_concept_id: str | None = None,
+    organisation_scope_mode: str | None = None,
     bulk_visibility: str | None = BULK_TASK_VISIBILITY_INCLUDE,
     bulk_collection_ids: list[str] | str | None = None,
     limit: int = 50,
@@ -3493,9 +3525,10 @@ def _search_tasks(
     except (TypeError, ValueError):
         offset = 0
 
-    query_filter: Dict[str, Any] = {
-        "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID
-    }
+    query_filter = _build_task_listing_query(
+        organisation_concept_id=organisation_concept_id,
+        organisation_scope_mode=organisation_scope_mode,
+    )
     if project_concept_id:
         query_filter["metadata.project_concept_id"] = project_concept_id
     if collection_concept_id:
@@ -3504,14 +3537,6 @@ def _search_tasks(
         query_filter.setdefault("$and", []).append(
             collection_task_query(collection_concept_id)
         )
-    if organisation_concept_id:
-        org_id = _normalise_optional_concept_id(organisation_concept_id)
-        if not org_id:
-            raise InvalidTaskDataError(
-                f"Invalid organisation_concept_id: {organisation_concept_id}"
-            )
-        query_filter[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = org_id
-
     assignee_id = None
     if assignee_concept_id is not None:
         assignee_id = _normalise_optional_concept_id(assignee_concept_id)
@@ -4030,6 +4055,14 @@ def transition_task(
 @guard_task_write
 def unassign_task(task_concept_id: str) -> Dict[str, Any]:
     task_concept_id, doc = _get_task_doc(task_concept_id)
+    if (doc.get("metadata") or {}).get("dispatch_requested"):
+        from .task_dispatch_authority_service import revoke_assignment
+
+        revoke_assignment(task_concept_id)
+        ConceptsRepository.update_one(
+            {"concept_id": task_concept_id},
+            {"$unset": {"metadata.dispatch_requested": ""}},
+        )
     current_assignees = doc.get("relationships", {}).get(PREDICATE_HAS_ASSIGNEE, [])
     if isinstance(current_assignees, str):
         current_assignees = [current_assignees]
