@@ -148,6 +148,13 @@ report rather than hidden.
 
 ## Display in Conversations
 
+Raw-document identity includes provider account and workspace when present,
+matching the conversation's source scope. This prevents reused provider session
+IDs (including Gemini A2A runs with the same start time) from sharing one mutable
+raw-document pointer across workspaces. Existing raw artefacts remain retained;
+reconciliation can refresh an affected transcript's raw-document reference
+without replacing its history or dates.
+
 Imported conversations are hidden from the Conversations tray and its search
 results by default. Select **Show imported** in the tray filters to include them
 for the current page session. This uses the existing

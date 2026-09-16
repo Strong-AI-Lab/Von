@@ -4833,6 +4833,8 @@ def upsert_external_conversation_projection(
         == stored_manifest.get("parser_version")
         and existing_manifest.get("raw_file_copy_concept_id")
         == stored_manifest.get("raw_file_copy_concept_id")
+        and existing_manifest.get("raw_document_concept_id")
+        == stored_manifest.get("raw_document_concept_id")
     ):
         existing_synchronisation = existing_manifest.get("synchronisation")
         existing_divergence = (

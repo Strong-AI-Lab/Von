@@ -1548,6 +1548,18 @@ def _build_source_record(
         f"external-import://custodian/{custodian_scope}/"
         f"{package.provider}/{package.source_session_id}"
     )
+    # Provider session IDs can repeat across accounts/workspaces. Raw custody
+    # must distinguish the same source scopes as the conversation projection.
+    # Hash exact values before the ingestion layer normalises paths to lowercase.
+    if package.source_account or package.source_workspace:
+        source_scope = hashlib.sha256(
+            json.dumps(
+                [package.source_account or "", package.source_workspace or ""],
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        canonical_source_path += f"/scope/{source_scope}"
     return SessionRecord(
         environment=package.provider,
         source_session_id=package.source_session_id,
