@@ -24450,6 +24450,7 @@ let queuedChatPromptCounter = 0;
 let chatPromptQueuePollTimerId = null;
 let chatPromptQueuePollInFlight = false;
 let chatPromptQueuePollAbortController = null;
+let chatPromptQueueRefreshSequence = 0;
 const queuedChatPromptClaimsInFlight = new Set();
 const queuedChatPromptSubmissionsInFlight = new Map();
 const queuedChatPromptSyncTimers = new Map();
@@ -35817,12 +35818,14 @@ async function refreshChatPromptQueueFromServer(options = {}) {
         return false;
     }
     const organisationGenerationAtStart = chatOrganisationGeneration;
+    const refreshSequence = ++chatPromptQueueRefreshSequence;
     const previousEntries = [...queuedChatPrompts];
     try {
         const data = await fetchChatPromptQueueJson('', {
             signal: options.signal
         });
-        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)
+            || refreshSequence !== chatPromptQueueRefreshSequence) {
             return false;
         }
         chatPromptQueueAdmissionServerInstanceId = (
@@ -35882,7 +35885,9 @@ async function refreshChatPromptQueueFromServer(options = {}) {
         renderChatTaskQueuePanel();
         refreshChatSessionTabActivityIndicators();
         updateSendButtonForCurrentChatState();
-        syncServerDispatchedRetryObserver();
+        if (options.observeRetries !== false) {
+            syncServerDispatchedRetryObserver();
+        }
         syncChatPromptQueuePolling();
         if (shouldRefreshActiveHistory) {
             refreshActiveConversationHistoryAfterQueueChange();
@@ -38162,6 +38167,12 @@ async function handleSendPrompt(options = {}) {
         scheduleChatSessionTabsRefresh(true);
         if (request.serverQueueTerminalObserved) {
             publishChatPromptQueueChange('turn_terminal');
+            // Storage events notify other tabs only. Reconcile this tab too,
+            // using canonical state rather than inferring completion for any
+            // other queued prompt. Starting this read also retires older reads.
+            // A task result can arrive before its queue projection catches up;
+            // do not immediately attach another observer to that same attempt.
+            void refreshChatPromptQueueFromServer({ silent: true, observeRetries: false });
         }
         syncChatPromptQueuePolling();
     }
@@ -42023,6 +42034,7 @@ export function __testOnly_handleChatPromptQueueStorageEvent(event) {
     handleChatPromptQueueStorageEvent(event);
 }
 export function __testOnly_resetChatRequestState() {
+    chatPromptQueueRefreshSequence += 1;
     chatSteeringControls?.dispose();
     chatSteeringControls = null;
     chatSteeringSendButton = null;
