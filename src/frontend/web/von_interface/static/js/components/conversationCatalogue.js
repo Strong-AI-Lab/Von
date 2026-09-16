@@ -22,6 +22,8 @@ const sourceLimit = 100;
 let filterText = '';
 let unreadOnly = false;
 let allContexts = false;
+let showImported = false;
+export function importedConversationsVisible() { return showImported; }
 let onChange = () => {};
 let chatReadObserver = null;
 let chatReadPending = false;
@@ -55,6 +57,7 @@ export function filterCatalogueRows(input) {
     if (filterText) searchRows.forEach(row => combined.set(row.session_id, { ...row, ...combined.get(row.session_id), match: row.match }));
     const matchedIds = new Set(searchRows.map(row => row.session_id));
     return rankCatalogueSearchRows([...combined.values()].filter(row => (!unreadOnly || row.shared_unread_count > 0)
+        && (showImported || row.origin_kind !== 'external_conversation_import')
         && (!filterText || metadataMatch(row) || matchedIds.has(row.session_id))));
 }
 
@@ -70,6 +73,7 @@ export async function searchCatalogueContent({ append = false } = {}) {
     onChange();
     try {
         const params = new URLSearchParams({ q: query, match_mode: 'hybrid', sort: 'relevance', page_size: '100' });
+        params.set('include_imported', String(showImported));
         if (cursor) params.set('cursor', cursor);
         const data = await getJson(`/von/api/session/conversation_search?${params}`);
         if (expected !== searchGeneration || contextGeneration !== generation || org !== getSessionScopedOrgId()) return;
@@ -102,7 +106,7 @@ export function showChatConversation() {
     workspace?.classList.remove('show-message-exchange');
 }
 
-export function resetConversationCatalogue() {
+export function resetConversationCatalogue({ preserveSearch = false } = {}) {
     generation += 1;
     searchGeneration += 1;
     clearTimeout(searchTimer);
@@ -110,16 +114,16 @@ export function resetConversationCatalogue() {
     searchCursor = null;
     searchStatus = '';
     searchPending = false;
-    filterText = '';
+    if (!preserveSearch) filterText = '';
     const searchInput = document.querySelector('.catalogue-filters input[type="search"]');
-    if (searchInput) searchInput.value = '';
+    if (searchInput && !preserveSearch) searchInput.value = '';
     rows = [];
     catalogueRows = [];
     nextCursor = null;
-    resetMessagePanelContext();
+    if (!preserveSearch) resetMessagePanelContext();
     profiles.clear();
     refreshPromise = null;
-    showChatConversation();
+    if (!preserveSearch) showChatConversation();
 }
 
 export async function refreshMessageCatalogue() {
@@ -128,7 +132,7 @@ export async function refreshMessageCatalogue() {
     const org = getSessionScopedOrgId();
     refreshPromise = (async () => {
         try {
-            const data = await getJson(`/api/messages/conversation-catalogue?limit=${sourceLimit}&all_contexts=${allContexts}`);
+            const data = await getJson(`/api/messages/conversation-catalogue?limit=${sourceLimit}&all_contexts=${allContexts}&include_imported=${showImported}`);
             if (expected !== generation || org !== getSessionScopedOrgId()) return;
             const incomingRows = data.conversations || [];
             more = data.has_more === true;
@@ -264,7 +268,7 @@ export function mountCatalogueControls(container) {
             const expected = generation;
             moreButton.disabled = true;
             try {
-                const page = await getJson(`/api/messages/conversation-catalogue?limit=${sourceLimit}&cursor=${encodeURIComponent(nextCursor)}&all_contexts=${allContexts}`);
+                const page = await getJson(`/api/messages/conversation-catalogue?limit=${sourceLimit}&cursor=${encodeURIComponent(nextCursor)}&all_contexts=${allContexts}&include_imported=${showImported}`);
                 if (expected !== generation) return;
                 catalogueRows = [...new Map([...catalogueRows, ...(page.conversations || [])].map(row => [row.session_id, row])).values()];
                 rows = catalogueRows.filter(row => row.source_kind === 'message_exchange');
@@ -314,7 +318,19 @@ export function initialiseConversationCatalogue({ render, acceptChats, currentCh
     unread.onclick = () => { unreadOnly = !unreadOnly; unread.setAttribute('aria-pressed', String(unreadOnly)); render(); };
     const contexts = document.createElement('button'); contexts.type = 'button'; contexts.textContent = 'All organisations'; contexts.title = 'Include your message exchanges from other organisations'; contexts.setAttribute('aria-pressed', 'false');
     contexts.onclick = () => { allContexts = !allContexts; contexts.setAttribute('aria-pressed', String(allContexts)); resetConversationCatalogue(); void refreshMessageCatalogue(); void searchCatalogueContent(); };
-    controls.append(filter, unread, contexts);
+    const imported = document.createElement('button'); imported.type = 'button'; imported.textContent = 'Show imported';
+    showImported = false;
+    imported.title = 'Include imported conversations in this list and its search results';
+    imported.setAttribute('aria-pressed', 'false');
+    imported.onclick = () => {
+        showImported = !showImported;
+        imported.setAttribute('aria-pressed', String(showImported));
+        resetConversationCatalogue({ preserveSearch: true });
+        render();
+        void refreshMessageCatalogue();
+        void searchCatalogueContent();
+    };
+    controls.append(filter, unread, contexts, imported);
     document.querySelector('.conversation-tray-header')?.after(controls);
     const refresh = async () => {
         if (document.visibilityState === 'hidden') return;

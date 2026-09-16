@@ -7,7 +7,7 @@ import { initialiseCompactChatComposer, isCompactComposer, resizeCompactDraft, s
 import { updateExecutionCost } from './components/executionCost.js';
 import { canUseWorkflowStudio } from './workflowStudioAccess.js';
 import { createChatSteeringControls } from './components/chatSteeringControls.js';
-import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows, catalogueSearchActive, rankCatalogueSearchRows } from './components/conversationCatalogue.js';
+import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows, importedConversationsVisible, catalogueSearchActive, rankCatalogueSearchRows } from './components/conversationCatalogue.js';
 import { catalogueHasMore } from './components/conversationCatalogue.js';
 import { profileButton, participantAvatar, participantIdentityAvatar } from './components/participantProfile.js';
 import { importedConversationAvatar } from './components/importedConversationAvatar.js';
@@ -1608,6 +1608,7 @@ function buildChatSessionTabsFetchUrl() {
     const conversationHistorySettings = loadConversationHistorySettings((key) => safeLocalStorageGet(key));
     params.set('limit', String(CHAT_SESSION_TABS_FETCH_LIMIT));
     params.set('summary', 'light');
+    params.set('include_imported', String(importedConversationsVisible()));
     params.set('agent_visibility', showAgentCreatedSessions ? 'include' : 'exclude');
     params.set('keep_newest_agent_created', 'true');
     params.set('recent_window_days', String(conversationHistorySettings.recentWindowDays));

@@ -5456,6 +5456,7 @@ def get_chat_history_sessions_older_than_count(
     cutoff: datetime,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    include_imported: bool = True,
     agent_visibility: Any = CHAT_SESSION_AGENT_VISIBILITY_INCLUDE,
 ) -> int:
     """Count actor-owned, untrashed sessions older than a recency cutoff.
@@ -5488,6 +5489,8 @@ def get_chat_history_sessions_older_than_count(
         namespace=namespace,
         include_legacy=include_legacy,
     )
+    if not include_imported:
+        query["origin_kind"] = {"$ne": "external_conversation_import"}
     query["trashed_at"] = None
     clauses: list[Dict[str, Any]] = [
         {
@@ -5845,6 +5848,7 @@ def get_chat_history_session_summaries_page(
     *,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    include_imported: bool = True,
     page_size: int = 100,
     position: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -5870,6 +5874,8 @@ def get_chat_history_session_summaries_page(
         namespace=namespace,
         include_legacy=include_legacy,
     )
+    if not include_imported:
+        base_query["origin_kind"] = {"$ne": "external_conversation_import"}
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     pipeline: List[Dict[str, Any]] = [
         {"$match": base_query},
@@ -6021,6 +6027,7 @@ def _load_chat_history_session_summaries(
     *,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    include_imported: bool = True,
     summary_mode: str = "full",
     metadata_query_limit: int | None = None,
 ) -> List[Dict[str, Any]]:
@@ -6039,6 +6046,9 @@ def _load_chat_history_session_summaries(
     query = build_chat_history_query(
         user_id=user_id, namespace=namespace, include_legacy=include_legacy
     )
+
+    if not include_imported:
+        query["origin_kind"] = {"$ne": "external_conversation_import"}
 
     if light_mode:
         try:
@@ -6221,6 +6231,7 @@ def get_chat_history_session_summaries_result(
     *,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    include_imported: bool = True,
     summary_mode: str = "full",
     agent_visibility: Any = CHAT_SESSION_AGENT_VISIBILITY_INCLUDE,
     keep_newest_agent_created: Any = True,
@@ -6240,6 +6251,7 @@ def get_chat_history_session_summaries_result(
         user_id,
         namespace=namespace,
         include_legacy=include_legacy,
+        include_imported=include_imported,
         summary_mode=summary_mode,
         metadata_query_limit=metadata_query_limit,
     )
