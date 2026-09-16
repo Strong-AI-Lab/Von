@@ -189,6 +189,9 @@ const turnEditHistory = new Map();
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
 let activeChatSessionId = null;
+// Unsent text belongs to a conversation in this tab, not the shared textarea.
+// It is not history and is not automatically restored after a page reload.
+const composerDraftsBySession = new Map();
 let turnModelPicker = null;
 let activeChatSessionName = null;
 let activeChatSessionOwnerId = null;
@@ -21327,6 +21330,14 @@ function dispatchPromptComposerInputEvent(promptInput = getPromptInputElement())
     }
 }
 
+function clearSubmittedComposerDraft(sessionId, submittedText) {
+    const input = activeChatSessionId === sessionId ? getPromptInputElement() : null;
+    const draft = input ? input.value : composerDraftsBySession.get(sessionId);
+    if (draft !== submittedText) return;
+    composerDraftsBySession.delete(sessionId);
+    if (input) setPromptComposerValue('');
+}
+
 function setPromptComposerValue(value, options = {}) {
     const promptInput = options.promptInput || getPromptInputElement();
     if (!promptInput) {
@@ -21334,6 +21345,7 @@ function setPromptComposerValue(value, options = {}) {
     }
 
     promptInput.value = typeof value === 'string' ? value : '';
+    composerDraftsBySession.set(activeChatSessionId, promptInput.value);
     if (!promptInput.value) dictationController?.clearAttemptIds?.();
     dispatchPromptComposerInputEvent(promptInput);
 
@@ -25081,6 +25093,8 @@ function updateHistoryBanner() {
 
 function setActiveChatSession(sessionId, sessionName, externalConversation = undefined) {
     const previousSessionId = activeChatSessionId;
+    const composer = getPromptInputElement();
+    if (composer) composerDraftsBySession.set(previousSessionId, composer.value);
     activeChatSessionId = (typeof sessionId === 'string' && sessionId.trim())
         ? sessionId.trim()
         : null;
@@ -25104,6 +25118,12 @@ function setActiveChatSession(sessionId, sessionName, externalConversation = und
     renderActiveChatSessionFocusChips(activeChatSessionFocus);
 
     if (previousSessionId !== activeChatSessionId) {
+        // The first session adopts an unbound draft (e.g. an initial upload).
+        const draft = composerDraftsBySession.get(activeChatSessionId)
+            ?? (previousSessionId === null ? composerDraftsBySession.get(null) : '')
+            ?? '';
+        composerDraftsBySession.delete(null);
+        setPromptComposerValue(draft);
         if (previousSessionId) turnModelPicker?.clear();
         setSelectedChatPromptQueueEntryId(null);
         chatSessionSelectionGeneration += 1;
@@ -28419,6 +28439,8 @@ async function createChatSession(sessionName, options = {}) {
         throw new Error(msg);
     }
 
+    const preservedComposerValue = options.preserveComposerDraft
+        ? String(getPromptInputElement()?.value || '') : '';
     setActiveChatSession(data?.session_id, data?.session_name);
     const createdFocus = getFocusFromPayload(data);
     if (data?.session_id) {
@@ -28493,10 +28515,7 @@ async function createChatSession(sessionName, options = {}) {
         });
     }
 
-    const composerValue = options.preserveComposerDraft
-        ? String(getPromptInputElement()?.value || '')
-        : '';
-    setPromptComposerValue(composerValue, { focus: true });
+    setPromptComposerValue(preservedComposerValue, { focus: true });
 
     document.dispatchEvent(new CustomEvent('von:contextReset', {
         detail: { trigger: 'chat_new_session', session_id: effectiveSessionId, session_name: effectiveName || null }
@@ -33591,6 +33610,8 @@ function startOrganisationSwitchForChatTab(detail = {}) {
     transcriptTurns.length = 0;
     turnEditHistory.clear();
     clearLlmDebugDataEntries();
+    setPromptComposerValue('');
+    composerDraftsBySession.clear();
     setActiveChatSession(null, null);
     displayedHistorySessionId = null;
     historySegmentsShown = 0;
@@ -34334,9 +34355,13 @@ export function initializeChatTab() {
         setSelectedChatPromptQueueEntryId(null);
     });
 
+    if (composerDraftsBySession.has(activeChatSessionId)) {
+        setPromptComposerValue(composerDraftsBySession.get(activeChatSessionId), { promptInput });
+    }
     initialiseConversationDraft({
         input: promptInput, sendButton, onSubmit: submitComposer,
         onInput: () => {
+            composerDraftsBySession.set(activeChatSessionId, promptInput.value);
             setSelectedChatPromptQueueEntryId(null);
             updateSendButtonDraftReadiness();
         },
@@ -37355,7 +37380,7 @@ async function handleSendPrompt(options = {}) {
         });
         refreshConversationImages();
         rememberLastSubmittedUserPrompt(promptRaw);
-        setPromptComposerValue('', { promptInput });
+        clearSubmittedComposerDraft(targetSessionId, promptRaw);
         updateSendButtonForCurrentChatState();
         try {
             await queuePromptForLater(promptRaw, {
@@ -37596,8 +37621,10 @@ async function handleSendPrompt(options = {}) {
         if (!claimForegroundDelivery()) {
             return false;
         }
-        if (request.executionEnvelope?.image_attachment_ids?.length && isRequestVisible() && promptInput.value === request.promptRaw) {
-            setPromptComposerValue('', { promptInput });
+        if (!fromQueue && request.executionEnvelope?.image_attachment_ids?.length) {
+            // Completion can arrive after a switch or an editor remount. Clear
+            // only the submitted draft, never a newer edit or another session.
+            clearSubmittedComposerDraft(request.sessionId, request.promptRaw);
         }
         _acceptConversationSituationPayload(data, request.sessionId);
         const responsePresenterState = resolveResponsePresenterState(data);
@@ -37876,7 +37903,7 @@ async function handleSendPrompt(options = {}) {
         if (promptText) {
             rememberLastSubmittedUserPrompt(promptRaw);
         }
-        if (!request.executionEnvelope?.image_attachment_ids?.length) setPromptComposerValue('', { promptInput });
+        if (!request.executionEnvelope?.image_attachment_ids?.length) clearSubmittedComposerDraft(targetSessionId, promptRaw);
     }
 
     let generateTransportInterrupted = false;
@@ -42061,6 +42088,7 @@ export function __testOnly_resetChatRequestState() {
     lastFinishedThinkingCard = null;
     newChatCreationInFlight = null;
     activeChatSessionId = null;
+    composerDraftsBySession.clear();
     activeChatSessionName = null;
     activeChatSessionOwnerId = null;
     chatSessionFocusCache.clear();
