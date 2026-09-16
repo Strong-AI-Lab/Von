@@ -19,7 +19,7 @@ from .shared_conversation_service import list_accepted_invites_for_user
 log = logging.getLogger(__name__)
 
 
-def _chat_page(actor, namespace, organisation, limit, before):
+def _chat_page(actor, namespace, organisation, limit, before, include_imported=False):
     owned = chats.build_chat_history_query(
         user_id=actor, namespace=namespace, include_legacy=False
     )
@@ -48,6 +48,8 @@ def _chat_page(actor, namespace, organisation, limit, before):
         *({"user_id": owner, "session_id": sid} for owner, sid in authorised),
     ]
     query = {"$or": clauses, "trashed_at": None}
+    if not include_imported:
+        query["origin_kind"] = {"$ne": "external_conversation_import"}
     collection = chats.get_chat_history_collection_service(read_only=True)
     if collection is None:
         raise RuntimeError("Conversations unavailable.")
@@ -124,7 +126,7 @@ def _chat_page(actor, namespace, organisation, limit, before):
 
 
 def list_catalogue(
-    actor, *, namespace, organisation=None, limit=100, cursor=None, all_contexts=False
+    actor, *, namespace, organisation=None, limit=100, cursor=None, all_contexts=False, include_imported=False
 ):
     if not actor or not namespace:
         raise PermissionError("Authenticated conversation context required.")
@@ -134,6 +136,7 @@ def list_catalogue(
         "namespace": namespace,
         "organisation": organisation,
         "all_contexts": all_contexts,
+        "include_imported": include_imported,
     }
     before = None
     if cursor:
@@ -143,7 +146,7 @@ def list_catalogue(
         before = decoded["position"]
     rows, coverage, more = [], {}, False
     try:
-        chat_rows, chat_more = _chat_page(actor, namespace, organisation, limit, before)
+        chat_rows, chat_more = _chat_page(actor, namespace, organisation, limit, before, include_imported)
         rows.extend(chat_rows)
         more |= chat_more
         coverage["conversations"] = True

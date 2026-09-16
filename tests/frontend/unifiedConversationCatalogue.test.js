@@ -131,3 +131,26 @@ describe('catalogue content search', () => {
         expect(controls.textContent).toContain('Retry search');
     });
 });
+
+
+test('imports require explicit display and the toggle reaches list and content search', async () => {
+    jest.useFakeTimers();
+    const input = await mountSearch();
+    const native = { session_id: 'native', session_name: 'Research' };
+    const imported = { session_id: 'imported', session_name: 'Research', origin_kind: 'external_conversation_import' };
+    const button = [...document.querySelectorAll('button')].find(b => b.textContent === 'Show imported');
+    expect(button.getAttribute('aria-pressed')).toBe('false');
+    expect(catalogue.filterCatalogueRows([imported, native])).toEqual([native]);
+    enterQuery(input, 'Research');
+    api.getJson.mockResolvedValue({ success: true, conversations: [native, imported], results: [native, imported] });
+    button.click();
+    await Promise.resolve(); await Promise.resolve();
+    expect(button.getAttribute('aria-pressed')).toBe('true');
+    expect(input.value).toBe('Research');
+    expect(catalogue.filterCatalogueRows([imported, native])).toHaveLength(2);
+    expect(api.getJson.mock.calls.some(([url]) => url.includes('conversation-catalogue') && url.includes('include_imported=true'))).toBe(true);
+    expect(api.getJson.mock.calls.some(([url]) => url.includes('conversation_search') && url.includes('include_imported=true'))).toBe(true);
+    button.click();
+    expect(catalogue.filterCatalogueRows([imported, native])).toEqual([native]);
+    jest.clearAllTimers(); jest.useRealTimers();
+});

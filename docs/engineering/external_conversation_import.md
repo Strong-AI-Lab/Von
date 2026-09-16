@@ -146,6 +146,17 @@ projection with an explicit loss count. The visible projection is bounded to
 message. Any truncation or omission is reported in the preview and stored loss
 report rather than hidden.
 
+## Display in Conversations
+
+Imported conversations are hidden from the Conversations tray and its search
+results by default. Select **Show imported** in the tray filters to include them
+for the current page session. This uses the existing
+`origin_kind=external_conversation_import` provenance marker and filters owned
+history before pagination, so imports do not crowd ordinary conversations out
+of the list. Direct links still open imported conversations; their contents,
+dates, read-only status, and raw-source custody are unchanged. This display
+filter does not archive or delete anything.
+
 ## Durable batch lifecycle
 
 A batch progresses through `planning`, `ready`, `running`, and a terminal

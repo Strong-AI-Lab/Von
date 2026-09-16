@@ -172,3 +172,21 @@ def test_read_baseline_is_quiet_then_incoming_activity_is_per_viewer_and_monoton
 def test_shared_receipts_are_not_reset_by_normal_conversation_projection(data):
     rows = [{"session_id": "shared", "shared_with_me": True, "shared_unread_count": 3}]
     assert reads.project_unread("alice", rows)[0]["shared_unread_count"] == 3
+
+
+def test_imported_conversations_hidden_before_pagination_and_explicitly_enabled(data, monkeypatch):
+    stamp = datetime(2026, 9, 16, tzinfo=UTC)
+    for i in range(120):
+        data.history.insert_one({"user_id": "#V#alice", "namespace": "alice@lab", "session_id": f"imported-{i:03}", "origin_kind": "external_conversation_import", "last_contribution_at": stamp, "created_at": stamp})
+    for i in range(3):
+        data.history.insert_one({"user_id": "#V#alice", "namespace": "alice@lab", "session_id": f"native-{i}", "last_contribution_at": stamp - timedelta(days=1), "created_at": stamp})
+    monkeypatch.setattr(catalogue.messages, "list_exchanges", lambda *a, **k: {"conversations": [], "has_more": False})
+    app = Flask(__name__); app.secret_key = "import-filter-test"
+    with app.app_context():
+        default = catalogue.list_catalogue("#V#alice", namespace="alice@lab", limit=2)
+        assert [r["session_id"] for r in default["conversations"]] == ["native-0", "native-1"]
+        enabled = catalogue.list_catalogue("#V#alice", namespace="alice@lab", limit=2, include_imported=True)
+        assert all(r["origin_kind"] == "external_conversation_import" for r in enabled["conversations"])
+        with pytest.raises(ValueError, match="another context"):
+            catalogue.list_catalogue("#V#alice", namespace="alice@lab", limit=2, include_imported=True, cursor=default["next_cursor"])
+    assert data.history.count_documents({}) == 123
