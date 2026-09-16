@@ -12,6 +12,7 @@ import { escapeHtml } from './markdownUtils.js';
 import './suppressTooltips.js';
 import { activateTab, loadTabData, setupTabNavigation } from './tabNavigation.js';
 import { installOutageView } from '../outage/app.js';
+import { fetchVonHealth, healthErrorKind } from '../outage/health.js';
 import { preserveOutageDraft } from '../outage/draft.js';
 import { evaluateServerHealthState } from './utils/serverHealthState.js';
 import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.js';
@@ -998,8 +999,8 @@ function startHealthPolling() {
           ? `cannot reach Von (checked ${lastCheckLabel})`
           : 'cannot reach Von';
         const baseTitle = lastSuccessLabel
-          ? `Von server is unreachable | Last healthy response ${lastSuccessLabel} ago`
-          : 'Von server is unreachable';
+          ? `Connection to Von is unconfirmed | Last healthy response ${lastSuccessLabel} ago`
+          : 'Connection to Von is unconfirmed';
         uptimeSpan.title = copyHint ? `${baseTitle} | ${copyHint}` : baseTitle;
         if (uptimeContainer) uptimeContainer.classList.add('pid-error');
       } else if (serverHealthUiState === 'waiting') {
@@ -1131,13 +1132,9 @@ function startHealthPolling() {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 8000);
-      const res = await fetch('/health', { cache: 'no-store', signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      if (data?.status !== 'healthy' || typeof data.start_time !== 'string') {
-        throw new Error('Invalid Von health response');
-      }
+      let data;
+      try { data = await fetchVonHealth({ signal: controller.signal }); }
+      finally { clearTimeout(timeout); }
       const recoveringFromOutage = serverHealthUiState === 'down';
       lastHealthCheckCompletedAtMs = Date.now();
       hasSeenSuccessfulHealthPoll = true;
@@ -2336,10 +2333,7 @@ function startHealthPolling() {
         firstFailureAtMs = Date.now();
       }
       const nowMs = Date.now();
-      const isHttpError = typeof e?.message === 'string' && e.message.startsWith('HTTP ');
-      const errorKind = e?.name === 'AbortError'
-        ? 'timeout'
-        : (isHttpError ? 'http' : 'network_or_unknown');
+      const errorKind = healthErrorKind(e);
       const errorDetail = typeof e?.message === 'string'
         ? e.message
         : String(e || '');

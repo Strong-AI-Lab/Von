@@ -1,7 +1,9 @@
 import { maintenanceMessage, readMaintenance } from './status.js';
+import { fetchVonHealth, healthErrorKind, connectionMessage } from './health.js';
 let inFlight = false;
 let failures = 0;
 let timer;
+let lastErrorKind = null;
 async function check() {
   if (inFlight) return;
   inFlight = true;
@@ -14,8 +16,8 @@ async function check() {
     document.getElementById('maintenance').textContent = maintenanceMessage(value.record, value);
   });
   try {
-    const response = await fetch('/health', { cache: 'no-store', redirect: 'error', signal: controller.signal });
-    const health = response.ok ? await response.json() : null;
+    const health = await fetchVonHealth({ signal: controller.signal });
+    lastErrorKind = null;
     const seeds = health?.runtime_authority?.startup_seed_materialisations;
     // Explicitly skipped startup work (including AgentTest) is not a pending
     // readiness failure. Still require healthy transport and the real app below.
@@ -31,14 +33,12 @@ async function check() {
         return;
       }
     }
-  } catch { /* A proxy error or device-offline event does not identify the server-side cause. */ }
+  } catch (error) { lastErrorKind = healthErrorKind(error); }
   finally {
     clearTimeout(timeout);
     await status;
     document.getElementById('checked').textContent = `Last checked: ${new Date().toLocaleTimeString()}`;
-    document.getElementById('connection').textContent = navigator.onLine === false
-      ? 'Your device reports that it is offline. Check your connection; Von’s status is unknown.'
-      : 'Cannot reach Von. The cause is unknown. We’ll keep checking.';
+    document.getElementById('connection').textContent = connectionMessage(lastErrorKind);
     button.disabled = false;
     inFlight = false;
     failures++;
@@ -47,4 +47,5 @@ async function check() {
 }
 document.getElementById('retry').addEventListener('click', check);
 window.addEventListener('online', check);
+window.addEventListener('focus', check);
 void check();

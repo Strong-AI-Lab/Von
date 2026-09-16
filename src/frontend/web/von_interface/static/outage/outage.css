@@ -4,7 +4,7 @@ body.von-outage { margin: 0; min-height: 100dvh; padding: max(24px, env(safe-are
 .von-outage::backdrop { background: #f4f7f8; }
 .von-outage main, .von-outage section { max-width: 34rem; margin: max(1rem, 8dvh) auto; overflow-wrap: anywhere; }
 .von-outage h1 { font-size: clamp(1.6rem, 6vw, 2.4rem); line-height: 1.2; }
-.von-outage button { font: inherit; cursor: pointer; min-height: 48px; padding: .6rem 1rem; border: 1px solid #536c77; border-radius: .6rem; margin: .25rem .4rem .25rem 0; background: #fff; color: #172b35; }
-.von-outage button:focus-visible { outline: 3px solid #077eaa; outline-offset: 3px; }
+.von-outage button, .von-outage a { display: inline-block; box-sizing: border-box; font: inherit; cursor: pointer; min-height: 48px; padding: .6rem 1rem; border: 1px solid #536c77; border-radius: .6rem; margin: .25rem .4rem .25rem 0; background: #fff; color: #172b35; }
+.von-outage button:focus-visible, .von-outage a:focus-visible { outline: 3px solid #077eaa; outline-offset: 3px; }
 .von-outage small { display: block; }
-@media (prefers-color-scheme: dark) { .von-outage, .von-outage::backdrop { background: #18252c; color: #eef4f5; } .von-outage button { background: #2b424e; color: #eef4f5; } }
+@media (prefers-color-scheme: dark) { .von-outage, .von-outage::backdrop { background: #18252c; color: #eef4f5; } .von-outage button, .von-outage a { background: #2b424e; color: #eef4f5; } }

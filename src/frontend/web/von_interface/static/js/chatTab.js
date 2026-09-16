@@ -33829,12 +33829,30 @@ function handleAuthStatusChangeForChatTab(detail) {
     publishRealtimeConnectionTelemetry('auth_status_changed');
 }
 
+export async function retryConversationReadsAfterConnectionRecovery() {
+    if (pendingChatOrganisationSwitchId !== null) return;
+    const organisationGeneration = chatOrganisationGeneration;
+    await refreshChatSessionTabs();
+    if (!isChatOrganisationRequestCurrent(organisationGeneration)) return;
+    // Do not replay a send or replace a live answer. Retry only a failed/missing
+    // transcript; the composer, attachments and current selection stay in place.
+    if (!activeHistoryRequest && !getLiveChatRequestForSession(activeChatSessionId)
+        && (historyLoadState.degraded || displayedHistorySessionId !== activeChatSessionId)) {
+        await loadChatHistory({ scrollToBottom: false, preserveScroll: true });
+    }
+}
+
 export function initializeChatTab() {
     if (chatTabInitialised) {
         console.warn('[chatTab] initializeChatTab called more than once; skipping duplicate initialisation.');
         return;
     }
     chatTabInitialised = true;
+    document.addEventListener('von:connectionRestored', () => {
+        void retryConversationReadsAfterConnectionRecovery().catch(error => {
+            console.warn('[chatTab] Connection recovered; conversation retry failed:', error);
+        });
+    });
     const turnModelSelect = document.getElementById('turnModelSelect');
     if (turnModelSelect) {
         turnModelPicker = createTurnModelPicker({
