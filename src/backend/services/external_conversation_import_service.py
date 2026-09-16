@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 EXTERNAL_CONVERSATION_PACKAGE_SCHEMA_VERSION = "external_conversation_package.v1"
-EXTERNAL_CONVERSATION_PARSER_VERSION = "2026-09-16.2"
+EXTERNAL_CONVERSATION_PARSER_VERSION = "2026-09-16.3"
 EXTERNAL_CONVERSATION_ORIGIN_KIND = "external_conversation_import"
 EXTERNAL_CONVERSATION_LINEAGE_SCHEMA_VERSION = "conversation_lineage.v1"
 MAX_EXTERNAL_CONVERSATION_SOURCE_BYTES = 32 * 1024 * 1024
@@ -1460,6 +1460,8 @@ def parse_external_conversation_file(
 
 def _history_projection(
     package: ExternalConversationPackage,
+    *,
+    source_file_modified_at: datetime,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     history: list[dict[str, Any]] = []
     total_chars = 0
@@ -1489,7 +1491,10 @@ def _history_projection(
             {
                 "role": event.source_role,
                 "content": projected,
-                "timestamp": timestamp or datetime.now(timezone.utc),
+                "timestamp": timestamp or source_file_modified_at,
+                "external_timestamp_source": (
+                    "source_message" if timestamp else "source_file_modified"
+                ),
                 "external_event_id": event.event_id,
                 "external_event_kind": event.event_kind,
                 "external_source_role": event.source_role,
@@ -1621,7 +1626,10 @@ def import_external_conversation_file(
         source_account=package.source_account,
         source_workspace=package.source_workspace,
     )
-    history, projection_report = _history_projection(package)
+    source_file_modified_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    history, projection_report = _history_projection(
+        package, source_file_modified_at=source_file_modified_at
+    )
     if not history:
         raise ExternalConversationImportError(
             "The source contains no user-visible human or assistant messages.",
@@ -1717,6 +1725,7 @@ def import_external_conversation_file(
         "parser_version": package.parser_version,
         "source_created_at_utc": package.source_created_at_utc,
         "source_updated_at_utc": package.source_updated_at_utc,
+        "source_file_modified_at_utc": source_file_modified_at.isoformat(),
         "parent_conversation_id": package.parent_conversation_id,
         "raw_document_concept_id": raw_document_concept_id,
         "raw_file_copy_concept_id": raw_record_result.get("file_copy_concept_id"),

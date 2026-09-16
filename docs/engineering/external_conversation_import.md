@@ -48,6 +48,13 @@ The capability has five layers:
 3. Only ordinary user-visible human and assistant text is projected into the
    actor-scoped chat-history store. The projection carries external actor and
    event provenance and is marked read-only.
+   Recorded message dates are preserved. Missing message dates use the source
+   file's last-modified time, labelled `source_file_modified`; the original
+   source timestamp remains null and import time is recorded separately.
+   Re-import repairs older import-time fallbacks only for unchanged events.
+   Known providers use local Codex, Claude Code, Copilot and Gemini brand assets
+   in conversation rows and assistant avatars; these do not imply a registered
+   Von participant identity.
 4. Continue creates a new native conversation with a lineage receipt and a
    copy of the visible history. The source snapshot remains unchanged.
 5. Machine-wide discovery and execution use a persisted batch/item controller.
