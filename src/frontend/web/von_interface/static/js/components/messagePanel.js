@@ -231,6 +231,7 @@ function updateMessageNavigation() {
             focusConversationTarget(content.querySelector('.message-list')?.lastElementChild || content);
             updateMessageNavigation();
         });
+        latest.textContent = 'Latest message';
         navigation.append(unread, latest);
         compose.prepend(navigation);
         content.addEventListener('scroll', updateMessageNavigation, { passive: true });
@@ -442,7 +443,7 @@ function renderMessagesTabContent() {
                     </div>
                     <div class="message-compose-row">
                         <textarea id="messageInput" aria-label="Reply" class="message-input" placeholder="Type your message..." rows="3"></textarea>
-                        <button id="sendMessageBtn" class="send-message-btn" type="button" aria-busy="false">Send</button>
+                        <button id="sendMessageBtn" class="send-message-btn" type="button" aria-busy="false" aria-label="Send message" title="Send message"><span aria-hidden="true">↓</span></button>
                     </div>
                 </div>
             </div>
@@ -1323,7 +1324,13 @@ function renderComposePendingUi(scope) {
         if (composer) composer.dataset.hasAttachments = String(imageItems(attachmentScope(scope)).length > 0);
     }
     button.disabled = pending || imagesBlocked(attachmentScope(scope)) || (scope === COMPOSE_SCOPE_REPLY && _exchange?.other_participant_ids?.length > 1);
-    button.textContent = pending ? 'Sending…' : 'Send';
+    if (scope === COMPOSE_SCOPE_REPLY) {
+        button.innerHTML = `<span aria-hidden="true">${pending ? '…' : '↓'}</span>`;
+        button.setAttribute('aria-label', pending ? 'Sending message' : 'Send message');
+        button.title = pending ? 'Sending message' : 'Send message';
+    } else {
+        button.textContent = pending ? 'Sending…' : 'Send';
+    }
     button.setAttribute('aria-busy', pending ? 'true' : 'false');
 
     if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {

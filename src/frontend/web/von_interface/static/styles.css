@@ -18712,6 +18712,25 @@ body.settings-body {
 }
 .message-navigation { display: flex; align-items: center; gap: 8px; width: 100%; }
 .message-navigation:not(:has(.visible, .message-jump-unread:not([hidden]))) { display: none; }
+/* The reply arrow sends; transcript navigation has an explicit text label. */
+#sendMessageBtn {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0;
+    font-size: 24px;
+    flex-shrink: 0;
+}
+.message-navigation > .chat-scroll-to-end-btn {
+    width: auto;
+    height: auto;
+    min-height: 44px;
+    flex-basis: auto;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    box-shadow: none;
+}
+
 .message-jump-unread, .new-shared-messages-indicator {
     min-height: 44px; box-sizing: border-box; background: #1d4ed8;
     color: #fff; border: 0; border-radius: 8px; padding: 8px 12px;

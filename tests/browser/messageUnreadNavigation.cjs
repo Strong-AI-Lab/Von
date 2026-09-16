@@ -10,6 +10,7 @@ const markup = fs.readFileSync(path.join(root, 'templates/chat_tab.html'), 'utf8
 const evidence = process.argv[2] || '.run/unread-navigation';
 fs.mkdirSync(evidence, { recursive: true });
 let cursors = [];
+let sent = [];
 let background = false;
 let pendingPage = null;
 const message = (id, unread, day) => ({ concept_id: id, created_at: `2026-09-${day}T12:00:00Z`,
@@ -28,6 +29,11 @@ const server = http.createServer(async (req, res) => {
         }
     }
     res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/messages/' && req.method === 'POST') {
+        let body = ''; for await (const chunk of req) body += chunk;
+        sent.push(JSON.parse(body));
+        return res.end(JSON.stringify({ success: true, message_id: '#V#fixture_sent' }));
+    }
     if (req.url === '/api/messages/exchange') {
         let body = ''; for await (const chunk of req) body += chunk;
         const { before } = JSON.parse(body); cursors.push(before);
@@ -49,6 +55,7 @@ const server = http.createServer(async (req, res) => {
         const results = [];
         for (const width of [390, 1280]) {
             cursors = [];
+            sent = [];
             background = false;
             const page = await browser.newPage({ viewport: { width, height: 850 } });
             const errors = []; page.on('pageerror', error => errors.push(error.message));
@@ -65,6 +72,21 @@ const server = http.createServer(async (req, res) => {
             });
             const content = page.locator('#messageViewContent');
             assert.equal(await content.evaluate(el => el.scrollTop), 0, 'default loading preserves the top');
+            const send = page.getByRole('button', { name: 'Send message', exact: true });
+            const input = page.locator('#messageInput');
+            await input.fill('A reply from the down-arrow control.');
+            await expect(send).toBeVisible();
+            await expect(send).toHaveText('↓');
+            const latest = page.getByRole('button', { name: 'Scroll to latest message', exact: true });
+            await expect(latest).toHaveText('Latest message');
+            const box = await send.boundingBox();
+            assert.ok(box.width >= 44 && box.height >= 44, 'send target is at least 44px');
+            assert.ok(box.x >= 0 && box.x + box.width <= width, 'send stays in viewport');
+            await page.screenshot({ path: path.join(evidence, `composer-${width}.png`) });
+            await latest.click();
+            await expect(latest).toBeHidden();
+            assert.equal(sent.length, 0, 'latest navigation does not send the draft');
+            await expect(input).toHaveValue('A reply from the down-arrow control.');
             await content.evaluate(el => { el.scrollTop = el.scrollHeight - el.clientHeight - 10; });
             const bottomPosition = await content.evaluate(el => el.scrollTop);
             assert.ok(bottomPosition > 0, 'fixture must overflow');
@@ -108,9 +130,13 @@ const server = http.createServer(async (req, res) => {
             await expect(target).toBeFocused();
             await expect(target).toBeInViewport();
             assert.deepEqual(cursors, ['middle', 'older']);
+            await send.click();
+            await expect(input).toHaveValue('');
+            assert.equal(sent.length, 1);
+            assert.equal(sent[0].content, 'A reply from the down-arrow control.');
             assert.deepEqual(errors, []);
             await page.screenshot({ path: path.join(evidence, `unread-${width}.png`) });
-            results.push({ width, cursors: [...cursors], defaultTopPreserved: true, backgroundPosition: bottomPosition, intermediateAnchorOffset: anchor.offset, mostRecentUnreadFocused: true, targetInViewport: true });
+            results.push({ width, cursors: [...cursors], sendArrow: true, sendTarget: box, sends: sent.length, labelledLatestNavigation: true, defaultTopPreserved: true, backgroundPosition: bottomPosition, intermediateAnchorOffset: anchor.offset, mostRecentUnreadFocused: true, targetInViewport: true });
             await page.close();
         }
         fs.writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ fixture: true, results }, null, 2));

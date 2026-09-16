@@ -390,7 +390,8 @@ describe('message panel send failure recovery', () => {
 
         expect(postJsonDetailed).toHaveBeenCalledTimes(1);
         expect(sendButton.disabled).toBe(true);
-        expect(sendButton.textContent).toBe('Sending…');
+        expect(sendButton.textContent).toBe('…');
+        expect(sendButton.getAttribute('aria-label')).toBe('Sending message');
         expect(sendButton.getAttribute('aria-busy')).toBe('true');
         expect(replyInput.value).toBe('Please review this once.');
 
@@ -407,7 +408,8 @@ describe('message panel send failure recovery', () => {
         await flushUi();
 
         expect(sendButton.disabled).toBe(false);
-        expect(sendButton.textContent).toBe('Send');
+        expect(sendButton.textContent).toBe('↓');
+        expect(sendButton.getAttribute('aria-label')).toBe('Send message');
         expect(sendButton.getAttribute('aria-busy')).toBe('false');
         expect(replyInput.value).toBe('Please review this once.');
 
@@ -427,7 +429,8 @@ describe('message panel send failure recovery', () => {
 
         expect(replyInput.value).toBe('');
         expect(sendButton.disabled).toBe(false);
-        expect(sendButton.textContent).toBe('Send');
+        expect(sendButton.textContent).toBe('↓');
+        expect(sendButton.getAttribute('aria-label')).toBe('Send message');
     });
 
     test('new-message retries get new delivery keys after recipient or content changes', async () => {
