@@ -37,6 +37,9 @@ import {
     renderRecommendationReviewPayload,
 } from './paperRecommendationUi.js';
 
+// Match the conversation composer’s send icon; Messages retains direct delivery semantics.
+const SEND_MESSAGE_ICON = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-7 7 7-7 7 7" /></svg>';
+
 // Message panel state
 let _messagesContainer = null;
 let _messageListEl = null;
@@ -443,7 +446,7 @@ function renderMessagesTabContent() {
                     </div>
                     <div class="message-compose-row">
                         <textarea id="messageInput" aria-label="Reply" class="message-input" placeholder="Type your message..." rows="3"></textarea>
-                        <button id="sendMessageBtn" class="send-message-btn" type="button" aria-busy="false" aria-label="Send message" title="Send message"><span aria-hidden="true">↓</span></button>
+                        <button id="sendMessageBtn" class="send-message-btn composer-icon-button" type="button" aria-busy="false" aria-label="Send message" title="Send message">${SEND_MESSAGE_ICON}</button>
                     </div>
                 </div>
             </div>
@@ -1325,7 +1328,7 @@ function renderComposePendingUi(scope) {
     }
     button.disabled = pending || imagesBlocked(attachmentScope(scope)) || (scope === COMPOSE_SCOPE_REPLY && _exchange?.other_participant_ids?.length > 1);
     if (scope === COMPOSE_SCOPE_REPLY) {
-        button.innerHTML = `<span aria-hidden="true">${pending ? '…' : '↓'}</span>`;
+        button.innerHTML = pending ? '<span aria-hidden="true">…</span>' : SEND_MESSAGE_ICON;
         button.setAttribute('aria-label', pending ? 'Sending message' : 'Send message');
         button.title = pending ? 'Sending message' : 'Send message';
     } else {

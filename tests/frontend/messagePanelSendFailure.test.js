@@ -408,7 +408,7 @@ describe('message panel send failure recovery', () => {
         await flushUi();
 
         expect(sendButton.disabled).toBe(false);
-        expect(sendButton.textContent).toBe('↓');
+        expect(sendButton.querySelector('svg path').getAttribute('d')).toBe('M12 19V5m-7 7 7-7 7 7');
         expect(sendButton.getAttribute('aria-label')).toBe('Send message');
         expect(sendButton.getAttribute('aria-busy')).toBe('false');
         expect(replyInput.value).toBe('Please review this once.');
@@ -429,7 +429,7 @@ describe('message panel send failure recovery', () => {
 
         expect(replyInput.value).toBe('');
         expect(sendButton.disabled).toBe(false);
-        expect(sendButton.textContent).toBe('↓');
+        expect(sendButton.querySelector('svg path').getAttribute('d')).toBe('M12 19V5m-7 7 7-7 7 7');
         expect(sendButton.getAttribute('aria-label')).toBe('Send message');
     });
 

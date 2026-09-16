@@ -74,9 +74,10 @@ const server = http.createServer(async (req, res) => {
             assert.equal(await content.evaluate(el => el.scrollTop), 0, 'default loading preserves the top');
             const send = page.getByRole('button', { name: 'Send message', exact: true });
             const input = page.locator('#messageInput');
-            await input.fill('A reply from the down-arrow control.');
+            await input.fill('A reply from the up-arrow control.');
             await expect(send).toBeVisible();
-            await expect(send).toHaveText('↓');
+            await expect(send.locator('svg path')).toHaveAttribute('d', await page.locator('#sendButton svg path').getAttribute('d'));
+            assert.equal(await send.evaluate(el => getComputedStyle(el).borderRadius), '50%');
             const latest = page.getByRole('button', { name: 'Scroll to latest message', exact: true });
             await expect(latest).toHaveText('Latest message');
             const box = await send.boundingBox();
@@ -86,7 +87,7 @@ const server = http.createServer(async (req, res) => {
             await latest.click();
             await expect(latest).toBeHidden();
             assert.equal(sent.length, 0, 'latest navigation does not send the draft');
-            await expect(input).toHaveValue('A reply from the down-arrow control.');
+            await expect(input).toHaveValue('A reply from the up-arrow control.');
             await content.evaluate(el => { el.scrollTop = el.scrollHeight - el.clientHeight - 10; });
             const bottomPosition = await content.evaluate(el => el.scrollTop);
             assert.ok(bottomPosition > 0, 'fixture must overflow');
@@ -133,7 +134,7 @@ const server = http.createServer(async (req, res) => {
             await send.click();
             await expect(input).toHaveValue('');
             assert.equal(sent.length, 1);
-            assert.equal(sent[0].content, 'A reply from the down-arrow control.');
+            assert.equal(sent[0].content, 'A reply from the up-arrow control.');
             assert.deepEqual(errors, []);
             await page.screenshot({ path: path.join(evidence, `unread-${width}.png`) });
             results.push({ width, cursors: [...cursors], sendArrow: true, sendTarget: box, sends: sent.length, labelledLatestNavigation: true, defaultTopPreserved: true, backgroundPosition: bottomPosition, intermediateAnchorOffset: anchor.offset, mostRecentUnreadFocused: true, targetInViewport: true });
