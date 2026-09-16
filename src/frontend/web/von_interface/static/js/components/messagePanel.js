@@ -843,7 +843,7 @@ async function loadConversation(userId, { silent = false, before = null, observe
             if (!overlap && response.before) _olderCursor = response.before;
             nextMessages = [..._currentMessages.filter(m => compare(m, incoming[0]) < 0), ...incoming];
         }
-        const sameContent = JSON.stringify(nextMessages.map(m => [m.concept_id, m.concept_data?.content_fallback])) === JSON.stringify(_currentMessages.map(m => [m.concept_id, m.concept_data?.content_fallback]));
+        const sameContent = JSON.stringify(nextMessages.map(messageRenderKey)) === JSON.stringify(_currentMessages.map(messageRenderKey));
         _currentMessages = nextMessages;
         if (silent && !before && sameContent) {
             updateUnreadMarkers();
@@ -1164,12 +1164,24 @@ function selectReplyContext(messageId) {
     input.setSelectionRange(input.value.length, input.value.length);
 }
 
-/**
- * Render messages in the conversation view.
- */
+const messageRenderKeys = new WeakMap();
+
+function messageRenderKey(message) {
+    const { read_by: _readBy, ...data } = message.concept_data || {};
+    return JSON.stringify([message.concept_id, message.created_at, message.relationships, data,
+        _currentUserId, _currentConversationUserId, _exchangeGeneration, _exchange?.participant_profiles]);
+}
+
+/** Render messages without resetting unchanged contribution state. */
 async function renderMessages(onRendered = () => {}) {
-    const contentEl = _messagesContainer?.querySelector('#messageViewContent');
-    if (!contentEl) return;
+    const liveContent = _messagesContainer?.querySelector('#messageViewContent');
+    if (!liveContent) return;
+    // Prepare changed contributions off-screen; retain hydrated cartouches and
+    // local interaction state for unchanged contributions in the live list.
+    const contentEl = document.createElement('div');
+    const existingList = liveContent.querySelector('.message-list');
+    const existing = new Map(Array.from(existingList?.children || [])
+        .map(bubble => [bubble.dataset.contributionId, bubble]));
 
     if (_currentMessages.length === 0) {
         contentEl.innerHTML = `
@@ -1179,6 +1191,7 @@ async function renderMessages(onRendered = () => {}) {
                 <p class="message-empty-hint">Send the first message!</p>
             </div>
         `;
+        liveContent.replaceChildren(...contentEl.childNodes);
         onRendered();
         return;
     }
@@ -1237,6 +1250,16 @@ async function renderMessages(onRendered = () => {}) {
 
     html += '</div>';
     contentEl.innerHTML = html;
+    const orderedBubbles = Array.from(contentEl.querySelectorAll('.message-bubble')).map((bubble, index) => {
+        const key = messageRenderKey(_currentMessages[index]);
+        const retained = existing.get(bubble.dataset.contributionId);
+        if (retained && messageRenderKeys.get(retained) === key) {
+            bubble.remove();
+            return retained;
+        }
+        messageRenderKeys.set(bubble, key);
+        return bubble;
+    });
     contentEl.querySelectorAll('.message-author[data-participant-id]').forEach(author => {
         const id = author.dataset.participantId;
         const profile = _exchange?.participant_profiles?.find(profile => profile.concept_id === id) || { display_name: formatUserName(id) };
@@ -1295,9 +1318,18 @@ async function renderMessages(onRendered = () => {}) {
             }));
         });
     });
+    const list = existingList || document.createElement('div');
+    list.className = 'message-list';
+    const retained = new Set(orderedBubbles);
+    for (const bubble of Array.from(list.children)) if (!retained.has(bubble)) bubble.remove();
+    orderedBubbles.forEach((bubble, index) => {
+        if (list.children[index] !== bubble) list.insertBefore(bubble, list.children[index] || null);
+    });
+    if (!existingList) liveContent.replaceChildren(list);
+    else for (const child of Array.from(liveContent.children)) if (child !== list) child.remove();
     // Restore before asynchronous hydration yields a frame with the new DOM.
     onRendered();
-    await hydrateConceptCartouchesInRoot(contentEl);
+    await hydrateConceptCartouchesInRoot(liveContent);
 
     // The loader restores the viewport before attaching read observers.
 }
