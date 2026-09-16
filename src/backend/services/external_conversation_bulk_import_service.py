@@ -234,9 +234,24 @@ def preview_local_conversation_import(
     }
 
 
+def _discovery_scope(providers: Sequence[Any] | None) -> str:
+    """Bind recovery to the creating process's server-configured directories."""
+    roots = [
+        (provider, root_id, str(path.expanduser().resolve()), pattern)
+        for provider in _normalise_providers(providers)
+        for root_id, path, pattern in _provider_roots(provider)
+    ]
+    return hashlib.sha256(repr(roots).encode("utf-8")).hexdigest()
+
+
 def _populate_batch(batch: Mapping[str, Any]) -> None:
     batches, items = _collections()
     batch_id = str(batch["batch_id"])
+    scope = batch.get("discovery_scope")
+    if scope and scope != _discovery_scope(batch.get("providers")):
+        # A worker sharing this database may have different local roots. It
+        # may process already-planned paths, but cannot substitute its files.
+        return
     sources, warnings = discover_local_conversations(batch.get("providers"))
     now = _now()
     for offset in range(0, len(sources), 500):
@@ -313,6 +328,7 @@ def start_local_conversation_import(
         "organisation_concept_id": organisation_concept_id,
         "role_in_org": role_in_org,
         "providers": list(_normalise_providers(providers)),
+        "discovery_scope": _discovery_scope(providers),
         "status": "planning",
         "source_count": 0,
         "source_bytes": 0,

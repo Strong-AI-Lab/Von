@@ -40,6 +40,28 @@ def _codex_source(path: Path) -> None:
     path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
 
 
+def test_planning_recovery_cannot_substitute_another_workers_roots(monkeypatch, tmp_path):
+    batches, items = _collections(monkeypatch)
+    roots = [tmp_path / "mac_snapshot", tmp_path / "dgx_sessions"]
+    for root in roots:
+        root.mkdir()
+        _codex_source(root / "conversation.jsonl")
+    monkeypatch.setenv("VON_CODEX_CONVERSATION_ROOT", str(roots[0]))
+    batch = {"batch_id": "recover", "custodian_user_id": "#V#user",
+             "providers": ["codex"], "status": "planning",
+             "discovery_scope": bulk._discovery_scope(["codex"])}
+    batches.insert_one(batch)
+    monkeypatch.setenv("VON_CODEX_CONVERSATION_ROOT", str(roots[1]))
+    bulk._populate_batch(batch)
+    assert items.count_documents({}) == 0
+    assert batches.find_one({})["status"] == "planning"
+    monkeypatch.setenv("VON_CODEX_CONVERSATION_ROOT", str(roots[0]))
+    bulk._populate_batch(batch)
+    assert items.count_documents({}) == 1
+    assert items.find_one({})["local_path"].startswith(str(roots[0]))
+    assert batches.find_one({})["status"] == "ready"
+
+
 def test_local_blob_store_streams_a_file_without_changing_its_bytes(tmp_path: Path):
     source = tmp_path / "source.bin"
     source.write_bytes((b"bounded-stream" * 1024) + b"end")
