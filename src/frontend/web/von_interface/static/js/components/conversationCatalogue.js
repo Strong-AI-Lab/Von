@@ -5,7 +5,7 @@ import { showToast } from '../utils/toast.js';
 import { getJson, postJson } from '../apiService.js';
 import { getSessionScopedOrgId } from '../utils/sessionScopedStorage.js';
 import { participantAvatar, openParticipantProfile } from './participantProfile.js';
-import { openMessageExchange, refreshOpenMessageExchange, showMessageComposer, resetMessagePanelContext } from './messagePanel.js';
+import { openMessageExchange, refreshOpenMessageExchange, showMessageComposer, resetMessagePanelContext, captureMessageExchangeUnreadRefresh } from './messagePanel.js';
 
 let rows = [];
 let catalogueRows = [];
@@ -128,6 +128,7 @@ export function resetConversationCatalogue({ preserveSearch = false } = {}) {
 
 export async function refreshMessageCatalogue() {
     if (refreshPromise) return refreshPromise;
+    const reconcileUnread = captureMessageExchangeUnreadRefresh();
     const expected = generation;
     const org = getSessionScopedOrgId();
     refreshPromise = (async () => {
@@ -135,6 +136,7 @@ export async function refreshMessageCatalogue() {
             const data = await getJson(`/api/messages/conversation-catalogue?limit=${sourceLimit}&all_contexts=${allContexts}&include_imported=${showImported}`);
             if (expected !== generation || org !== getSessionScopedOrgId()) return;
             const incomingRows = data.conversations || [];
+            reconcileUnread(incomingRows);
             more = data.has_more === true;
             if (!nextCursor || catalogueRows.length <= sourceLimit) nextCursor = data.next_cursor;
             sourceError = data.coverage_complete === false ? `Could not refresh ${Object.entries(data.coverage || {}).filter(([, ok]) => !ok).map(([name]) => name).join(' and ')}. The other conversations remain available; refresh to retry.` : '';

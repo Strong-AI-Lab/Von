@@ -66,6 +66,24 @@ let _unreadJumpGeneration = null;
 let _readObserver = null;
 const _exchangeDrafts = new Map();
 const _pendingReads = new Set();
+let _readRevision = 0;
+
+// Bind catalogue read-back to the selection and acknowledgements at request
+// time, so a response started before a read cannot restore its old count.
+export function captureMessageExchangeUnreadRefresh() {
+    const exchange = _exchange;
+    const revision = _readRevision;
+    const readPending = _pendingReads.size > 0;
+    return rows => {
+        if (!exchange || exchange !== _exchange || revision !== _readRevision
+            || readPending || _pendingReads.size > 0) return;
+        const row = rows.find(item => item.source_kind === 'message_exchange'
+            && item.session_id === exchange.session_id && item.viewer_id === exchange.viewer_id);
+        if (!Number.isFinite(row?.shared_unread_count)) return;
+        exchange.shared_unread_count = Math.max(0, row.shared_unread_count);
+        updateMessageNavigation();
+    };
+}
 
 function exchangeScope(row = _exchange) {
     return row ? `${row.browser_scope ?? getSessionScopedOrgId() ?? ''}:${row.viewer_id}:${row.session_id}` : '';
@@ -280,6 +298,11 @@ function observeDisplayedMessages() {
             // A full update receipt confirms every submitted ID, including loaded
             // older pages. Partial receipts require read-back; never clear all IDs.
             if (response.updated_count === ids.length) {
+                const newlyRead = _currentMessages.filter(message => ids.includes(message.concept_id)
+                    && isUnreadMessage(message)).length;
+                _readRevision += 1;
+                if (_exchange) _exchange.shared_unread_count = Math.max(0,
+                    (_exchange.shared_unread_count || 0) - newlyRead);
                 _currentMessages.forEach(message => {
                     if (!ids.includes(message.concept_id)) return;
                     message.concept_data ||= {};

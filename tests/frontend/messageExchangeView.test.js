@@ -381,3 +381,65 @@ test('deferred unread navigation preserves the visible contribution across inter
     expect(document.activeElement.dataset.contributionId).toBe('unread');
     geometry.mockRestore();
 });
+
+test('confirmed reads hide navigation at zero even with older history and ignore stale catalogue replies', async () => {
+    const observers = mockReadObserver();
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValueOnce(page(['first', 'last'], 'older', ['first', 'last']));
+    const panel = require(base + 'components/messagePanel.js');
+    const exchange = { ...row('#V#bob'), shared_unread_count: 2 };
+    await panel.openMessageExchange(exchange);
+    const staleRefresh = panel.captureMessageExchangeUnreadRefresh();
+    const jump = document.querySelector('.message-jump-unread');
+    const entry = visibleEntry();
+    api.postJson.mockResolvedValue({ success: true, updated_count: 1 });
+    observers[0].callback([entry]); await flush();
+    expect(jump.hidden).toBe(false);
+    observers[0].callback([{ ...entry, target: document.querySelector('[data-contribution-id="last"]') }]); await flush();
+    expect(document.querySelector('.is-unread')).toBeNull();
+    expect(jump.hidden).toBe(true);
+    staleRefresh([exchange]);
+    expect(jump.hidden).toBe(true);
+    api.postJson.mockResolvedValueOnce(page(['carol'], 'older', ['carol']));
+    await panel.openMessageExchange({ ...row('#V#carol'), shared_unread_count: 1 });
+    expect(jump.hidden).toBe(false);
+    api.postJson.mockResolvedValueOnce(page(['first', 'last'], 'older'));
+    await panel.openMessageExchange({ ...exchange, shared_unread_count: 0 });
+    expect(jump.hidden).toBe(true);
+});
+
+test('catalogue read-back reconciles unread elsewhere without treating omitted rows as zero', async () => {
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValue(page(['latest'], 'older'));
+    const panel = require(base + 'components/messagePanel.js');
+    const exchange = { ...row('#V#bob'), shared_unread_count: 1 };
+    await panel.openMessageExchange(exchange);
+    const reconcile = panel.captureMessageExchangeUnreadRefresh();
+    const jump = document.querySelector('.message-jump-unread');
+    reconcile([]);
+    expect(jump.hidden).toBe(false);
+    reconcile([{ ...exchange, shared_unread_count: 0 }]);
+    expect(jump.hidden).toBe(true);
+    await panel.openMessageExchange({ ...row('#V#carol'), shared_unread_count: 1 });
+    reconcile([{ ...exchange, shared_unread_count: 0 }]);
+    expect(jump.hidden).toBe(false);
+});
+
+test('a catalogue count during an in-flight read is not decremented twice', async () => {
+    const observers = mockReadObserver();
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValueOnce(page(['last-loaded'], 'older', ['last-loaded']));
+    const panel = require(base + 'components/messagePanel.js');
+    const exchange = { ...row('#V#bob'), shared_unread_count: 2 };
+    await panel.openMessageExchange(exchange);
+    const refreshBeforeRead = panel.captureMessageExchangeUnreadRefresh();
+    let finish;
+    api.postJson.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    observers[0].callback([visibleEntry()]);
+    const refreshDuringRead = panel.captureMessageExchangeUnreadRefresh();
+    refreshBeforeRead([{ ...exchange, shared_unread_count: 1 }]);
+    finish({ success: true, updated_count: 1 }); await flush();
+    refreshDuringRead([{ ...exchange, shared_unread_count: 1 }]);
+    expect(document.querySelector('.is-unread')).toBeNull();
+    expect(document.querySelector('.message-jump-unread').hidden).toBe(false);
+});
