@@ -11,7 +11,12 @@ from datetime import UTC, datetime
 import uuid
 
 from ..db.mongo_client import get_db
-from ..security.access_control import get_effective_user_concept_id
+from ..security.access_control import (
+    AUTHENTICATED_SESSION_ACTOR_SOURCE,
+    AUTHENTICATED_SESSION_DERIVED_ACTOR_SOURCE,
+    TRUSTED_IN_PROCESS_ACTOR_SOURCE,
+    get_effective_user_concept_id_with_source,
+)
 
 COLLECTION = "task_dispatch_authorities"
 
@@ -24,8 +29,12 @@ def _collection():
 
 
 def record_assignment(task: dict) -> dict | None:
-    actor = get_effective_user_concept_id()
-    if not actor:
+    actor, source = get_effective_user_concept_id_with_source()
+    if not actor or source not in {
+        AUTHENTICATED_SESSION_ACTOR_SOURCE,
+        AUTHENTICATED_SESSION_DERIVED_ACTOR_SOURCE,
+        TRUSTED_IN_PROCESS_ACTOR_SOURCE,
+    }:
         revoke_assignment(task["task_concept_id"])
         return None
     task_id = task["task_concept_id"]

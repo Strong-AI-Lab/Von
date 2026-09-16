@@ -30,10 +30,10 @@ def test_transferred_assignment_needs_current_actor_receipt_without_rewriting_cr
     assert not worker.authorised_task(task, config)
     task["dispatch_requested"] = True
     assert not worker.authorised_task(task, config)
-    monkeypatch.setattr(authority, "get_effective_user_concept_id", lambda: "#V#other")
+    monkeypatch.setattr(authority, "get_effective_user_concept_id_with_source", lambda: ("#V#other", authority.TRUSTED_IN_PROCESS_ACTOR_SOURCE))
     authority.record_assignment(task)
     assert not worker.authorised_task(task, config)
-    monkeypatch.setattr(authority, "get_effective_user_concept_id", lambda: "#V#owner")
+    monkeypatch.setattr(authority, "get_effective_user_concept_id_with_source", lambda: ("#V#owner", authority.TRUSTED_IN_PROCESS_ACTOR_SOURCE))
     authority.record_assignment(task)
     assert worker.authorised_task(task, config)
     assert task["created_by_concept_id"] == "#V#historical_author"
@@ -74,3 +74,11 @@ def test_only_active_local_home_can_dispatch(monkeypatch, state, node, allowed):
         )
         is allowed
     )
+
+
+def test_legacy_identity_header_cannot_grant_dispatch(monkeypatch):
+    collection = mongomock.MongoClient().test.receipts
+    monkeypatch.setattr(authority, "_collection", lambda: collection)
+    monkeypatch.setattr(authority, "get_effective_user_concept_id_with_source", lambda: ("#V#owner", "legacy_identity_header"))
+    assert authority.record_assignment({"task_concept_id": "#V#task"}) is None
+    assert collection.find_one({"_id": "#V#task"})["revoked"] is True

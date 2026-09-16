@@ -2465,19 +2465,12 @@ def assign_task(
         existing_assignees = [existing_assignees]
     if not isinstance(existing_assignees, list):
         existing_assignees = []
-    for old_assignee in existing_assignees:
-        ConceptsRepository.mutate_relationship_edge(
-            source_id=task_concept_id,
-            kind=PREDICATE_HAS_ASSIGNEE,
-            target_id=old_assignee,
-            action="remove",
-        )
-
-    ConceptsRepository.mutate_relationship_edge(
-        source_id=task_concept_id,
-        kind=PREDICATE_HAS_ASSIGNEE,
-        target_id=assignee_concept_id,
-        action="add",
+    # Related identities may be redacted in a personal scope. Replace the
+    # singleton edge exactly; enumerating the visible old targets can leave an
+    # invisible previous assignee in place.
+    ConceptsRepository.update_one(
+        {"concept_id": task_concept_id},
+        {"$set": {f"relationships.{PREDICATE_HAS_ASSIGNEE}": [assignee_concept_id]}},
     )
 
     # Source assignment records do not grant the source participant new access.
@@ -2511,9 +2504,19 @@ def assign_task(
     except Exception as e:
         logger.debug("Failed to append task assignment history event: %s", e)
     assigned = get_task(task_concept_id)
-    if update_visibility and assigned.get("assignee_concept_id") == assignee_concept_id:
+    if update_visibility and ConceptsRepository.find_one(
+        {
+            "concept_id": task_concept_id,
+            f"relationships.{PREDICATE_HAS_ASSIGNEE}": [assignee_concept_id],
+        },
+        projection={"_id": 1},
+    ):
         from .task_dispatch_authority_service import record_assignment
 
+        # The actor supplied this identity and the actor-scoped query verified
+        # its exact edge. Do not require visibility of the agent's profile to
+        # acknowledge the actor's own assignment or establish dispatch.
+        assigned["assignee_concept_id"] = assignee_concept_id
         receipt = record_assignment(assigned)
         if receipt:
             ConceptsRepository.update_one(
