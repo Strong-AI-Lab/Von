@@ -1,9 +1,11 @@
+import { initialiseDraftControls } from './components/conversationDraftControls.js';
+import { initialiseConversationDraft, resizeConversationDraft, navigateConversationDraftHistory } from './components/conversationDraft.js';
 import { createTurnModelPicker } from './components/turnModelPicker.js';
 import { copyCompactConversationReference, isConversationConceptReference, conversationReferenceMetadata, readConversationReference } from './utils/conversationReference.js';
 import { bindConversationRowMenu } from './components/conversationRowMenu.js';
 import { initialiseConversationActions } from './components/conversationActions.js';
 import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './components/conversationNavigation.js';
-import { initialiseCompactChatComposer, isCompactComposer, resizeCompactDraft, shouldSubmitComposerKey } from './components/compactComposer.js';
+import { initialiseCompactChatComposer, isCompactComposer } from './components/compactComposer.js';
 import { updateExecutionCost } from './components/executionCost.js';
 import { canUseWorkflowStudio } from './workflowStudioAccess.js';
 import { createChatSteeringControls } from './components/chatSteeringControls.js';
@@ -26,10 +28,9 @@ import {
     isPremiumModelProvider,
     resolveLocalRequestedLlm,
 } from './utils/localModelPreferences.js';
-import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { initializeMessagePanel, loadUnreadCount } from './components/messagePanel.js';
 import { loadMyOrganisations, synchroniseOrganisationContext } from './components/orgSelector.js';
-import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
+import { normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
 import { initializeTaskPanel, isTaskPanelVisible, setCurrentSession as setTaskPanelSession, toggleTaskPanel } from './components/taskPanel.js';
 import {
     decorateInspectableReferences,
@@ -21305,55 +21306,14 @@ function rehydrateLastSubmittedUserPromptFromHistory(historyMessages) {
 }
 
 function handlePromptInputHistoryNavigation(event) {
-    if (!event) return;
-    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
-    if (event.ctrlKey || event.altKey || event.metaKey) return;
-
-    const promptInput = event.currentTarget || getPromptInputElement();
-    if (!promptInput) return;
-
-    const history = getPromptHistoryForActiveSession();
-    if (history.length === 0) return;
-
-    let cursor = getPromptHistoryCursorForActiveSession();
-    let nextValue;
-    const isShiftJump = event.shiftKey;
-    const promptValue = String(promptInput.value || '');
-    const isCurrentHistoryValue = cursor >= 0 && cursor < history.length && history[cursor] === promptValue;
-    const allowsHistoryNavigation = promptValue === '' || isCurrentHistoryValue;
-    if (!allowsHistoryNavigation) return;
-
-    if (event.key === 'ArrowUp') {
-        cursor = isShiftJump ? 0 : Math.max(0, cursor - 1);
-        nextValue = history[cursor];
-    } else {
-        if (isShiftJump) {
-            cursor = Math.max(0, history.length - 1);
-        } else {
-            if (cursor >= history.length) return;
-            cursor = cursor + 1;
-        }
-        if (cursor >= history.length) {
-            setPromptHistoryCursorForActiveSession(cursor);
-            event.preventDefault();
-            setPromptComposerValue('', { promptInput });
-            return;
-        }
-        nextValue = history[cursor];
-    }
-
-    if (!nextValue) return;
-
-    setPromptHistoryCursorForActiveSession(cursor);
-
-    event.preventDefault();
-    setPromptComposerValue(nextValue, { promptInput });
-    try {
-        const len = promptInput.value.length;
-        promptInput.setSelectionRange(len, len);
-    } catch (_) {
-        // Ignore browsers/environments without setSelectionRange support.
-    }
+    const input = event?.currentTarget || getPromptInputElement();
+    if (!input) return;
+    const next = navigateConversationDraftHistory(event, input,
+        getPromptHistoryForActiveSession(), getPromptHistoryCursorForActiveSession());
+    if (!next) return;
+    setPromptHistoryCursorForActiveSession(next.cursor);
+    setPromptComposerValue(next.value, { promptInput: input });
+    input.setSelectionRange(input.value.length, input.value.length);
 }
 
 function dispatchPromptComposerInputEvent(promptInput = getPromptInputElement()) {
@@ -31153,14 +31113,7 @@ function handleConversationScrollPositionChange(scrollableField) {
 }
 
 function resizePromptComposer(promptInput) {
-    if (!(promptInput instanceof HTMLTextAreaElement)) return;
-    if (isCompactComposer()) { resizeCompactDraft(promptInput); return; }
-    promptInput.style.height = 'auto';
-    const minHeight = 44;
-    const maxHeight = 144;
-    const nextHeight = Math.min(maxHeight, Math.max(minHeight, Number(promptInput.scrollHeight) || minHeight));
-    promptInput.style.height = `${nextHeight}px`;
-    promptInput.style.overflowY = (Number(promptInput.scrollHeight) || 0) > maxHeight ? 'auto' : 'hidden';
+    resizeConversationDraft(promptInput);
 }
 
 function setLatestUnreadBoundary(messageElement) {
@@ -34317,6 +34270,7 @@ export function initializeChatTab() {
     }
 
     // Shared mobile/desktop recording lifecycle; browser recognition is explicit.
+    initialiseDraftControls({ sendButton, attachmentButton: document.getElementById('attachImageButton'), dictateButton });
     dictationController?.dispose();
     if (dictateButton && promptInput) {
         dictationController = createDictationController({
@@ -34368,7 +34322,7 @@ export function initializeChatTab() {
         updateSendButtonForCurrentChatState();
         if (!chatSteeringControls?.activate(event)) void handleSendPrompt();
     };
-    sendButton.addEventListener('click', submitComposer);
+
     resetButton.addEventListener('click', handleResetContext);
 
     ensureAbortButtonBound();
@@ -34380,29 +34334,14 @@ export function initializeChatTab() {
         setSelectedChatPromptQueueEntryId(null);
     });
 
-    promptInput.addEventListener('input', function () {
-        setSelectedChatPromptQueueEntryId(null);
-        resizePromptComposer(promptInput);
-        updateSendButtonDraftReadiness();
+    initialiseConversationDraft({
+        input: promptInput, sendButton, onSubmit: submitComposer,
+        onInput: () => {
+            setSelectedChatPromptQueueEntryId(null);
+            updateSendButtonDraftReadiness();
+        },
+        onHistory: handlePromptInputHistoryNavigation
     });
-    resizePromptComposer(promptInput);
-
-    promptInput.addEventListener('keypress', function (event) {
-        if (shouldSubmitComposerKey(event)) {
-            event.preventDefault();
-            submitComposer(event);
-        }
-    });
-
-    // JVNAUTOSCI-2128/2163: ArrowUp/ArrowDown on an empty composer recalls
-    // historical submitted prompts with cursor navigation.
-    promptInput.addEventListener('keydown', handlePromptInputHistoryNavigation);
-
-    // Initialize concept autocomplete for #V# trigger
-    initializeConceptAutocomplete(promptInput);
-
-    // Render non-trigger (#V\u200B#...) concept tokens as cartouches in the prompt.
-    initializePromptCartoucheOverlay(promptInput);
 
     void Promise.allSettled([
         loadRecentChatPair({
