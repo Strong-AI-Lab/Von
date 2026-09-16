@@ -129,6 +129,12 @@ def test_reimport_repairs_fallbacks_preserving_source_dates_and_appends(monkeypa
     ]
     assert stored["updated_at"] == datetime(2026, 1, 3)
     assert write([dated, repaired, extra], "new")["action"] == "unchanged"
+    # A valid raw-source receipt repairs a missing pointer even with the same
+    # source bytes/parser; this does not duplicate transcript events.
+    manifest["raw_file_copy_concept_id"] = "#V#retained_file"
+    raw_repair = write([dated, repaired, extra], "new")
+    assert raw_repair["action"] == "refreshed"
+    assert collection.find_one({})["external_conversation_import"]["raw_file_copy_concept_id"] == "#V#retained_file"
     # Changed historical content remains a divergence, never a timestamp repair.
     divergent = write(
         [
