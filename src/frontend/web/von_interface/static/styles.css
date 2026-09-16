@@ -11835,7 +11835,8 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     min-height: 44px;
 }
 
-.chat-composer .composer-icon-button {
+.chat-composer .composer-icon-button,
+#sendMessageBtn.composer-icon-button {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -18656,7 +18657,8 @@ body.settings-body {
     .chat-composer-more-actions { display: block; position: static; grid-column: 1 / -1; grid-row: 2; }
     .chat-composer #sendButton { grid-column: 3; grid-row: 1; width: 44px; min-width: 44px; }
     .chat-composer #sendButton[data-has-draft="false"]:not([aria-busy="true"]) { display: none; }
-    .chat-composer .composer-icon-button svg { width: 20px; height: 20px; }
+    .chat-composer .composer-icon-button svg,
+    #sendMessageBtn.composer-icon-button svg { width: 20px; height: 20px; }
     .chat-composer-more-actions > summary {
         position: absolute; top: 6px; left: 6px;
         width: 44px; height: 44px; justify-content: center;
