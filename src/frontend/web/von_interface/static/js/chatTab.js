@@ -10,6 +10,7 @@ import { createChatSteeringControls } from './components/chatSteeringControls.js
 import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows, catalogueSearchActive, rankCatalogueSearchRows } from './components/conversationCatalogue.js';
 import { catalogueHasMore } from './components/conversationCatalogue.js';
 import { profileButton, participantAvatar, participantIdentityAvatar } from './components/participantProfile.js';
+import { importedConversationAvatar } from './components/importedConversationAvatar.js';
 import { setButtonLabel } from './utils/buttonLabel.js';
 import { createConversationTray } from './components/conversationTray.js';
 import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_NARROW_QUERY, loadConversationLayoutPreferences, normaliseConversationLayout, saveConversationLayoutPreference } from './utils/conversationLayoutPreferences.js';
@@ -27535,7 +27536,9 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
         const header = document.createElement('span');
         header.className = 'chat-session-tab-header';
-        header.append(participantAvatar({ display_name: session.external_conversation ? displayName : 'Von', avatar_url: session.external_conversation ? null : '/static/VonImageBig.png' }));
+        header.append(session.external_conversation
+            ? importedConversationAvatar(session.external_conversation.provider, displayName, { sidebar: true })
+            : participantAvatar({ display_name: 'Von', avatar_url: '/static/VonImageBig.png' }));
 
         const pinToggle = document.createElement('button');
         pinToggle.type = 'button';
@@ -38369,10 +38372,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             if (options.contributionTimestamp || timestampStr) messageContainer.dataset.contributionTimestamp = options.contributionTimestamp || timestampStr;
             let assistantAvatar;
             if (externalActor) {
-                assistantAvatar = document.createElement('span');
-                assistantAvatar.className = 'chat-imported-actor-avatar';
-                assistantAvatar.textContent = String(sender || 'Agent').trim().slice(0, 1).toUpperCase() || 'A';
-                assistantAvatar.setAttribute('aria-label', `${sender} (imported actor)`);
+                assistantAvatar = importedConversationAvatar(externalActor.source_actor_id, sender);
             } else {
                 assistantAvatar = document.createElement('img');
                 assistantAvatar.src = '/static/VonImageBig.png';

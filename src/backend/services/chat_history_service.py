@@ -4853,6 +4853,7 @@ def upsert_external_conversation_projection(
         }
 
     divergence: Dict[str, Any] | None = None
+    corrected_fallback_timestamp_count = 0
     appended_history = prepared_history
     action = "new"
     if existing is not None:
@@ -4920,6 +4921,32 @@ def upsert_external_conversation_projection(
         else:
             action = "refreshed"
 
+        # A missing source timestamp is part of the event fingerprint; its
+        # display fallback is not. Repair only verified, unchanged events.
+        if not divergence:
+            repaired_history = []
+            for entry in existing_history:
+                incoming = incoming_by_id.get(entry.get("external_event_id"))
+                if (
+                    incoming is not None
+                    and "external_source_timestamp_utc" in entry
+                    and entry["external_source_timestamp_utc"] is None
+                    and incoming.get("external_timestamp_source") == "source_file_modified"
+                    and _coerce_datetime(incoming.get("timestamp")) is not None
+                    and (
+                        entry.get("timestamp") != incoming["timestamp"]
+                        or entry.get("external_timestamp_source") != "source_file_modified"
+                    )
+                ):
+                    entry = {
+                        **entry,
+                        "timestamp": incoming["timestamp"],
+                        "external_timestamp_source": "source_file_modified",
+                    }
+                    corrected_fallback_timestamp_count += 1
+                repaired_history.append(entry)
+            existing_history = repaired_history
+
     combined_history = [*existing_history, *appended_history]
     stored_manifest["synchronisation"] = {
         "schema_version": "external_conversation_synchronisation.v1",
@@ -4927,6 +4954,7 @@ def upsert_external_conversation_projection(
         "checked_at_utc": now.isoformat(),
         "appended_message_count": len(appended_history),
         "retained_message_count": len(existing_history),
+        "corrected_fallback_timestamp_count": corrected_fallback_timestamp_count,
         "divergence": divergence,
     }
     search_segments = [
@@ -4974,7 +5002,13 @@ def upsert_external_conversation_projection(
         query[f"{EXTERNAL_CONVERSATION_IMPORT_FIELD}.package_sha256"] = (
             existing_manifest.get("package_sha256")
         )
-        if appended_history:
+        if corrected_fallback_timestamp_count:
+            # Keep the same package compare-and-swap and avoid conflicting
+            # $push/$set updates to the history array.
+            set_fields["history"] = combined_history
+            set_fields["created_at"] = first_message_at
+            set_on_insert.pop("created_at", None)
+        elif appended_history:
             update["$push"] = {"history": {"$each": appended_history}}
     try:
         result = chat_history_coll.update_one(
@@ -5041,6 +5075,7 @@ def upsert_external_conversation_projection(
         "action": action,
         "session_id": session_id,
         "appended_message_count": len(appended_history),
+        "corrected_fallback_timestamp_count": corrected_fallback_timestamp_count,
         "divergence": divergence,
         "canonical_read_back": {
             "session_id": session_id,
