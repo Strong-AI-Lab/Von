@@ -640,12 +640,17 @@ class TestUpdateTaskStatus:
 class TestAssignTask:
     """Tests for assign_task function."""
 
+    @patch(
+        "src.backend.services.task_dispatch_authority_service.record_assignment",
+        return_value=None,
+    )
     @patch("src.backend.services.task_management_service.get_task")
     @patch("src.backend.services.task_management_service.ConceptsRepository")
     def test_assign_task_success(
         self,
         mock_repo: MagicMock,
         mock_get_task: MagicMock,
+        mock_record_assignment: MagicMock,
     ) -> None:
         """assign_task() should update assignee relationship."""
         mock_repo.find_one.return_value = {
@@ -665,6 +670,20 @@ class TestAssignTask:
         assert result["assignee_concept_id"] == "#V#user_new"
         # Verify mutate_relationship_edge was called for add
         mock_repo.mutate_relationship_edge.assert_called()
+
+
+class TestPersonalTaskAssignment:
+    @patch("src.backend.services.task_dispatch_authority_service.record_assignment", return_value={"dispatch_id": "fresh"})
+    @patch("src.backend.services.task_management_service.get_task")
+    @patch("src.backend.services.task_management_service.ConceptsRepository")
+    def test_redacted_agent_profile_does_not_hide_deliberate_assignment(self, repo, get_task_mock, record):
+        repo.find_one.return_value = {"concept_id": "#V#task_abc", "relationships": {"is_an_instance_of": [TASK_SPECIFICATION_TYPE_ID]}}
+        get_task_mock.return_value = {"task_concept_id": "#V#task_abc", "assignee_concept_id": None, "organisation_concept_id": None}
+        result = assign_task("#V#task_abc", "#V#agent")
+        assert result["assignee_concept_id"] == "#V#agent"
+        assert result["dispatch_requested"] is True
+        assert record.call_args.args[0]["assignee_concept_id"] == "#V#agent"
+        repo.update_one.assert_any_call({"concept_id": "#V#task_abc"}, {"$set": {"relationships.#V#hasAssignee": ["#V#agent"]}})
 
 
 class TestGetTasksForUser:

@@ -37,16 +37,16 @@ def _write_receipt(path: Path, artifact_path: Path, *, db_name: str = "von_db") 
 
 
 def _zip_backup(source_root: Path, destination_zip: Path) -> Path:
-    with zipfile.ZipFile(destination_zip, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(
+        destination_zip, mode="w", compression=zipfile.ZIP_DEFLATED
+    ) as zf:
         for item in source_root.rglob("*"):
             if item.is_file():
                 zf.write(item, item.relative_to(source_root).as_posix())
     return destination_zip
 
 
-def test_dry_run_from_receipt_defaults_to_probe_target(
-    tmp_path: Path, capsys
-) -> None:
+def test_dry_run_from_receipt_defaults_to_probe_target(tmp_path: Path, capsys) -> None:
     backup_root = _make_dump_tree(tmp_path)
     receipt_path = tmp_path / "launcher_receipt.json"
     _write_receipt(receipt_path, backup_root)
@@ -164,7 +164,7 @@ def test_mongorestore_uses_private_config_and_bounded_timeout(
     assert mongo_uri not in observed["command"]
     assert "--drop" in observed["command"]
     assert observed["config_mode"] == 0o600
-    assert mongo_uri in observed["config_text"]
+    assert "mongodb://restore-user:restore-secret@example.invalid/?authSource=von_db" in observed["config_text"]
     assert not Path(observed["config_path"]).exists()
 
 
@@ -255,3 +255,22 @@ def test_legacy_von_prelude_does_not_shadow_mongodb_metadata(tmp_path, monkeypat
         drop_target=False,
     )
     assert (backup_root / "prelude.json").read_text() == original
+
+
+def test_namespace_restore_removes_database_path_without_changing_authentication():
+    from scripts.restore_von_db import _uri_for_namespace_restore
+
+    assert (
+        _uri_for_namespace_restore(
+            "mongodb://fixture:password@localhost:27017/von_db?authSource=admin"
+        )
+        == "mongodb://fixture:password@localhost:27017/?authSource=admin"
+    )
+    assert (
+        _uri_for_namespace_restore("mongodb://fixture:password@localhost:27017/von_db")
+        == "mongodb://fixture:password@localhost:27017/?authSource=von_db"
+    )
+    assert (
+        _uri_for_namespace_restore("mongodb://localhost:27017/von_db")
+        == "mongodb://localhost:27017/"
+    )

@@ -16,10 +16,17 @@ from src.backend.workflows.durable.task_ownership import claim_admission_validat
 
 
 def install_admission(
-    db, *, collection="workflow_instances", worker_pattern="^worker_", apply=False
+    db,
+    *,
+    collection="workflow_instances",
+    worker_pattern="^worker_",
+    apply=False,
+    required_capability="durable_task_ownership_v1",
 ):
     options = db[collection].options()
-    rule = claim_admission_validator(worker_pattern)
+    rule = claim_admission_validator(
+        worker_pattern, required_capability=required_capability
+    )
     existing = options.get("validator", {})
     validator = (
         existing
@@ -55,10 +62,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--worker-pattern", default="^worker_")
+    parser.add_argument("--required-capability", default="durable_task_ownership_v1")
     parser.add_argument("--receipt", type=Path, required=True)
     args = parser.parse_args()
     result = install_admission(
-        get_db(), worker_pattern=args.worker_pattern, apply=args.apply
+        get_db(),
+        worker_pattern=args.worker_pattern,
+        apply=args.apply,
+        required_capability=args.required_capability,
     )
     args.receipt.write_text(json.dumps(result, indent=2, default=str))
     print(json.dumps(result, default=str))

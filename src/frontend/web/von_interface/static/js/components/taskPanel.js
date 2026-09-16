@@ -399,6 +399,21 @@ function getHiddenBulkTaskCollections(task) {
     ));
 }
 
+function projectHomeNotice(project) {
+    const home = project?.write_home;
+    if (!home || home.writable_here) return '';
+    const label = home.state === 'replica' ? 'Read-only project copy.' : 'Project transfer in progress.';
+    const freshness = home.snapshot_at ? ` Snapshot: ${escapeHtml(String(home.snapshot_at))}.` : '';
+    let route = '';
+    try {
+        const url = new URL(home.url);
+        if (['https:', 'http:'].includes(url.protocol)) {
+            route = ` <a href="${escapeHtml(url.href)}" target="_blank" rel="noopener noreferrer">Open the project’s write home</a>`;
+        }
+    } catch (_) { /* A missing route must not break project navigation. */ }
+    return `<span class="task-project-home-notice">${label}${freshness}${route}</span>`;
+}
+
 function normaliseBulkTaskCollectionSummary(collection) {
     if (!collection || typeof collection !== 'object') return null;
     const collectionId = typeof collection.collection_id === 'string'
@@ -1081,7 +1096,7 @@ function renderGlobalTasksTabContent() {
                 </div>
             </div>
             <div id="globalTaskSummary" class="global-task-summary" aria-live="polite"></div>
-            <div id="globalTaskProjectInfo" class="global-task-summary">${escapeHtml(_taskProjects.find((project) => project.concept_id === _selectedProjectId)?.description || '')}</div>
+            <div id="globalTaskProjectInfo" class="global-task-summary">${escapeHtml(_taskProjects.find((project) => project.concept_id === _selectedProjectId)?.description || '')} ${projectHomeNotice(_taskProjects.find((project) => project.concept_id === _selectedProjectId))}</div>
             <div id="globalBulkTaskVisibilityControl" class="bulk-task-visibility-control hidden" aria-live="polite"></div>
             <div id="globalTaskLoadProgress" class="task-load-progress" aria-live="polite"></div>
             <section id="globalTaskQueueActivity" class="task-detail-section" aria-live="polite"></section>
@@ -1170,6 +1185,9 @@ function renderGlobalTasksTabContent() {
                 const details = await getJson(`/api/tasks/projects/${encodeURIComponent(_selectedProjectId)}`);
                 if (generation !== _globalTaskLoadGeneration) return;
                 _projectCollections = details.collections || [];
+                if (details.project) {
+                    _taskProjects = _taskProjects.map((project) => project.concept_id === _selectedProjectId ? details.project : project);
+                }
             } catch (error) {
                 if (generation !== _globalTaskLoadGeneration) return;
                 showToast('Could not load project collections', 'error');
@@ -1234,6 +1252,11 @@ function renderGlobalTasksTabContent() {
     const createBtn = _globalTasksContainer.querySelector('#globalCreateTaskBtn');
     if (createBtn) {
         createBtn.addEventListener('click', handleGlobalCreateTask);
+    }
+    const selectedHome = _taskProjects.find((project) => project.concept_id === _selectedProjectId)?.write_home;
+    if (selectedHome && !selectedHome.writable_here) {
+        _globalTasksContainer.querySelectorAll('.global-tasks-create input, .global-tasks-create textarea, .global-tasks-create select, .global-tasks-create button')
+            .forEach((control) => { control.disabled = true; });
     }
 
     // Update the task list element reference for global mode
