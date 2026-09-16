@@ -443,3 +443,27 @@ test('a catalogue count during an in-flight read is not decremented twice', asyn
     expect(document.querySelector('.is-unread')).toBeNull();
     expect(document.querySelector('.message-jump-unread').hidden).toBe(false);
 });
+
+
+test.each([0, 1])('post-read catalogue refresh reconciles stale counts after a receipt of %i', async updatedCount => {
+    const observers = mockReadObserver();
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValueOnce(page(['last'], 'older', ['last']));
+    const panel = require(base + 'components/messagePanel.js');
+    const exchange = { ...row('#V#bob'), shared_unread_count: 2 };
+    await panel.openMessageExchange(exchange);
+    const staleRefresh = panel.captureMessageExchangeUnreadRefresh();
+    let reconcile;
+    document.addEventListener('von:conversation-contribution', () => {
+        reconcile = panel.captureMessageExchangeUnreadRefresh();
+    }, { once: true });
+    api.postJson.mockResolvedValueOnce({ success: true, updated_count: updatedCount })
+        .mockResolvedValueOnce(page(['last'], 'older'));
+    observers[0].callback([visibleEntry()]); await flush();
+    expect(document.querySelector('.is-unread')).toBeNull();
+    expect(reconcile).toBeDefined();
+    reconcile([{ ...exchange, shared_unread_count: 0 }]);
+    expect(document.querySelector('.message-jump-unread').hidden).toBe(true);
+    staleRefresh([exchange]);
+    expect(document.querySelector('.message-jump-unread').hidden).toBe(true);
+});

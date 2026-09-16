@@ -295,12 +295,12 @@ function observeDisplayedMessages() {
         void postJson('/api/messages/read/bulk', { message_ids: ids }).then(async response => {
             if (generation !== _exchangeGeneration || org !== getSessionScopedOrgId()) return;
             if (response?.success !== true) throw new Error('Read state was not saved');
+            _readRevision += 1;
             // A full update receipt confirms every submitted ID, including loaded
             // older pages. Partial receipts require read-back; never clear all IDs.
             if (response.updated_count === ids.length) {
                 const newlyRead = _currentMessages.filter(message => ids.includes(message.concept_id)
                     && isUnreadMessage(message)).length;
-                _readRevision += 1;
                 if (_exchange) _exchange.shared_unread_count = Math.max(0,
                     (_exchange.shared_unread_count || 0) - newlyRead);
                 _currentMessages.forEach(message => {
@@ -314,6 +314,9 @@ function observeDisplayedMessages() {
             if (_currentMessages.some(m => ids.includes(m.concept_id) && isUnreadMessage(m))) showReadFailure();
             else {
                 root.querySelector('.message-read-status')?.remove();
+                // The ensuing catalogue request must capture a settled read;
+                // otherwise its authoritative count is rejected as in-flight.
+                ids.forEach(id => _pendingReads.delete(`${generation}:${id}`));
                 document.dispatchEvent(new CustomEvent('von:conversation-contribution'));
             }
         }).catch(() => {
