@@ -1,6 +1,8 @@
 // Cache only this public, dependency-free outage shell. Never cache application HTML,
 // API responses, navigation history, health payloads, credentials or uploaded files.
-const CACHE = 'von-outage-v1';
+// Install the complete dependency bundle separately. A failed upgrade must not
+// overwrite the active shell with imports its old worker cannot serve offline.
+const CACHE = 'von-outage-v1-sign-in';
 const STATIC_ROOT = '/static/';
 const ASSETS = ['/static/outage/offline.html', '/static/outage/offline.js', '/static/outage/status.js', '/static/outage/outage.css', '/static/outage/health.js'];
 self.addEventListener('install', event => {
@@ -24,7 +26,7 @@ self.addEventListener('activate', event => {
   event.waitUntil((async () => {
     await self.clients.claim();
     for (const name of await caches.keys()) {
-      if (name.startsWith('von-outage-v1-') && name !== CACHE) await caches.delete(name);
+      if ((name === 'von-outage-v1' || name.startsWith('von-outage-v1-')) && name !== CACHE) await caches.delete(name);
     }
   })());
 });
