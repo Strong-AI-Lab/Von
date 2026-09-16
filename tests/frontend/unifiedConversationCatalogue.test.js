@@ -1,7 +1,7 @@
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({ getJson: jest.fn(), postJson: jest.fn() }));
 jest.mock('../../src/frontend/web/von_interface/static/js/utils/sessionScopedStorage.js', () => ({ getSessionScopedOrgId: jest.fn(() => '#V#lab') }));
 jest.mock('../../src/frontend/web/von_interface/static/js/components/messagePanel.js', () => ({
-    openMessageExchange: jest.fn(), refreshOpenMessageExchange: jest.fn(), showMessageComposer: jest.fn(), resetMessagePanelContext: jest.fn()
+    openMessageExchange: jest.fn(), refreshOpenMessageExchange: jest.fn(), showMessageComposer: jest.fn(), resetMessagePanelContext: jest.fn(), captureMessageExchangeUnreadRefresh: jest.fn(() => jest.fn())
 }));
 
 const api = require('../../src/frontend/web/von_interface/static/js/apiService.js');

@@ -13,6 +13,9 @@ let cursors = [];
 let sent = [];
 let background = false;
 let pendingPage = null;
+let zeroTransition = false;
+let pendingRead = null;
+const readMessages = new Set();
 const message = (id, unread, day) => ({ concept_id: id, created_at: `2026-09-${day}T12:00:00Z`,
     relationships: { '#V#has_sender': ['#V#bob'], '#V#has_recipient': ['#V#alice'] },
     concept_data: { content_fallback: `${id}: ${'A realistic message for checking the reading position. '.repeat(5)}`, read_by: unread ? [] : ['#V#alice'] } });
@@ -34,9 +37,23 @@ const server = http.createServer(async (req, res) => {
         sent.push(JSON.parse(body));
         return res.end(JSON.stringify({ success: true, message_id: '#V#fixture_sent' }));
     }
+    if (req.url === '/api/messages/read/bulk' && zeroTransition) {
+        let body = ''; for await (const chunk of req) body += chunk;
+        const { message_ids } = JSON.parse(body);
+        pendingRead = () => {
+            message_ids.forEach(id => readMessages.add(id));
+            res.end(JSON.stringify({ success: true, updated_count: message_ids.length }));
+        };
+        return;
+    }
     if (req.url === '/api/messages/exchange') {
         let body = ''; for await (const chunk of req) body += chunk;
-        const { before } = JSON.parse(body); cursors.push(before);
+        const { before, participant_ids } = JSON.parse(body); cursors.push(before);
+        if (zeroTransition) {
+            const id = participant_ids.includes('#V#carol') ? 'carol-final' : 'bob-final';
+            return res.end(JSON.stringify({ current_user_id: '#V#alice', before: 'read-history',
+                messages: [message(id, !readMessages.has(id), '15')] }));
+        }
         const initial = Array.from({ length: 20 }, (_, index) => message(`latest-${String(index).padStart(2, '0')}`, false, '13'));
         const result = !before ? { messages: background ? [...initial, message('Background unread', true, '14')] : initial, before: 'middle' }
             : before === 'middle' ? { messages: Array.from({ length: 10 }, (_, index) => message(`middle-${index}`, index === 5, '12')), before: 'older' }
@@ -57,6 +74,7 @@ const server = http.createServer(async (req, res) => {
             cursors = [];
             sent = [];
             background = false;
+            zeroTransition = false;
             const page = await browser.newPage({ viewport: { width, height: 850 } });
             const errors = []; page.on('pageerror', error => errors.push(error.message));
             await page.goto(`http://127.0.0.1:${server.address().port}`);
@@ -139,6 +157,39 @@ const server = http.createServer(async (req, res) => {
             assert.deepEqual(errors, []);
             results.push({ width, cursors: [...cursors], sendArrow: true, sendTarget: box, sends: sent.length, labelledLatestNavigation: true, defaultTopPreserved: true, backgroundPosition: bottomPosition, intermediateAnchorOffset: anchor.offset, firstUnreadFocused: true, targetInViewport: true });
             await page.close();
+
+            // Real IntersectionObserver and confirmed HTTP receipt: the last
+            // unread disappears while an older-history cursor still exists.
+            zeroTransition = true;
+            readMessages.clear();
+            const reading = await browser.newPage({ viewport: { width, height: 850 } });
+            await reading.goto(`http://127.0.0.1:${server.address().port}`);
+            const open = (other, count) => reading.evaluate(async ({ other, count }) => {
+                document.getElementById('conversationWorkspace').classList.add('show-message-exchange');
+                document.body.classList.add('viewing-message-exchange');
+                const panel = await import('/static/js/components/messagePanel.js');
+                await panel.openMessageExchange({ session_id: `messages:${other}`, viewer_id: '#V#alice',
+                    participant_ids: ['#V#alice', other], other_participant_ids: [other],
+                    session_name: other, shared_unread_count: count });
+            }, { other, count });
+            await open('#V#bob', 1);
+            const unreadButton = reading.locator('.message-jump-unread');
+            await expect(unreadButton).toBeVisible();
+            await expect.poll(() => Boolean(pendingRead)).toBe(true);
+            pendingRead(); pendingRead = null;
+            await expect(reading.locator('.is-unread')).toHaveCount(0);
+            await expect(unreadButton).toBeHidden();
+            await expect(reading.getByRole('button', { name: 'Load earlier messages', exact: true })).toBeVisible();
+            await reading.screenshot({ path: path.join(evidence, `zero-unread-${width}.png`) });
+            await open('#V#carol', 1);
+            await expect(unreadButton).toBeVisible();
+            await expect.poll(() => Boolean(pendingRead)).toBe(true);
+            await open('#V#bob', 0);
+            pendingRead(); pendingRead = null;
+            await expect(unreadButton).toBeHidden();
+            results[results.length - 1].zeroUnreadHiddenWithOlderHistory = true;
+            results[results.length - 1].switchAndReopenCorrect = true;
+            await reading.close();
         }
         fs.writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ fixture: true, results }, null, 2));
     } finally { await browser.close(); server.close(); }
