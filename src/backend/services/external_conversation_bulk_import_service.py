@@ -124,7 +124,10 @@ def _provider_roots(provider: str) -> tuple[tuple[str, Path, str], ...]:
         pattern = "**/*.json*" if provider == "copilot" else "**/*.jsonl"
         return ((f"{provider}:configured", Path(override).expanduser(), pattern),)
     if provider == "codex":
-        return (("codex:sessions", home / ".codex" / "sessions", "**/*.jsonl"),)
+        return (
+            ("codex:sessions", home / ".codex" / "sessions", "**/*.jsonl"),
+            ("codex:archived", home / ".codex" / "archived_sessions", "**/*.jsonl"),
+        )
     if provider == "claude_code":
         return (("claude:projects", home / ".claude" / "projects", "**/*.jsonl"),)
     if provider == "gemini":

@@ -1,5 +1,13 @@
 # External conversation import
 
+Codex machine discovery includes both active and archived sessions. For forked
+Codex rollouts, the first session metadata owns the conversation identity;
+copied ancestor metadata does not replace it. Gemini A2A journals reuse the
+`a2a-server` identifier, so separate runs are distinguished by their stable
+`startTime`. The original identifier and the identity basis remain in the import
+report; raw source bytes are unchanged. A missing A2A start time falls back to
+the source hash, so append reconciliation cannot be guaranteed for that case.
+
 - **Kind:** Design and implementation boundary
 - **Lifecycle:** Active
 - **Authority:** Canonical reference within external transcript import scope,
