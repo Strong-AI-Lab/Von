@@ -119,6 +119,7 @@ class SessionDecision:
     record: SessionRecord
     document_concept_id: str
     repair_file_copy_concept_id: str | None = None
+    existing_file_copy_concept_id: str | None = None
 
 
 @dataclass
@@ -781,6 +782,7 @@ class AIChatSessionIngestionService:
                     "source_session_id": decision.record.source_session_id,
                     "document_concept_id": decision.document_concept_id,
                     "action": "unchanged",
+                    "file_copy_concept_id": decision.existing_file_copy_concept_id,
                     "reason": decision.reason,
                     "success": True,
                     "storage_object_written": False,
@@ -1073,6 +1075,9 @@ class AIChatSessionIngestionService:
                 reason="content_hash_match",
                 record=record,
                 document_concept_id=document_concept_id,
+                existing_file_copy_concept_id=self._read_attribute(
+                    existing, "current_file_copy_concept_id"
+                ),
             )
 
         return SessionDecision(
