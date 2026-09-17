@@ -168,3 +168,6 @@ clouds.yaml
 secure.yaml
 **/clouds.yaml
 **/secure.yaml
+
+# Optional local agent context and private research routes
+/AGENTS_Private.md

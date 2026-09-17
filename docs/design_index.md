@@ -6,7 +6,7 @@
   override current user direction, `AGENTS.md`, live represented authority, or
   live evidence
 - **Owner:** Von maintainers
-- **Last reviewed:** 4 September 2026
+- **Last reviewed:** 17 September 2026
 - **Review trigger:** Any change to `AGENTS.md` reading routes, canonical
   document selection, or document supersession
 - **Scope:** Tracked design, engineering, operational, review, and generated
@@ -32,10 +32,14 @@ documentation-sensitive, or depends on an older design claim. In particular:
 - treat an unlisted engineering note as supporting material, not as current
   project-wide authority.
 
-The directory remains mostly flat for now so existing links and external
-bookmarks continue to work. Status banners and this virtual organisation are
-the first migration step; files can move into archival folders later, with
-compatibility stubs, when that produces more value than link churn.
+Maintained public manuals, contracts, runbooks and governing design guidance
+belong in this repository. Exploratory proposals, architecture reviews, dated
+audits, working notes and implementation/experiment records belong in the
+private Von research repository. Public instructions must remain self-contained;
+private notes do not acquire implementation authority through relocation.
+
+Historical citations may use commit-pinned public links. These preserve the
+previously published evidence without making private access a prerequisite.
 
 ## 2. Do not compress document status into one label
 
@@ -80,6 +84,7 @@ live.
 |---|---|
 | Every task | [`AGENTS.md`](../AGENTS.md) |
 | Substantial, architecture-sensitive, or older-doc-dependent work | This index, then the applicable sections below |
+| Jira-to-Von task authority and migration recovery | [Jira-to-Von migration guide](engineering/workflow_first_jira_to_von_migration_jvnautosci_1223.md); the current task-project writer controls task updates |
 | Build/deployment receipts and task work products | [Build and deployment evidence](engineering/deployment_evidence.md) |
 | Task product selection and continuing a responsibility from Tasks | [Task responsibility continuation](engineering/task_responsibility_continuation.md) |
 | Subscription-backed coding task pickup on the DGX | [Codex DGX worker pilot](engineering/codex_dgx_worker.md) |
@@ -92,11 +97,11 @@ live.
 | Prompts, models, routing, optimisation, or fine-tuning | [prompt programmes and model routing](engineering/prompt_programs_and_model_routing_playbook.md) |
 | Retrieval, memory, RAG, KB growth, or long-horizon state | [agent memory and enduring knowledge](engineering/agent_memory_and_enduring_knowledge.md) |
 | Semantic task search, task embeddings and task RAG context | [Task semantic retrieval](engineering/task_semantic_retrieval.md) |
-| Represented, experience- or discussion-derived learning for role, capability, workflow, tool, acquisition, introspection, message, or task decisions | Draft [represented advice design](engineering/represented_advice_design.md), including Phase 0 subtraction, Phase 0.5 non-active candidates, and the [completed bounded negative learning cycle](engineering/jvnautosci_2720_learning_cycle_2026-09-05.md) under JVNAUTOSCI-2720; then the applicable prompt, memory, evaluation, workflow, or security guidance. The cycle links source-derived formation, experimental exposure, outcome evidence, rejection and subsequent verified absence. It does not establish positive advice efficacy, an ordinary runtime consumer, production activation, represented Arm C or autonomous promotion. |
 | Private Otter archive access, conversation images or research-slide reading | [Private Otter archive and conversation images](engineering/otter_archive_and_conversation_images.md) |
 | Authenticated Figma access through coding agents; native-backend prerequisites | [Figma authenticated access](engineering/figma_authenticated_access.md) |
 | Conversational diagrams, equations, generated/tool images or visual format extension | [Conversational visual output](engineering/conversational_visual_output.md) |
 | Reusing external ontology concepts with source identity and attribution | [KnowKat ontology sources and governed adoption](engineering/knowkat_ontology_sources.md) |
+| Experience- or discussion-derived learning | [Role-learning convergence](engineering/role_learning_convergence.md), [memory and enduring knowledge](engineering/agent_memory_and_enduring_knowledge.md), and [evaluation and research uptake](engineering/agent_evaluation_and_research_uptake.md). The current authoritative task surface owns experimental selection and delivery; private proposals are optional background, not public implementation prerequisites. |
 | Importing external human/agent transcripts into conversation carriers | [External conversation import](engineering/external_conversation_import.md) |
 | Unified conversation discovery, message exchanges, read state or participant avatars | [Unified conversations and participant profiles](engineering/unified_conversations_and_participant_profiles.md) |
 | Execution-summary cost display and user/organisation thresholds | [Execution cost display](engineering/execution_cost_display.md) |
@@ -142,73 +147,46 @@ from `AGENTS.md`.
 | [Atlas egress reconciler](engineering/atlas_egress_reconciler_runbook.md) | Active bounded operational runbook | Use for the standalone mobile-client/DGX database access-list reconciler; revalidate Atlas API policy and credentials live |
 | [Authority-alignment scan](engineering/maintaining_global_design_constraints_and_authority_alignment_with_coding_agents.md) | Active companion guide | Advisory structural review procedure under `AGENTS.md` |
 
-## 6. Programme direction and current synthesis
+## 6. Working research and historical evidence
 
-No formal Architecture Decision Record corpus existed at this review. Do not
-mistake a design proposal or Jira implementation summary for an accepted ADR.
-Until an ADR process is established, acceptance must be grounded in current
-human direction, `AGENTS.md`, and the relevant live Jira decision record. A
-design proposal or private synthesis becomes governing only after explicit
-human acceptance and promotion into a current public authority surface.
+The 5 September 2026 working-note archive was reconciled with public main on
+17 September 2026. Sixty-eight tracked archived documents moved out of the
+public working tree; the active Jira-to-Von migration guide remains public.
+Von-Private's `research/design_notes/` collection groups proposals, reviews and dated
+records, with a source-path and content-hash migration manifest. The private
+repository is optional research context, not a dependency of public development.
+
+For previously published working records, the
+[pre-move public document index](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/design_index.md)
+provides historical navigation. Its statements retain their original evidence
+boundaries and do not govern current work. Moving a file does not remove its
+previously public Git history.
+
+Remaining public references (retain each document's stated authority):
 
 | Document | Classification | Correct use |
 |---|---|---|
-| [Von for Agentic AI](engineering/Von_for_AgenticAI.md) | Advisory long-horizon programme design with an April 2026 state snapshot | Use the durable target direction; revalidate every present-state, file-size, gap, and priority claim |
-| Private research syntheses | Advisory material retained outside the public repository | Public coding agents must not depend on private notes; promote approved decisions into the applicable public canonical guide |
-| [Represented advice](engineering/represented_advice_design.md) | Draft proposal with completed subtraction, non-active candidate storage and a [bounded negative learning-cycle dossier](engineering/jvnautosci_2720_learning_cycle_2026-09-05.md); live ontology state remains evidence, not a design assumption | Use for experience- and discussion-derived candidate learning, soft-guidance semantics, possible federated projection/lifecycle convergence, bounded autonomous maintenance, ratchet tests, and distinguishing evaluation. Candidate learning, content efficacy, represented-layer value, and production activation are separate claims; no general runtime advice layer is established. |
-| [Automated policy learning](engineering/automated_policy_learning_design.md) | Design with partial substrate | Use as a proposed learning architecture, not proof of a closed operational loop |
 | [Proactive clarification and conversational role learning](engineering/proactive_clarification_and_role_learning.md) | Draft, source-grounded design proposal | Use for material referent questions, alias/role learning, short-reply continuation, recovery and staged evaluation. It builds on existing ordinary-turn support; no runtime behaviour, represented fact or policy activation is established. |
 | [Conversational rumination](engineering/conversational_rumination.md) | Capability and bounded acceptance record | Optional model-selected background inquiries, independent task execution and later actor-scoped product consumption; no deployment or broad role-competence claim. |
-| [Testing workflows and ephemeral theories](engineering/testing_workflows_ephemeral_theories_design.md) | Research/design proposal with partial substrate | Use for design intent and explicit hypotheses; verify implemented surfaces |
-| [Reliability Ratchet articles and case log](engineering/reliability_ratchet_articles_and_cases.md) | Active advisory source copy and evidence log | Use as a revisable diagnostic lens and dated case record; not as standing policy, repair authority, or proof of current behaviour |
 | [Ontology repair plans](engineering/ontology_repair_plan_design.md) | Design with implemented substrate | Use for the plan/approve/execute shape and its affordance argument; it adds no authority route, and agent-reachable ontology mutation remains an open decision |
-| [Multi-agent coordination](engineering/multi_agent_coordination_design.md) | Early design proposal | Use as a direction to evaluate, not implemented architecture |
 | [Coding-agent assignment authority](engineering/coding_agent_assignment_authority_design.md) | Draft / proposed; source audit refreshed 17 September 2026 | Extends existing dispatch provenance with scoped personal/team grants; complete inventory and refreshed private handoff remain separate. No implementation or activation authority |
-| [Vontology tooling from KA/KR literature](engineering/vontology_tooling_from_ka_kcap_kr_literature.md) | Research-backed advisory roadmap | Use for alternatives and research uptake, not present capability claims |
 
-## 7. Dated snapshots, diagnostics, and proposals
+Current guidance remains listed above, including maintained implementation
+references whose filenames contain “design” or “notes”. Classification follows
+the document's function, not its filename. Active rehearsal and test protocols
+remain public when they support reproducible implementation work.
+
+Generated tooling documentation and reusable fixtures may remain under
+[`docs/generated/`](generated/). Dated research inventories and local evidence
+belong with their working notes, subject to the destination's data-handling
+rules. Raw Jira, conversation and telemetry payloads must not enter Git merely
+because the destination repository is private.
 
 - [Mobile Web Push candidate and operator handoff](engineering/mobile_web_push.md)
   records the bounded JVNAUTOSCI-2757 implementation and unfulfilled browser
   transport acceptance; it does not establish a deployed notification service.
 
-These files retain evidence and rationale, but must not drive current task
-ordering or implementation without live revalidation:
-
-- [Agentic architecture status — 23 April 2026](engineering/agentic_architecture_status_2026-04-23.md)
-- [Recent architecture progress — 21 April 2026](engineering/recent_architecture_progress_2026-04-20.md)
-- [Enduring-memory architecture — 23 April 2026](engineering/jvnautosci_1962_enduring_memory_architecture_2026-04-23.md)
-- [Self-improvement worlds architecture — 23 April 2026](engineering/jvnautosci_1963_self_improvement_worlds_architecture_2026-04-23.md)
-- [Evaluator architecture — 23 April 2026](engineering/jvnautosci_1964_evaluator_architecture_2026-04-23.md)
-- [Role-learning review — 24 April 2026](engineering/jvnautosci_2011_role_learning_review_2026-04-24.md)
-- [Workflow execution analysis — 7 April 2026](engineering/workflow_execution_architecture_analysis.md)
-- [Chat-turn control-plane analysis — 7 April 2026](engineering/chat_turn_workflow_control_plane_analysis.md)
-- [Comparative arXiv workflow analysis — 7 April 2026](engineering/arxiv_paper_workflow_analysis.md)
-- [Workflow self-authoring gap analysis — 5 April 2026](engineering/workflow_self_authoring_gap_analysis.md)
-- [Workflow system audit — 7 February 2026](engineering/workflow_audit_2026-02-07.md)
-- [VWL implementation audit — 24 March 2026](engineering/vwl_implementation_audit_2026-03-24.md)
-- [MCP reliability incident reflection](engineering/mcp_reliability_analysis.md)
-- dated `jvnautosci_*` reviews, audits, designs, and implementation summaries,
-  unless a current guide above explicitly adopts their conclusions.
-
-## 8. Historical and generated material
-
-- [`intro_to_modern_agentic_ai_for_coding_agents.suggested.md`](engineering/intro_to_modern_agentic_ai_for_coding_agents.suggested.md)
-  is a superseded, unselected proposal. It is not the guide required by
-  `AGENTS.md`.
-- [`AINotes.md`](AINotes.md) is a frozen tactical snapshot, not current task or
-  repository status. Use live git and Jira instead.
-- [Historical agent guidance](engineering/historical_agent_guidance_notes.md)
-  is an archive and already labels itself accordingly.
-- The `JVNAUTOSCI-799` document family records a bounded 2025 milestone. Its
-  completion, coverage, and readiness claims are not current system-level
-  evidence.
-- Files under [`docs/generated/`](generated/) are generated evidence snapshots.
-  Read their timestamps and inputs; never treat a generated report as standing
-  design authority.
-- A date in a filename is an evidence boundary, not a freshness guarantee.
-
-## 9. Metadata for new and substantially revised documents
+## 7. Metadata for new and substantially revised documents
 
 Use this compact header, adapting fields to the document:
 
@@ -246,7 +224,5 @@ Maintenance rules:
 8. Re-check links, code anchors, live Jira, and represented artefacts whenever a
    substantial task relies on an older document.
 
-This first pass classifies the authority-bearing and highest-risk material. It
-does not pretend that all 104 pre-existing engineering files have already
-received complete metadata. Until they do, unlisted documents remain supporting
-material whose claims require independent verification.
+Unlisted documents remain supporting material whose authority and factual
+claims require independent verification.

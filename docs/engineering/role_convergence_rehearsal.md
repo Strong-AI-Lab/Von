@@ -177,7 +177,7 @@ selected path. Record unresolved programme work in the existing Jira plan.
 
 ## 6. Executable A–C development path
 
-The [2721 continuity record](jvnautosci_2721_continuity_2026-09-05.md)
+The [2721 continuity record](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/jvnautosci_2721_continuity_2026-09-05.md)
 describes an exercised bounded implementation using the existing lab/project
 digest workflow. Reproduce the isolated rehearsal with:
 

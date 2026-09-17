@@ -440,7 +440,7 @@ response = client.generate_with_tools_sync(
 - **JVNAUTOSCI-799**: Structured tool calling task
 - **JVNAUTOSCI-803**: LLM Workflows (depends on this module)
 - **JVNAUTOSCI-698**: JSON action output prevention (original issue)
-- **Phase 0 Audit**: `docs/engineering/jvnautosci_799_phase0_audit.md`
+- **Historical Phase 0 Audit**: [frozen evidence](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/jvnautosci_799_phase0_audit.md)
 
 ## File Structure
 
@@ -459,9 +459,6 @@ src/backend/languagemodels/structured_tool_calling/
 tests/backend/
 ├── test_structured_tool_calling_types.py
 └── test_structured_tool_calling_client.py
-
-docs/engineering/
-└── jvnautosci_799_phase0_audit.md  # Current state audit
 ```
 
 ## Authors & Maintainers

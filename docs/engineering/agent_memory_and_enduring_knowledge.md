@@ -88,7 +88,7 @@ For concrete Vontology tool families that support richer structure, including
 typed predicate incidence, context and microtheory queries, provenance tracing,
 Davidsonian role-frame retrieval, scientific claim materialisation, and
 mixed-initiative knowledge acquisition, see
-`docs/engineering/vontology_tooling_from_ka_kcap_kr_literature.md`.
+[historical Vontology tooling research review](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/vontology_tooling_from_ka_kcap_kr_literature.md).
 
 ## 8. Long-horizon evaluation
 

@@ -21,13 +21,13 @@ brief is a revisable projection, not a second task ledger.
 The immediate claim is bounded operational usefulness. It is not full lab
 management, scientific certification or evidence that represented architecture
 outperforms a simpler agent. The fictional A–C work in
-[PR 552's evidence record](jvnautosci_2721_continuity_2026-09-05.md) supplies a
+[PR 552's evidence record](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/jvnautosci_2721_continuity_2026-09-05.md) supplies a
 development baseline and known failures, not prospective adoption.
 
-The [first deployment/witness record](jvnautosci_2721_replay_programme_2026-09-05.md)
+The [first deployment/witness record](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/jvnautosci_2721_replay_programme_2026-09-05.md)
 contains the initial observations and their limitations. Current repair selection
 remains in Jira.
-The [prospective readiness record](jvnautosci_2721_prospective_readiness_2026-09-05.md)
+The [prospective readiness record](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/jvnautosci_2721_prospective_readiness_2026-09-05.md)
 retains the real first encounters and subsequent replay observations.
 
 ### Selected operational tranche
@@ -119,7 +119,7 @@ Record the previous runtime, selected commit and resulting state for recovery.
 Never force overwrite divergent live prompt/workflow authority merely to obtain
 a green preflight. Inspect its meaning and choose the bounded migration.
 
-2722's [owner-read evidence](jira_authorised_read_replay_2026-09-05.md) establishes
+2722's [owner-read evidence](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/jira_authorised_read_replay_2026-09-05.md) establishes
 the bounded direct-read path. It does not pass the four-turn family. Run that
 family after the initial brief and unchanged encounter, using the existing
 prompt bank and evaluator. The normal authenticated account owner must acquire
