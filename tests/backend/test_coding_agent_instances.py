@@ -337,7 +337,10 @@ def test_systemd_units_are_reused_without_clobbering_other_units(
     monkeypatch.setattr(
         schedule.subprocess, "run", lambda argv, **kw: commands.append(argv)
     )
+    env_file = tmp_path / "instance environment"
+    env_file.write_text("CANARY=1\n")
     slot["systemd"] = {
+        "environment_files": [str(env_file)],
         "unit_directory": str(tmp_path / "units"),
         "memory_max_bytes": 4 * 1024**3,
     }
@@ -347,6 +350,7 @@ def test_systemd_units_are_reused_without_clobbering_other_units(
     assert len(files) == 2
     service_unit = next(p for p in files if p.suffix == ".service")
     assert "MemoryMax=4294967296" in service_unit.read_text()
+    assert "EnvironmentFile=" + str(tmp_path) + "/instance\\x20environment" in service_unit.read_text()
     assert "releases/current/scripts/codex_von_worker.py" in service_unit.read_text()
     assert all(command[-1] == "daemon-reload" for command in commands)
     service_unit.write_text("unrelated unit")
