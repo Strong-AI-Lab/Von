@@ -1783,7 +1783,6 @@ export async function setModelInfoFooterText() {
       }
     );
     if (llmClass) modelSettingsSegment.classList.add('llm-status-badge', llmClass);
-    segments.push(modelSettingsSegment);
     // Show the configured request preference, independently of last-call model
     // telemetry. The existing Settings selector owns supported values and writes.
     const reasoningEffort = effectiveLlm?.model_parameters?.reasoning_effort;
@@ -1802,8 +1801,9 @@ export async function setModelInfoFooterText() {
           + 'This is a request preference, not confirmation of the last execution.',
       },
     );
-    reasoningSegment.classList.add('conversation-model-controls', 'footer-reasoning-level');
-    segments.push(reasoningSegment);
+    reasoningSegment.classList.add('footer-reasoning-level');
+    modelSettingsSegment.appendChild(reasoningSegment);
+    segments.push(modelSettingsSegment);
     // This is deliberately a lightweight, independently repaintable telemetry
     // segment: cost updates must not retrigger settings, DB, or auth footer loads.
     segments.push(makeConversationRuntimeCostFooterSegment());
