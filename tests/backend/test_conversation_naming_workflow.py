@@ -272,11 +272,39 @@ def test_concurrent_title_is_preserved_and_later_page_still_progresses(world):
     assert world["names"]["named"] == "User chosen title"
 
 
-def test_bootstrap_preserves_published_authority(world):
+def test_bootstrap_preserves_published_authority(world, monkeypatch):
+    from src.backend.services import (
+        conversation_naming_workflow_vontology_service as naming,
+    )
+    from src.backend.services.text_value_service import (
+        get_texts_for_concept,
+        upsert_singleton_text_relation,
+    )
+
+    custom_prompt = "Independently revised naming instructions in Vontology."
+    upsert_singleton_text_relation(
+        subject_concept_id=naming.CONVERSATION_NAMING_PROMPT_CONCEPT_ID,
+        predicate="hasContent",
+        text=custom_prompt,
+        lang="en-NZ",
+    )
+
+    def forbidden_prompt_seed():
+        pytest.fail("An existing live prompt must not be replaced with its repo seed")
+
+    monkeypatch.setattr(
+        naming, "_load_conversation_naming_prompt_seed_text", forbidden_prompt_seed
+    )
     report = bootstrap_canonical_conversation_naming_workflow()
     assert report["success"], report
     assert report["prompt_support"]["seeded_prompt_count"] == 0
     assert report["publication"]["counts"]["workflows_published"] == 0
+    texts = get_texts_for_concept(naming.CONVERSATION_NAMING_PROMPT_CONCEPT_ID)
+    assert any(item.get("text") == custom_prompt for item in texts)
+    assert (
+        load_workflow_definition_from_vontology(CONVERSATION_NAMING_WORKFLOW_ID)
+        is not None
+    )
 
 
 def test_hourly_schedule_verifies_and_due_occurrence_executes(monkeypatch, world):
