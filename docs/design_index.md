@@ -88,6 +88,7 @@ live.
 | Build/deployment receipts and task work products | [Build and deployment evidence](engineering/deployment_evidence.md) |
 | Task product selection and continuing a responsibility from Tasks | [Task responsibility continuation](engineering/task_responsibility_continuation.md) |
 | Subscription-backed coding task pickup on the DGX | [Codex DGX worker pilot](engineering/codex_dgx_worker.md) |
+| Provisioning prepared coding-agent instances | [Instance enrolment and lifecycle](engineering/coding_agent_instances.md) |
 | Personal/team authority to assign coding agents | Draft [coding-agent assignment authority](engineering/coding_agent_assignment_authority_design.md); proposed only, no live grant or enforcement authority |
 | Coding-agent progress and completion messages in Von | [Interactive coding-agent messages](engineering/codex_dgx_worker.md#interactive-coding-agent-messages); operator-specific delivery configuration in personal `AGENTS.md` |
 | Enduring role competence, organisational continuity, active acquisition, learned reuse or transfer | [Role-learning convergence](engineering/role_learning_convergence.md), with the [staged development rehearsal](engineering/role_convergence_rehearsal.md); live Jira owns delivery status and the next integrating increment |
