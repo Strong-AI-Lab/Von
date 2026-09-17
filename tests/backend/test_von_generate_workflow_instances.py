@@ -995,7 +995,9 @@ def test_canonical_outcome_report_uses_natural_fact_grounded_projection(
         if item.get("transform_name") == "spoken_backfill"
     )
     assert spoken_event["status"] == "skipped"
-    assert spoken_event["suppression_reason"] == "not_required"
+    # Canonical narration is already supplied, but model_error is not a
+    # deliverable turn for any additional model-generated backfill.
+    assert spoken_event["suppression_reason"] == "turn_not_deliverable"
     assert spoken_event["model_id"] is None
 
 
