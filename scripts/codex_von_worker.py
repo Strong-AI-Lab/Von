@@ -18,6 +18,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 import uuid
 from contextlib import ExitStack
 from datetime import UTC, datetime
@@ -106,6 +107,14 @@ def capability_context(config, *, read_only, worktree=None):
         "worktree": str(worktree) if worktree else None,
         "controller_runtime": config.get("runtime_evidence", {"available": False}),
         "public_served_revision": {"available": False, "reason": "Not probed here"},
+        "android_test_host": {
+            "enrolled": bool(config.get("android_instance_id")),
+            "instance_id": config.get("android_instance_id"),
+            "controller_tool": "coding_agent_android",
+            "readiness": "Must discover through the trusted controller for the current task",
+            "coverage": "Native emulator, not physical-device evidence",
+            "limitations": "This declaration does not itself expose a tool or grant host access.",
+        },
         "read_only_host_inspection": True,
         "run_can_edit_checkout": not read_only,
         "von_mcp": "disabled; canonical reads/effects belong to the controller",
@@ -1251,6 +1260,22 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         ]
     else:
         args[2:2] = ["--sandbox", "workspace-write"]
+    try:
+        from . import codex_von_android_control as android_control
+    except ImportError:
+        try:
+            import codex_von_android_control as android_control
+        except ImportError:
+            from scripts import codex_von_android_control as android_control
+    android_root = android_control.prepare(config, state, worktree)
+    if android_root:
+        context["capabilities"]["android_test_host"].update(
+            request_path=str(android_root / "request.json"),
+            response_path=str(android_root / "response.json"),
+            instruction="Atomically write an operation object with action and a fresh request_id; read the matching response. No task/actor/host fields. Do not repeat uncertain gestures.",
+        )
+        write_json(context_path, context)
+    next_archive = time.monotonic() + ACTIVITY_CHECKPOINT_SECONDS
     with (  # noqa: SIM117 - streams must outlive the process context
         (run_dir / "events.jsonl").open("a") as events,
         (run_dir / "stderr.log").open("w") as errors,
@@ -1277,11 +1302,38 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
             process.stdin.close()
             while True:
                 try:
-                    process.wait(timeout=ACTIVITY_CHECKPOINT_SECONDS)
+                    process.wait(
+                        timeout=2 if android_root else ACTIVITY_CHECKPOINT_SECONDS
+                    )
                     break
                 except subprocess.TimeoutExpired:
-                    archive_checkpoint(config, state)
-                    write_json(state_path, state)
+                    if android_root:
+                        try:
+                            android_control.poll(
+                                config,
+                                state,
+                                android_root,
+                                run_dir / "android-receipts",
+                            )
+                        except (OSError, ValueError):
+                            pass  # malformed/partially-written request cannot stop coding
+                    if time.monotonic() >= next_archive:
+                        archive_checkpoint(config, state)
+                        write_json(state_path, state)
+                        next_archive = time.monotonic() + ACTIVITY_CHECKPOINT_SECONDS
+    if android_root:
+        try:
+            write_json(
+                run_dir / "android-stop.json", android_control.stop(config, state)
+            )
+        except Exception as exc:
+            write_json(
+                run_dir / "android-stop.json",
+                {
+                    "error": type(exc).__name__,
+                    "cleanup": "Unverified; test-host idle recovery remains active",
+                },
+            )
     state["finished_at"] = datetime.now(UTC).isoformat()
     write_json(
         run_dir / "exit.json",
@@ -1380,9 +1432,9 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         receipt
     )
     if success:
-        result["summary"] += (
-            f" Deployed and verified the public server at {commit[:12]}."
-        )
+        result[
+            "summary"
+        ] += f" Deployed and verified the public server at {commit[:12]}."
     else:
         result["status"] = "blocked"
         result["summary"] += (
@@ -1393,9 +1445,9 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         )
     if recover_only:
         result["status"] = "blocked"
-        result["summary"] += (
-            " The task changed; only the interrupted deployment was reconciled."
-        )
+        result[
+            "summary"
+        ] += " The task changed; only the interrupted deployment was reconciled."
     write_json(state_path, state)
 
 

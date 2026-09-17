@@ -176,3 +176,10 @@ shared-account execution is not a security sandbox between users. No permanent
 additional consumer, production registry, or public deployment was activated.
 Native task `#V#task_agent_002b293c463ed8e1e52df23cb68f9612` retains the
 substantive acceptance receipt and its environment/revision provenance.
+
+## Optional native Android testing
+
+The separate [Android test-host candidate](coding_agent_android_testing.md) reuses
+instance bindings and shared admission. It is optional and is not a release gate
+for this core package. Read its current evidence and remaining acceptance before
+claiming that a coding instance can use it autonomously.
