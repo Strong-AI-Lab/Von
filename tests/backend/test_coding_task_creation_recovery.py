@@ -3,6 +3,7 @@
 No real task, invitation, message, workflow, or model request is issued.
 """
 
+import json
 from copy import deepcopy
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -697,3 +698,142 @@ def test_recovery_requires_same_task_and_matching_canonical_fields():
         effect_snapshot=changed,
     )
     assert "recovery_status" not in reconciled["failed"]
+
+
+@pytest.mark.parametrize(
+    "choice_field", ["assignee_concept_id", "report_to_concept_id"]
+)
+@pytest.mark.parametrize("user_requires_choice", [False, True])
+def test_revised_model_choice_recovery_preserves_user_requirements_and_receipts(
+    native_store, gateway, monkeypatch, choice_field, user_requires_choice
+):
+    from src.backend.languagemodels.structured_tool_calling.types import (
+        LLMResponse,
+        ToolCall,
+    )
+    from src.backend.services.adaptive_turn_service import execute_adaptive_turn
+    from src.backend.services import turn_execution_record_service as records
+    from src.backend.services.turn_failure_capsule_service import (
+        build_turn_failure_capsule,
+    )
+
+    observations = []
+
+    def record_observation(**kwargs):
+        observations.append(deepcopy(kwargs))
+        return {"updated": True, "duplicate": False}
+
+    monkeypatch.setattr(records, "record_effect_observation_phase", record_observation)
+
+    class ChoiceReplay:
+        call = 0
+        answer = "<spoken>The task was created; execution is pending.</spoken><screen>Task created.</screen>"
+
+        def generate_with_tools(self, prompt, available_tools, **kwargs):
+            self.call += 1
+            assert self.call <= 3
+            if self.call == 3:
+                return LLMResponse(text_response=self.answer)
+            arguments = {
+                "title": "Investigate the model picker",
+                "description": "Investigate selectable models and reasoning settings.",
+                "assignee_concept_id": "#V#worker",
+                "report_to_concept_id": "#V#alice",
+                "idempotency_key": "same-request-choice-recovery",
+            }
+            metadata = {}
+            if self.call == 1:
+                arguments[choice_field] = "#V#outsider"
+            elif not user_requires_choice:
+                failed = json.loads(
+                    [m for m in kwargs["context"] if m.get("role") == "tool"][-1][
+                        "content"
+                    ]
+                )
+                assert failed["changed"] is False
+                metadata["task_creation_recovery"] = {
+                    "failed_effect_id": failed["effect_id"],
+                    "revised_choice_fields": [choice_field],
+                    "reason": "The user requested a task, not this identity; I chose the rejected identity myself.",
+                }
+            return LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id=f"choice-{self.call}",
+                        payload={
+                            "name": "task_create",
+                            "arguments": arguments,
+                            **metadata,
+                        },
+                    )
+                ],
+            )
+
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt=(
+            "Create the investigation task requiring #V#outsider for " + choice_field
+            if user_requires_choice
+            else "Ask a coding agent to investigate the model picker."
+        ),
+        context=[],
+        llm_client=ChoiceReplay(),
+        model="fixture-no-model-request",
+        user_namespace="#V#alice@lab",
+        user_concept_id="#V#alice",
+        org_concept_id="#V#lab",
+        conversation_id="fixture-source",
+        turn_id="fixture-choice-recovery",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+    assert len(result.tool_invocations) == 2, str(result.llm_calls[-1])
+    failed, successful = result.tool_invocations
+    assert failed["effect_status"] == "failed" and failed["changed"] is False
+    assert successful["canonical_readback"]["verified"] is True
+    assert native_store.concepts.count_documents({}) == 1
+    failures = [
+        x["observation"]
+        for x in observations
+        if x.get("observation", {}).get("effect_status") == "failed"
+    ]
+    assert failures and all("recovered_by_effect_id" not in x for x in failures)
+    if user_requires_choice:
+        assert result.terminal_status == "effect_partially_completed"
+        assert not failed.get("recovered_by_effect_id")
+        assert "<spoken>" not in result.response_text
+        assert "<screen>" not in result.response_text
+        assert "Model draft" not in result.response_text
+        report = next(
+            x
+            for x in result.aux_llm_calls
+            if x.get("type") == "adaptive_turn_effect_outcome_report"
+        )
+        assert report["model_draft"]["authority"] == "non_authoritative"
+        assert "failed without changing state" in report["spoken_text"]
+        capsule = build_turn_failure_capsule(
+            request_id="fixture",
+            terminal_status=result.terminal_status,
+            response_authority=result.response_authority,
+            visible_response=result.response_text,
+            outcome_report=report,
+            sensitive_identity_values=("#V#alice",),
+        )
+        assert [(x["status"], x["changed"]) for x in capsule["effects"]] == [
+            ("failed", False),
+            ("succeeded", True),
+        ]
+        assert (
+            capsule["effects"][0]["evidence_id"] != capsule["effects"][1]["evidence_id"]
+        )
+    else:
+        assert result.terminal_status == "completed", result.response_text
+        assert result.response_text == ChoiceReplay.answer
+        assert failed["recovered_by_effect_id"] == successful["effect_id"]
+        assert (
+            failed["reconciliation_basis"]
+            == "later_verified_task_with_revised_model_choices"
+        )
+        assert "task_creation_recovery" not in successful["effective_arguments"]

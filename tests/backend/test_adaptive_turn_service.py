@@ -93,6 +93,16 @@ def _acknowledge_effect_observation_journal(
     )
 
 
+def _retained_model_draft(result):
+    report = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_effect_outcome_report"
+    )
+    assert report["model_draft"]["authority"] == "non_authoritative"
+    return report["model_draft"]["preview"]
+
+
 class _SequenceClient:
     def __init__(self, *responses: Any) -> None:
         self.responses = list(responses)
@@ -4669,8 +4679,9 @@ def test_invalid_effect_does_not_reserve_window_or_block_valid_sibling(
 
     assert result.terminal_status == "effect_partially_completed"
     assert result.response_authority == "canonical_outcome"
-    assert "The valid effect completed." in result.response_text
-    assert "### Model draft (non-authoritative)" in result.response_text
+    assert "The valid effect completed." in _retained_model_draft(result)
+    assert "The valid effect completed." not in result.response_text
+    assert "### Model draft (non-authoritative)" not in result.response_text
     assert "visibility_effect_not_delegated" in result.response_text
     assert "`create_concepts`" in result.response_text
     assert invoked == ["create_concepts"]
@@ -4791,12 +4802,17 @@ def test_cited_non_succeeded_ontology_effect_replaces_false_success_claim(
 
     assert result.terminal_status == "effect_partially_completed"
     assert result.response_authority == "canonical_outcome"
-    assert good_effect_id in result.response_text
-    assert failed_effect_id in result.response_text
-    assert "Added; forward and inverse verified" in result.response_text
-    assert result.response_text.index("### Unsuccessful or unresolved") < (
-        result.response_text.index("### Model draft (non-authoritative)")
+    report = next(
+        item
+        for item in result.aux_llm_calls
+        if item.get("type") == "adaptive_turn_effect_outcome_report"
     )
+    assert {good_effect_id, failed_effect_id} <= {
+        fact["effect_id"] for fact in report["facts"]
+    }
+    assert "Added; forward and inverse verified" in _retained_model_draft(result)
+    assert "Added; forward and inverse verified" not in result.response_text
+    assert "### Unsuccessful or unresolved" in result.response_text
     assert "source_id `#V#gael_gendron`" in result.response_text
     assert "predicate `is_an_instance_of`" in result.response_text
     assert "target `#V#student`" in result.response_text
@@ -4900,8 +4916,9 @@ def test_cited_ontology_success_without_relation_readback_is_rejected(
 
     assert result.terminal_status == "effect_partially_completed"
     assert result.response_authority == "canonical_outcome"
-    assert "Added and canonically verified" in result.response_text
-    assert "### Model draft (non-authoritative)" in result.response_text
+    assert "Added and canonically verified" in _retained_model_draft(result)
+    assert "Added and canonically verified" not in result.response_text
+    assert "### Model draft (non-authoritative)" not in result.response_text
     assert "handler reported `succeeded`" in result.response_text
     assert "canonical read-back did not verify the outcome" in (
         result.response_text
@@ -5013,8 +5030,11 @@ def test_indeterminate_effect_stops_later_effect_but_allows_readback(
     assert result.terminal_status == "effect_outcome_indeterminate"
     assert result.response_authority == "canonical_outcome"
     assert "indeterminate" in result.response_text
-    assert "The first effect needs canonical inspection." in result.response_text
-    assert "### Model draft (non-authoritative)" in result.response_text
+    assert "The first effect needs canonical inspection." in _retained_model_draft(
+        result
+    )
+    assert "The first effect needs canonical inspection." not in result.response_text
+    assert "### Model draft (non-authoritative)" not in result.response_text
     assert result.tool_invocations[0]["effect_status"] == "indeterminate"
     assert result.tool_invocations[1]["result_target_ids"] == ["#V#created_if_present"]
     blocked = result.tool_invocations[2]
@@ -5362,11 +5382,9 @@ def test_exact_current_readback_renders_truthful_paper_partial_outcome(
     assert "arxiv_acquisition_unavailable" in result.response_text
     assert "asyncio lock is bound to a different event loop" in result.response_text
     assert "User scope `#V#michael_witbrock`" in result.response_text
-    assert "organisation namespace" in result.response_text
-    assert result.response_text.index("User scope `#V#michael_witbrock`") < (
-        result.response_text.index("organisation namespace")
-    )
-    assert "### Model draft (non-authoritative)" in result.response_text
+    assert "organisation namespace" not in result.response_text
+    assert "organisation namespace" in _retained_model_draft(result)
+    assert "### Model draft (non-authoritative)" not in result.response_text
     create_invocation = next(
         item
         for item in result.tool_invocations
@@ -9705,8 +9723,11 @@ def test_effect_evidence_preserves_success_partial_failure_and_unknown_timeout(
     assert seen_cases == ["succeeded", "partial", "failed", "timeout"]
     assert result.terminal_status == "effect_outcome_indeterminate"
     assert result.response_authority == "canonical_outcome"
-    assert "The bounded effects were reported truthfully." in result.response_text
-    assert "### Model draft (non-authoritative)" in result.response_text
+    assert "The bounded effects were reported truthfully." in _retained_model_draft(
+        result
+    )
+    assert "The bounded effects were reported truthfully." not in result.response_text
+    assert "### Model draft (non-authoritative)" not in result.response_text
     assert [item["effect_status"] for item in result.tool_invocations] == [
         "succeeded",
         "partial",
@@ -9784,8 +9805,9 @@ def test_partial_effect_downgrades_nominal_model_completion(
     assert result.response_authority == "canonical_outcome"
     assert "status `partial`" in result.response_text
     assert "derived_relation_failed" in result.response_text
-    assert "Everything was created." in result.response_text
-    assert "### Model draft (non-authoritative)" in result.response_text
+    assert "Everything was created." in _retained_model_draft(result)
+    assert "Everything was created." not in result.response_text
+    assert "### Model draft (non-authoritative)" not in result.response_text
 
 
 def test_identity_shaped_targets_are_not_globally_rewritten() -> None:
@@ -13268,8 +13290,8 @@ def test_failed_workflow_and_later_direct_trip_effects_preserve_only_verified_an
     assert workflow_invocation["effect_status"] == "failed"
     assert workflow_invocation["changed"] is True
     assert workflow_invocation["canonical_readback"]["status"] == "failed"
-    assert useful_answer in result.response_text
-    assert "### Model draft (non-authoritative)" in result.response_text
+    assert useful_answer in _retained_model_draft(result)
+    assert "### Model draft (non-authoritative)" not in result.response_text
     assert trip_id in result.response_text
     assert instance_id in result.response_text
     assert "metadata validation failed before domain mutation" in result.response_text
@@ -13583,8 +13605,11 @@ def test_failed_workflows_and_recovered_denials_preserve_verified_scoped_results
     )
     assert result.terminal_status == "effect_partially_completed"
     assert result.response_authority == "canonical_outcome"
-    assert "Both research descriptions were durably read back" in (
-        result.response_text
+    assert "Both research descriptions were durably read back" in _retained_model_draft(
+        result
+    )
+    assert (
+        "Both research descriptions were durably read back" not in result.response_text
     )
     assert "### Canonical scope" in result.response_text
     effects = [
@@ -13765,8 +13790,8 @@ def test_pending_durable_response_uses_canonical_report_with_exact_handle(
     assert result.terminal_status == "effect_partially_completed"
     assert result.response_authority == "canonical_outcome"
     assert result.response_text != final_text
-    assert final_text in result.response_text
-    assert "### Model draft (non-authoritative)" in result.response_text
+    assert final_text in _retained_model_draft(result)
+    assert "### Model draft (non-authoritative)" not in result.response_text
     assert instance_id in result.response_text
     assert "status `partial`" in result.response_text
 
