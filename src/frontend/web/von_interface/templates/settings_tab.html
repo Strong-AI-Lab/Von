@@ -40,6 +40,19 @@
         <div id="settingsConcernSummary" class="settings-concern-summary" aria-live="polite"></div>
         <nav id="settingsSectionRail" class="settings-section-rail" aria-label="Sections in this settings concern"></nav>
 
+        <section id="pushNotificationSettings" data-settings-concern="conversations">
+            <h2>Mobile notifications</h2>
+            <p>Receive private alerts for direct Von messages, including coding-agent reports.
+                Enable for the current organisation context on this device. Other devices have their own opt-in.</p>
+            <p data-push-status role="status" aria-live="polite">Checking notification support…</p>
+            <button type="button" data-push-enable disabled>Enable notifications</button>
+            <button type="button" data-push-test disabled>Send test notification</button>
+            <button type="button" data-push-disable disabled>Disable on this device</button>
+            <button type="button" data-push-refresh>Refresh status</button>
+            <p>On iPhone or iPad, open Von from the Home Screen. System Focus and battery settings
+                can delay alerts. Logging out disables this device; already displayed alerts may remain in system history.</p>
+        </section>
+
         <section id="current-user-settings" data-settings-concern="identity">
             <h2>Signed-in Identity</h2>
             <div id="participantProfileSettings"></div>
@@ -121,6 +134,13 @@
             </div>
         </section>
 
+        <section id="footer-settings" data-settings-concern="conversations">
+            <h2>Footer</h2>
+            <p class="settings-note">Choose what appears in the footer. These preferences are saved in this browser.
+                Extra information scrolls horizontally.</p>
+            <div id="footerVisibilitySettings" class="footer-visibility-settings"></div>
+        </section>
+
         <section id="conversation-history-settings" data-settings-concern="conversations">
             <h2>Conversations</h2>
             <p class="settings-note">These preferences are stored in this browser and control which conversations appear
@@ -140,7 +160,7 @@
                         Expand collapsed conversation tray on hover
                     </label>
                 </div>
-                <small class="settings-note">Mobile and narrow windows keep the horizontal list. Layout, tray width and collapsed state are remembered in this browser.</small>
+                <small class="settings-note">Mobile and narrow windows start with the horizontal list open and keep the current conversation name above it. Collapse or reopen it using the list button. Layout, tray width and separate mobile/desktop collapsed states are remembered in this browser, across sign-ins; if storage is unavailable, choices last for this page only.</small>
                 <div class="speech-settings-row">
                     <label class="speech-settings-label" for="settingsConversationRecentLimitInput">Max recent
                         conversations (N)</label>
@@ -233,6 +253,9 @@
 
                     <section class="speech-settings-section" aria-label="Dictation settings">
                         <h3 class="speech-settings-title">Dictation</h3>
+                        <label for="settingsTranscriptionModelSelect">Recorded transcription model (this browser)</label>
+                        <select id="settingsTranscriptionModelSelect" class="speech-settings-select" disabled></select>
+                        <p class="settings-note">Only enabled, available file-transcription models can be selected. A stale preference remains visible until you choose another model.</p>
                         <p class="speech-settings-note">Recorded audio uses conversation vocabulary. The browser controls below apply only to browser recognition.</p>
 
                         <div class="speech-settings-row">
@@ -314,11 +337,17 @@
                         The scoped primary is always allowed. Add or remove alternatives explicitly; configuring
                         or testing a model does not allow it.
                     </p>
+                    <details>
+                        <summary>Additional models — all providers and assigned roles</summary>
+                        <button id="refreshModelInventoryButton" type="button" class="btn-secondary">Refresh provider inventory</button>
+                        <div id="additionalModelInventory" role="region" aria-label="Additional model inventory"></div>
+                    </details>
                     <div id="workflowModelPoolList" class="settings-model-pool-list"></div>
                     <div class="inline-form inline-form-tight mt-2">
                         <button id="saveModelPoolButton" class="btn-azure" type="button" disabled>
                             Save scoped primary &amp; allowed models
                         </button>
+                        <button id="reloadModelPoolButton" class="btn-secondary" type="button">Reload saved model pool</button>
                     </div>
                     <div id="modelPoolStatusMessage" class="status-message" role="status"></div>
                 </div>
@@ -340,8 +369,10 @@
                     title="When enabled, this browser requests the selected premium provider and model for chat, provided the exact pair is allowed for the selected scope. When disabled, it requests the selected Ollama model.">Use
                     selected allowed premium model for chat in this browser</label>
             </div>
-            <small class="settings-note">First allow the exact provider and model for this scope and save. Turn this off
-                to use the selected Ollama model for browser chat. Editing or testing a model does not allow it.</small>
+            <small class="settings-note">Already allowed models need no additional save to use in this browser.
+                Selecting another allowed model on the active provider updates the browser choice. An unallowed draft
+                leaves that choice unchanged. Turn this off to explicitly use the selected Ollama model.
+                Editing or testing a model does not add it to the scoped allowed models.</small>
 
             <div id="openaiProviderSettings">
                 <label for="openaiApiKeyEnvVar">OpenAI API key environment variable:</label>
@@ -1530,6 +1561,14 @@
                 if (response.ok) {
                     console.log('Logout successful');
 
+                    try {
+                        const notifications = await import({{ url_for('static', filename='js/pushNotifications.js') | tojson }});
+                        await notifications.clearLocalNotifications();
+                    } catch (_) {
+                        // Server revocation already succeeded; the worker also
+                        // rechecks the active account before any queued alert.
+                    }
+
                     const logoutResult = await response.json();
                     if (logoutResult.redirect_url === '/cdn-cgi/access/logout') {
                         clearIdentityScopeMirrors();
@@ -1809,6 +1848,7 @@
         window.initializeSettingsAuthentication = initializeSettingsAuthentication;
     </script>
     <script type="module" src="{{ url_for('static', filename='js/settingsPage.js') }}"></script>
+    <script type="module" src="{{ url_for('static', filename='js/pushNotifications.js') }}"></script>
     <script src="{{ url_for('static', filename='js/settings-frame-resize.js') }}"></script>
 </body>
 

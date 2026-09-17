@@ -62,6 +62,21 @@ def _expiring_gemini_registry() -> dict:
     }
 
 
+def test_decimal_summary_preserves_sub_float_threshold_difference() -> None:
+    registry = _registry()
+    pricing = registry["models"][0]["pricing"]
+    pricing["unit_tokens"] = 1
+    pricing["rates"] = {"input_tokens": "0.100000000000000001", "output_tokens": "0"}
+    summary = build_llm_usage_cost_summary(
+        [{"call_id": "precise", "provider": "openai", "effective_model": "gpt-5-test",
+          "model_identity_source": "provider_response",
+          "usage": {"prompt_tokens": 1, "completion_tokens": 0}}],
+        model_registry=registry,
+    )
+    assert summary["estimated_cost"]["amount"] == 0.1
+    assert summary["estimated_cost"]["amount_decimal"] == "0.100000000000000001"
+
+
 def _priced_gemini_call(
     *, tier: str = "standard", connection_id: str = "gemini_developer_api"
 ) -> dict:
@@ -165,6 +180,7 @@ def test_detailed_openai_price_uses_cache_breakdown_and_context_band() -> None:
     )
     assert short["estimated_cost"]["status"] == "estimated"
     assert short["estimated_cost"]["amount"] == 0.00289
+    assert short["estimated_cost"]["amount_decimal"] == "0.00289"
 
     long = build_llm_usage_cost_summary(
         [

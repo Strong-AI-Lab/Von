@@ -18,6 +18,46 @@ worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
 
 
+def test_result_schema_meets_strict_provider_contract_and_preserves_old_results():
+    # The provider rejects an object before execution if any declared property
+    # is absent from required, even when the property's value permits null.
+    def check_objects(schema):
+        if "properties" in schema:
+            assert set(schema["required"]) == set(schema["properties"])
+            assert schema["additionalProperties"] is False
+            for child in schema["properties"].values():
+                check_objects(child)
+
+    check_objects(worker.RESULT_SCHEMA)
+    legacy = {
+        "status": "completed",
+        "summary": "Done",
+        "evidence": "Verified",
+        "question": "",
+        "deploy_commit": "",
+    }
+    assert worker.validate_result(legacy) == legacy
+    current = dict(legacy, blocker=None)
+    assert worker.validate_result(current) == current
+    assert "null" in worker.RESULT_SCHEMA["properties"]["blocker"]["type"]
+    older = {key: value for key, value in legacy.items() if key != "deploy_commit"}
+    assert worker.validate_result(older) == older
+
+
+@pytest.fixture(autouse=True)
+def isolated_archive_boundary(monkeypatch):
+    import mongomock
+    from src.backend.services import task_dispatch_authority_service
+
+    collection = mongomock.MongoClient().test.task_dispatch_authorities
+    monkeypatch.setattr(
+        task_dispatch_authority_service, "_collection", lambda: collection
+    )
+    # Existing controller tests isolate publication; canonical archive capture
+    # and the real launch path are exercised in test_task_run_archives.py.
+    monkeypatch.setattr(worker, "archive_checkpoint", lambda *a, **kw: True)
+
+
 @pytest.fixture
 def config(tmp_path):
     return {
@@ -68,6 +108,13 @@ def test_empty_poll_has_no_model_or_message(config, monkeypatch):
         ({}, ("gpt-6-astra", "medium")),
         ({"requested_model": "gpt-5.6-terra"}, ("gpt-5.6-terra", "medium")),
         ({"requested_reasoning_effort": "high"}, ("gpt-6-astra", "high")),
+        ({"requested_reasoning_effort": "xhigh"}, ("gpt-6-astra", "xhigh")),
+        ({"requested_reasoning_effort": "max"}, ("gpt-6-astra", "max")),
+        ({"requested_reasoning_effort": "ultra"}, ("gpt-6-astra", "ultra")),
+        (
+            {"requested_model": "provider/Model-Preview_vNext:2026"},
+            ("provider/Model-Preview_vNext:2026", "medium"),
+        ),
         (
             {"requested_model": None, "requested_reasoning_effort": None},
             ("gpt-6-astra", "medium"),
@@ -85,14 +132,29 @@ def test_task_model_settings_inherit_independently(requested, expected):
         )
 
 
-def test_forbidden_task_model_is_reported_without_running_codex(config, monkeypatch):
+@pytest.mark.parametrize(
+    "preferences,error",
+    [
+        ({"requested_model": "gpt-5.6-sol"}, "Sol-family"),
+        ({"requested_model": "Codex DGX"}, "exact model ID"),
+        ({"requested_model": "DGX Codex"}, "exact model ID"),
+        ({"requested_model": "#V#codex_dgx"}, "assignee_concept_id"),
+        ({"requested_model": "CodexDGX"}, "exact model ID"),
+        ({"requested_model": "Astra"}, "exact model ID"),
+        ({"requested_reasoning_effort": "extra_high"}, "xhigh"),
+        ({"requested_reasoning_effort": "extra-high"}, "xhigh"),
+    ],
+)
+def test_invalid_task_preferences_are_reported_without_running_codex(
+    config, monkeypatch, preferences, error
+):
     monkeypatch.setattr(
         worker.subprocess, "run", lambda *a, **kw: pytest.fail("model invoked")
     )
     reports = []
     api = SimpleNamespace(
         pending=lambda: [task(config)],
-        inputs=lambda _: {"requested_model": "gpt-5.6-sol"},
+        inputs=lambda _: preferences,
         conversation=lambda _: {"available": False},
         send=lambda *a: "#V#started",
         tasks=SimpleNamespace(update_task_status=lambda *a, **kw: None),
@@ -103,7 +165,7 @@ def test_forbidden_task_model_is_reported_without_running_codex(config, monkeypa
     )
     worker.tick(config, api, 0)
     assert reports[0]["status"] == "blocked"
-    assert "Sol-family" in reports[0]["summary"]
+    assert error in reports[0]["summary"]
 
 
 @pytest.mark.parametrize(
@@ -168,12 +230,14 @@ def test_deployment_request_and_live_task_authority(
 
 @pytest.mark.parametrize("writer", ["jira", "von", None])
 def test_project_tracking_authority_is_read_live(config, monkeypatch, writer):
-    from src.backend.services import task_project_service
+    from src.backend.services import task_project_service, task_project_home_service
+
+    monkeypatch.setattr(task_project_home_service, "get_project_home", lambda pid: None)
 
     api = object.__new__(worker.Von)
     api.config = config
     monkeypatch.setattr(
-        task_project_service, "get_task_project", lambda pid: {"writer": writer}
+        task_project_service, "task_execution_home", lambda pid: {"writer": writer}
     )
     assert api.native_writer(task(config, project_concept_id="#V#project")) is (
         writer == "von"
@@ -239,6 +303,7 @@ def test_report_retry_has_same_message_intent_after_task_completed(config):
     api.config = config
     current = task(config, status="in_progress")
     api.task = lambda _: current
+    api.inputs = lambda _: {"description": "unchanged request"}
     sent = []
     api.send = lambda t, key, content: sent.append((key, content)) or "#V#message"
     api.tasks = SimpleNamespace(
@@ -501,6 +566,11 @@ def test_read_only_installed_adapter_check_preserves_exact_task_settings(
     )
     monkeypatch.setattr(api.messages, "get_messages_for_user", lambda *a, **kw: [])
     monkeypatch.setattr(api, "pending", lambda: pytest.fail("pickup path entered"))
+    monkeypatch.setattr(
+        api.tasks,
+        "list_task_attachments",
+        lambda *a, **kw: {"attachments": [], "total": 0},
+    )
     result = worker.check_task(config, api, row["task_concept_id"])
     assert result == {
         "task_id": row["task_concept_id"],
@@ -566,3 +636,300 @@ def test_old_backend_read_cannot_silently_launch_worker_defaults(
         worker.tick(config, api, 0)
     with pytest.raises(RuntimeError, match="execution-preference fields"):
         api.task(row["task_concept_id"])
+
+
+@pytest.mark.parametrize("cached_count", [0, 51])
+def test_task_context_includes_operator_note_provenance_and_attachment_limits(
+    config, monkeypatch, cached_count
+):
+    api = worker.Von(config)
+    operator_note = (
+        "Subsequent poll-von launches now use "
+        "/home/mjw/.codex-von-worker/releases/task-models-9661e0fce7ec, reviewed revision "
+        "9661e0fce7ecf552e69ed621559246f102f96179, including all four worker/inbox "
+        "script/prompt files. Original root files are deliberately retained for the "
+        "still-running UI controller. Launcher backup is in the versioned directory. "
+        "Per-task model resolution verified gpt-6-astra/xhigh with both sources=task."
+    )
+    row = task(
+        config,
+        requested_model="gpt-6-astra",
+        requested_reasoning_effort="xhigh",
+        notes=operator_note,
+        next_checkpoint="Activate reviewed release",
+        evidence="Prior receipt",
+        progress_signal="Ready for repair",
+        priority="high",
+        project_concept_id="#V#project",
+        collection_concept_ids=["#V#collection"],
+        task_links=[{"target": "#V#dependency"}],
+        attachments_count=cached_count,
+        external_references={"jira": {"key": "JVNAUTOSCI-2748"}},
+        updated_at="2026-09-12T20:45:42Z",
+    )
+    monkeypatch.setattr(
+        api.tasks, "list_task_comments", lambda *a, **kw: {"comments": [], "total": 0}
+    )
+    monkeypatch.setattr(api.messages, "get_messages_for_user", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        api.tasks,
+        "list_task_attachments",
+        lambda *a, **kw: {
+            "attachments": [{"attachment_id": f"a{i}"} for i in range(50)],
+            "total": 51,
+        },
+    )
+    monkeypatch.setattr(
+        api,
+        "followup_context",
+        lambda _: {"followup": {"content": "Continue with this change"}},
+    )
+    inputs = api.inputs(row)
+    for key in (
+        "notes",
+        "next_checkpoint",
+        "evidence",
+        "progress_signal",
+        "priority",
+        "task_links",
+        "project_concept_id",
+        "collection_concept_ids",
+        "external_references",
+    ):
+        assert inputs[key] == row[key]
+    assert inputs["context_provenance"]["task_id"] == row["task_concept_id"]
+    assert inputs["attachments"]["omitted"] == 1
+    assert inputs["attachments"]["content_available"] is False
+    assert inputs["followup"]["content"] == "Continue with this change"
+    assert (
+        worker.resolve_execution_settings(config, inputs)["reasoning_effort"] == "xhigh"
+    )
+    changed = {
+        **inputs,
+        "status": "in_progress",
+        "context_provenance": {"updated_at": "later"},
+    }
+    assert worker.input_fingerprint(inputs) == worker.input_fingerprint(changed)
+    assert worker.input_fingerprint(inputs) != worker.input_fingerprint(
+        {**inputs, "notes": "New operator instructions"}
+    )
+
+
+def test_worker_report_does_not_retrigger_or_absorb_new_user_notes(config):
+    api = object.__new__(worker.Von)
+    api.config = config
+    original = {
+        "description": "Fix inbox",
+        "notes": "Original instruction",
+        "evidence": "",
+        "progress_signal": None,
+        "next_checkpoint": None,
+    }
+    current = task(config, status="in_progress", **original)
+    current["notes"] = "New user instruction while coding"
+    api.task = lambda _: current
+    api.send = lambda *a: "#V#result"
+    api.tasks = SimpleNamespace(
+        update_task_fields=lambda tid, fields, **kw: current.update(fields),
+        update_task_status=lambda tid, status, **kw: current.update(status=status),
+    )
+    state = {
+        "task_id": current["task_concept_id"],
+        "attempt": "fixture",
+        "input_snapshot": original,
+        "result": {
+            "status": "blocked",
+            "summary": "Partial work",
+            "evidence": "Observed outcome",
+            "question": "Need a material fact",
+        },
+    }
+    api.finish(state)
+    own_report = {key: current[key] for key in original}
+    assert state["input_hash"] != worker.input_fingerprint(own_report)
+    own_report["notes"] = original["notes"]
+    assert state["input_hash"] == worker.input_fingerprint(own_report)
+
+
+PARENT_TASK = "#V#task_agent_5e35622e9d063ef435abd262bbbc81c2"
+FILE_COPY = "#V#computer_file_copy_b963805cc3584b7db11ee48bdb1cf032"
+
+
+def test_reference_lookup_distinguishes_projection_from_canonical_absence(config):
+    parent = task(config, task_concept_id=PARENT_TASK, evidence="Existing screenshot")
+    calls = []
+
+    def get(task_id):
+        calls.append(task_id)
+        if task_id.endswith("_missing"):
+            raise KeyError(task_id)
+        if task_id.endswith("_failed"):
+            raise RuntimeError("Do not expose connection details")
+        return parent
+
+    api = SimpleNamespace(
+        task=get,
+        native_writer=lambda _: True,
+        tasks=SimpleNamespace(TaskNotFoundError=KeyError),
+    )
+    result = worker.referenced_tasks(
+        config,
+        api,
+        {
+            "tasks": [],
+            "message": f"Investigate {PARENT_TASK}",
+            "other": "#V#task_agent_missing #V#task_agent_failed",
+        },
+    )
+    by_id = {row["task_id"]: row for row in result["results"]}
+    assert by_id[PARENT_TASK]["task"]["assignee_concept_id"] == config["agent_id"]
+    assert by_id[PARENT_TASK]["task"]["evidence"] == "Existing screenshot"
+    assert by_id["#V#task_agent_missing"]["status"] == "not_found_in_actor_scope"
+    assert by_id["#V#task_agent_failed"]["status"] == "lookup_failed"
+    assert "connection details" not in json.dumps(result)
+    assert calls.count(PARENT_TASK) == 1
+    parent["assignee_concept_id"] = "#V#other"
+    result = worker.referenced_tasks(config, api, PARENT_TASK)
+    assert result["results"][0]["status"] == "outside_assignment_scope"
+    assert "task" not in result["results"][0]
+
+
+@pytest.mark.parametrize("outcome", ["available", "denied", "mismatch"])
+def test_file_copy_staging_preserves_identity_and_verified_bytes(
+    config, tmp_path, monkeypatch, outcome
+):
+    from src.backend.services import computer_file_copy_service as files
+    import hashlib
+
+    data = b"controlled file-copy fixture"
+    digest = hashlib.sha256(data).hexdigest()
+    calls = []
+
+    def fetch(**kwargs):
+        calls.append(kwargs)
+        if outcome == "denied":
+            return {"success": False, "error": "not_found"}
+        return {
+            "success": True,
+            "data": data,
+            "info": SimpleNamespace(
+                original_filename="../../image.png", content_type="image/png"
+            ),
+        }
+
+    monkeypatch.setattr(files, "fetch_file_copy_bytes", fetch)
+    monkeypatch.setattr(
+        files,
+        "build_file_copy_artifact_record",
+        lambda **_: {
+            "sha256": "0" * 64 if outcome == "mismatch" else digest,
+        },
+    )
+    result = worker.stage_file_copy_evidence(
+        config, {"description": FILE_COPY}, tmp_path
+    )
+    item = result["results"][0]
+    assert item["file_copy_concept_id"] == FILE_COPY
+    assert item["native_attachment_asserted"] is False
+    assert calls[0]["user_concept_id"] == config["agent_id"]
+    assert calls[0]["organisation_concept_id"] == config["organisation_id"]
+    if outcome == "available":
+        assert item["checksum_verified"] is True
+        assert item["sha256"] == digest
+        assert Path(item["local_path"]).read_bytes() == data
+        assert Path(item["local_path"]).parent == tmp_path / "evidence"
+    else:
+        assert item["content_available"] is False
+        assert "local_path" not in item
+        assert item["status"] == (
+            "checksum_mismatch" if outcome == "mismatch" else "not_found_in_actor_scope"
+        )
+
+
+@pytest.mark.parametrize(
+    "case,owner_read,available",
+    [
+        ("allowed", True, True),
+        ("disabled", False, False),
+        ("no_grant", False, False),
+        ("reassigned", False, False),
+        ("other_creator", False, False),
+        ("other_org", False, False),
+        ("cancelled", False, False),
+        ("external_writer", False, False),
+        ("context_only", False, False),
+        ("other_author", False, False),
+        ("not_image", True, False),
+        ("checksum_mismatch", True, False),
+    ],
+)
+def test_source_images_require_explicit_current_task_delegation(
+    config, tmp_path, monkeypatch, case, owner_read, available
+):
+    import hashlib
+    from src.backend.services import computer_file_copy_service as files
+
+    config["delegated_task_images"] = {
+        "enabled": case != "disabled",
+        "authorisation_reference": "" if case == "no_grant" else "operator-grant",
+    }
+    current = task(config, description=FILE_COPY)
+    if case == "reassigned":
+        current["assignee_concept_id"] = "#V#other"
+    if case == "other_creator":
+        current["created_by_concept_id"] = "#V#other"
+    if case == "other_org":
+        current["organisation_concept_id"] = "#V#other"
+    if case == "cancelled":
+        current["status"] = "cancelled"
+    if case in {"context_only", "other_author"}:
+        current["description"] = "A task with no image reference"
+    comments = [{"author_concept_id": "#V#other", "body": FILE_COPY}]
+    api = SimpleNamespace(
+        task=lambda _: current,
+        native_writer=lambda _: case != "external_writer",
+        inputs=lambda _: {"comments": comments},
+    )
+    monkeypatch.setattr(worker, "Von", lambda _: api)
+    calls = []
+    data = b"private task screenshot fixture"
+    digest = hashlib.sha256(data).hexdigest()
+
+    def fetch(**kwargs):
+        calls.append(kwargs["user_concept_id"])
+        if kwargs["user_concept_id"] == config["agent_id"]:
+            return {"success": False, "error": "not_found"}
+        return {
+            "success": True,
+            "data": data,
+            "info": SimpleNamespace(
+                original_filename="screenshot.png",
+                content_type="text/plain" if case == "not_image" else "image/png",
+            ),
+        }
+
+    monkeypatch.setattr(files, "fetch_file_copy_bytes", fetch)
+    monkeypatch.setattr(
+        files,
+        "build_file_copy_artifact_record",
+        lambda **_: {
+            "sha256": "0" * 64 if case == "checksum_mismatch" else digest,
+        },
+    )
+    output = worker.stage_file_copy_evidence(
+        config,
+        {"task_id": current["task_concept_id"], "prior_result": FILE_COPY},
+        tmp_path,
+    )
+    item = output["results"][0]
+    assert (config["delegator_id"] in calls) is owner_read
+    assert item["content_available"] is available
+    if available:
+        assert Path(item["local_path"]).read_bytes() == data
+        assert Path(item["local_path"]).stat().st_mode & 0o777 == 0o600
+        assert item["sha256"] == digest
+        assert item["source_actor"] == config["delegator_id"]
+        assert item["delegated_task_id"] == current["task_concept_id"]
+        assert item["authorisation_reference"] == "operator-grant"
+    else:
+        assert "local_path" not in item

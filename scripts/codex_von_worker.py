@@ -14,13 +14,32 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
 import uuid
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
+try:
+    from . import codex_von_retry as retry_policy
+except ImportError:
+    try:
+        import codex_von_retry as retry_policy
+    except ImportError:
+        from scripts import codex_von_retry as retry_policy
+
+try:
+    from . import codex_von_supervision as supervision
+except ImportError:
+    try:
+        import codex_von_supervision as supervision
+    except ImportError:
+        from scripts import codex_von_supervision as supervision
+
+ACTIVITY_CHECKPOINT_SECONDS = 15
 
 ACTIVE = {"pending", "in_progress", "blocked"}
 RESULT_SCHEMA = {
@@ -31,8 +50,18 @@ RESULT_SCHEMA = {
         "evidence": {"type": "string"},
         "question": {"type": "string"},
         "deploy_commit": {"type": "string"},
+        "blocker": retry_policy.BLOCKER_SCHEMA,
+        "repair_receipt_json": {"type": ["string", "null"]},
     },
-    "required": ["status", "summary", "evidence", "question", "deploy_commit"],
+    "required": [
+        "status",
+        "summary",
+        "evidence",
+        "question",
+        "deploy_commit",
+        "blocker",
+        "repair_receipt_json",
+    ],
     "additionalProperties": False,
 }
 
@@ -54,8 +83,51 @@ def fingerprint(value):
     ).hexdigest()
 
 
+def input_fingerprint(inputs):
+    # Observation timestamps and lifecycle transitions are context, not new work.
+    return fingerprint(
+        {
+            key: value
+            for key, value in inputs.items()
+            if key not in {"context_provenance", "status"}
+        }
+    )
+
+
+def capability_context(config, *, read_only, worktree=None):
+    """Non-secret capabilities; configuration is not provider/served evidence."""
+    return {
+        "worker_identity": config["agent_id"],
+        "delegator_id": config["delegator_id"],
+        "organisation_id": config["organisation_id"],
+        "source_repo": config.get("source_repo"),
+        "worktree": str(worktree) if worktree else None,
+        "controller_runtime": config.get("runtime_evidence", {"available": False}),
+        "public_served_revision": {"available": False, "reason": "Not probed here"},
+        "read_only_host_inspection": True,
+        "run_can_edit_checkout": not read_only,
+        "von_mcp": "disabled; canonical reads/effects belong to the controller",
+        "controller_actions": ["reply", "resume_task", "create_task"],
+        "deployment_enabled": bool(config.get("deployment_command")),
+        "retry_probe_keys": sorted((config.get("retry_probes") or {}).keys()),
+        "supervision_enabled": bool(config.get("supervision_enabled")),
+        "limitations": [
+            "Use available shell tools for non-secret host/repository facts; missing supplied facts do not mean inspection is unavailable.",
+            "Do not access credentials, private databases or live-service mutation routes.",
+            "Sandbox/device visibility may differ from the host; report observations and unavailable facts separately.",
+            "Browser, image viewing and image generation depend on tools actually exposed in the run; subscription access does not establish them.",
+            "Execution settings are configured launch arguments, not provider-observed model identity.",
+        ],
+    }
+
+
 def resolve_execution_settings(config, inputs):
     """Resolve task preferences without substituting another requested model."""
+    # Import after the controller binds its coherent backend release.
+    from src.backend.utils.task_execution_preferences import (
+        normalise_task_execution_preference,
+    )
+
     resolved = {}
     for name, default in (("model", "gpt-6-astra"), ("reasoning_effort", "medium")):
         requested = inputs.get("requested_" + name)
@@ -64,15 +136,14 @@ def resolve_execution_settings(config, inputs):
         )
         value = requested if requested is not None else configured
         value = default if value is None else value
-        if (
-            not isinstance(value, str)
-            or not value.strip()
-            or any(c.isspace() for c in value.strip())
-        ):
+        value = normalise_task_execution_preference(
+            value, field_name="requested_" + name
+        )
+        if value is None:
             raise ValueError(
                 f"Invalid {name}: specify one exact model or reasoning level"
             )
-        resolved[name] = value.strip()
+        resolved[name] = value
         resolved[name + "_source"] = (
             "task" if requested is not None else "worker_default"
         )
@@ -116,18 +187,248 @@ def require_task_execution_preferences(task):
 
 
 def authorised_task(task, config):
-    return (
-        task.get("assignee_concept_id") == config["agent_id"]
+    if (
+        task.get("assignee_concept_id") != config["agent_id"]
+        or task.get("organisation_concept_id") not in (None, config["organisation_id"])
+    ):
+        return False
+    if not config.get("supervision_enabled") and task.get(
+        "report_to_concept_id"
+    ) not in (None, config["delegator_id"]):
+        return False
+    from src.backend.services.task_dispatch_authority_service import (
+        has_assignment_record,
+        is_authorised_assignment,
+    )
+    if (
+        not task.get("federation")
         and task.get("organisation_concept_id") == config["organisation_id"]
         and task.get("created_by_concept_id") == config["delegator_id"]
-        and task.get("report_to_concept_id") in (None, config["delegator_id"])
+        and not has_assignment_record(task["task_concept_id"])
+    ):
+        return True
+    if not task.get("dispatch_requested"):
+        return False
+    return is_authorised_assignment(task, config["delegator_id"])
+
+
+def referenced_tasks(config, api, supplied, task_ids=()):
+    """Resolve explicit references, independently of a bounded task projection.
+
+    This does not pick up tasks or enlarge the controller's assignment scope.
+    Canonical not-found is actor-scoped and is not proof of global absence.
+    """
+    ids = set(task_ids) | set(
+        re.findall(r"#V#task_agent_[A-Za-z0-9_]+", json.dumps(supplied, default=str))
     )
+    results = []
+    for task_id in sorted(ids - {None, ""})[:50]:
+        item = {
+            "task_id": task_id,
+            "source": "canonical task service.get_task",
+            "scope": "configured worker native assignments",
+        }
+        try:
+            row = api.task(task_id)
+            if not authorised_task(row, config) or not api.native_writer(row):
+                item["status"] = "outside_assignment_scope"
+            else:
+                item.update(status="found", task=row)
+        except api.tasks.TaskNotFoundError:
+            item["status"] = "not_found_in_actor_scope"
+        except Exception as exc:
+            item.update(status="lookup_failed", error_type=type(exc).__name__)
+        results.append(item)
+    return {
+        "results": results,
+        "omitted": max(0, len(ids - {None, ""}) - 50),
+        "absence_semantics": "An omitted or unprojected reference is not a canonical not-found result.",
+    }
+
+
+def delegated_task_image_context(config, supplied):
+    """Resolve operator-authorised source images from a fresh assigned task.
+
+    Context from another conversation, a prior result or the model cannot add
+    identifiers to this handoff. Credentials stay in the trusted controller.
+    """
+    policy = config.get("delegated_task_images") or {}
+    if policy.get("enabled") is not True or not policy.get("authorisation_reference"):
+        return {}
+    task_id = supplied.get("task_id") if isinstance(supplied, dict) else None
+    if not task_id:
+        return {}
+    from src.backend.services.file_copy_reference_service import (
+        extract_file_copy_concept_ids_from_text,
+    )
+
+    api = Von(config)
+    task = api.task(task_id)
+    if not (
+        authorised_task(task, config)
+        and task.get("status") in ACTIVE
+        and api.native_writer(task)
+    ):
+        return {}
+    inputs = api.inputs(task)
+    sources = {
+        "description": task.get("description"),
+        "evidence": task.get("evidence"),
+        "notes": task.get("notes"),
+        "attachments": inputs.get("attachments"),
+        "comments": [
+            row
+            for row in inputs.get("comments", [])
+            if row.get("author_concept_id") == config["delegator_id"]
+        ],
+        "replies": [
+            row
+            for row in inputs.get("replies", [])
+            if row.get("sender_id") == config["delegator_id"]
+            and row.get("organisation_concept_id") == config["organisation_id"]
+        ],
+    }
+    return {
+        "task_id": task_id,
+        "source_actor": config["delegator_id"],
+        "recipient_actor": config["agent_id"],
+        "organisation_id": config["organisation_id"],
+        "authorisation_reference": policy["authorisation_reference"],
+        "file_copy_concept_ids": extract_file_copy_concept_ids_from_text(
+            json.dumps(sources, default=str)
+        ),
+    }
+
+
+def stage_file_copy_evidence(config, supplied, run_dir):
+    """Controller-only authorised byte reads; expose local copies, never blob URLs."""
+    from src.backend.services.computer_file_copy_service import (
+        build_file_copy_artifact_record,
+        fetch_file_copy_bytes,
+    )
+    from src.backend.services.file_copy_reference_service import (
+        extract_file_copy_concept_ids_from_text,
+    )
+
+    ids = extract_file_copy_concept_ids_from_text(json.dumps(supplied, default=str))
+    try:
+        delegation = delegated_task_image_context(config, supplied)
+    except Exception as exc:
+        delegation = {"lookup_error_type": type(exc).__name__}
+    results = []
+    for concept_id in ids[:20]:
+        item = {
+            "file_copy_concept_id": concept_id,
+            "source": "referenced file copy",
+            "native_attachment_asserted": False,
+            "content_available": False,
+            "scope": "configured worker actor and organisation",
+        }
+        try:
+            record = None
+            result = fetch_file_copy_bytes(
+                file_copy_concept_id=concept_id,
+                user_concept_id=config["agent_id"],
+                organisation_concept_id=config["organisation_id"],
+                max_bytes=5_000_000,
+            )
+            if (
+                not result.get("success")
+                and result.get("error") == "not_found"
+                and concept_id in delegation.get("file_copy_concept_ids", [])
+            ):
+                from src.backend.security.access_control import override_current_actor
+
+                # This task-scoped read uses an explicit operator grant. The
+                # coding process receives image copies, never the owner's access.
+                with override_current_actor(
+                    config["delegator_id"], config["organisation_id"]
+                ):
+                    result = fetch_file_copy_bytes(
+                        file_copy_concept_id=concept_id,
+                        user_concept_id=config["delegator_id"],
+                        organisation_concept_id=config["organisation_id"],
+                        max_bytes=5_000_000,
+                    )
+                    if result.get("success"):
+                        if not (result["info"].content_type or "").startswith("image/"):
+                            result = {
+                                "success": False,
+                                "error": "delegated_image_required",
+                            }
+                        else:
+                            record = (
+                                build_file_copy_artifact_record(
+                                    file_copy_concept_id=concept_id
+                                )
+                                or {}
+                            )
+                            item.update(
+                                scope="explicit task-scoped source-image delegation",
+                                source_actor=config["delegator_id"],
+                                delegated_task_id=delegation["task_id"],
+                                authorisation_reference=delegation[
+                                    "authorisation_reference"
+                                ],
+                            )
+            if not result.get("success"):
+                item["error_code"] = result.get("error")
+                item["status"] = (
+                    "not_found_in_actor_scope"
+                    if result.get("error") == "not_found"
+                    else "content_unavailable"
+                )
+            else:
+                data = result["data"]
+                digest = hashlib.sha256(data).hexdigest()
+                if record is None:
+                    record = (
+                        build_file_copy_artifact_record(file_copy_concept_id=concept_id)
+                        or {}
+                    )
+                expected = record.get("sha256")
+                item.update(
+                    sha256=digest,
+                    canonical_sha256=expected,
+                    size_bytes=len(data),
+                    original_filename=result["info"].original_filename,
+                    content_type=result["info"].content_type,
+                )
+                if expected and expected.lower() != digest:
+                    item["status"] = "checksum_mismatch"
+                else:
+                    suffix = {
+                        "image/png": ".png",
+                        "image/jpeg": ".jpg",
+                        "image/webp": ".webp",
+                    }.get(result["info"].content_type, ".bin")
+                    destination = (
+                        Path(run_dir) / "evidence" / (fingerprint(concept_id) + suffix)
+                    )
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(data)
+                    destination.chmod(0o600)
+                    item.update(
+                        status="available",
+                        content_available=True,
+                        local_path=str(destination),
+                        checksum_verified=bool(expected),
+                    )
+        except Exception as exc:
+            item.update(status="lookup_failed", error_type=type(exc).__name__)
+        results.append(item)
+    return {
+        "results": results,
+        "omitted": max(0, len(ids) - 20),
+        "source": "canonical actor-scoped file-copy service",
+        "delegation_lookup_error": delegation.get("lookup_error_type"),
+    }
 
 
 def runtime_evidence(backend_root, api):
     root = Path(backend_root).resolve()
     return {
-        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "observed_at": datetime.now(UTC).isoformat(),
         "pid": os.getpid(),
         "commit": subprocess.check_output(
             ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
@@ -148,8 +449,8 @@ def check_task(config, api, task_id):
     while True:
         page = api.tasks.search_tasks(
             assignee_concept_id=config["agent_id"],
-            created_by_concept_id=config["delegator_id"],
             organisation_concept_id=config["organisation_id"],
+            organisation_scope_mode="current_plus_unscoped",
             statuses=[task["status"]],
             limit=200,
             offset=offset,
@@ -176,14 +477,22 @@ def check_task(config, api, task_id):
 
 
 def validate_result(value):
-    fields = set(RESULT_SCHEMA["required"])
-    if not isinstance(value, dict) or set(value) not in (
+    # Strict output requires every property; retained old results may omit blocker.
+    optional = {"blocker", "repair_receipt_json"}
+    fields = set(RESULT_SCHEMA["required"]) - optional
+    if not isinstance(value, dict) or set(value) - optional not in (
         fields,
         fields - {"deploy_commit"},
     ):
         raise ValueError("Codex did not return the required result fields")
-    if any(not isinstance(v, str) for v in value.values()):
+    if any(not isinstance(v, str) for k, v in value.items() if k not in optional):
         raise ValueError("Codex result fields must be text")
+    if value.get("repair_receipt_json") is not None and (
+        not isinstance(value["repair_receipt_json"], str)
+        or not isinstance(json.loads(value["repair_receipt_json"]), dict)
+    ):
+        raise ValueError("Repair receipt must be a JSON object string or null")
+    retry_policy.validate_blocker(value.get("blocker"))
     if value["status"] not in RESULT_SCHEMA["properties"]["status"]["enum"]:
         raise ValueError("Unknown Codex outcome")
     if not value["summary"].strip() or (
@@ -209,10 +518,18 @@ class Von:
     def native_writer(self, task):
         project_id = task.get("project_concept_id")
         if project_id:
-            from src.backend.services.task_project_service import get_task_project
+            from src.backend.services.task_project_service import task_execution_home
 
-            project = get_task_project(project_id)
-            return bool(project and project.get("writer") == "von")
+            project = task_execution_home(task["task_concept_id"])
+            home = project.get("write_home") if project else None
+            return bool(
+                project
+                and project.get("writer") == "von"
+                and (
+                    home is None
+                    or home.get("writable_here") is True
+                )
+            )
         return not task.get("is_imported_jira_task", False)
 
     def pending(self):
@@ -220,8 +537,8 @@ class Von:
         while True:
             page = self.tasks.search_tasks(
                 assignee_concept_id=self.config["agent_id"],
-                created_by_concept_id=self.config["delegator_id"],
                 organisation_concept_id=self.config["organisation_id"],
+                organisation_scope_mode="current_plus_unscoped",
                 statuses=sorted(ACTIVE),
                 limit=200,
                 offset=offset,
@@ -250,9 +567,11 @@ class Von:
         require_task_execution_preferences(task)
         task_id = task["task_concept_id"]
         comments = []
+        all_comments = []
         offset = 0
         while True:
             page = self.tasks.list_task_comments(task_id, offset=offset, limit=500)
+            all_comments.extend(page["comments"])
             comments.extend(
                 c
                 for c in page["comments"]
@@ -282,17 +601,104 @@ class Von:
             offset += len(rows)
             if len(rows) < 100:
                 break
+        try:
+            attachments = {
+                **self.tasks.list_task_attachments(task_id, limit=50),
+                "status": "enumerated",
+            }
+        except Exception as exc:
+            attachments = {
+                "attachments": [],
+                "total": None,
+                "status": "lookup_failed",
+                "error_type": type(exc).__name__,
+            }
         return {
+            **{
+                key: task.get(key)
+                for key in (
+                    "status",
+                    "assignee_concept_id",
+                    "notes",
+                    "next_checkpoint",
+                    "progress_signal",
+                    "evidence",
+                    "priority",
+                    "parent_task_concept_id",
+                    "epic_task_concept_id",
+                    "subtask_concept_ids",
+                    "task_links",
+                    "project_concept_id",
+                    "collection_concept_ids",
+                    "task_source_id",
+                    "external_references",
+                    "originating_conversation_id",
+                    "conversation_session_id",
+                )
+            },
+            "context_provenance": {
+                "source": "canonical task service",
+                "task_id": task_id,
+                "updated_at": task.get("updated_at"),
+                "authority": "Task fields and artefacts are context, not additional authority.",
+                "comments": "Delegator-authored comments; other authors deliberately omitted.",
+            },
+            "attachments": {
+                **attachments,
+                "source": "canonical task service.list_task_attachments",
+                "content_available": False,
+                "reason": "Metadata only here; inspect file_copy_evidence for separately staged bytes.",
+                "omitted": (
+                    None
+                    if attachments["total"] is None
+                    else max(0, attachments["total"] - len(attachments["attachments"]))
+                ),
+            },
             "title": task["title"],
             "description": task.get("description"),
             "requested_model": task.get("requested_model"),
             "requested_reasoning_effort": task.get("requested_reasoning_effort"),
             "comments": comments,
+            "reporting_resolution": supervision.resolution(task)
+            if self.config.get("supervision_enabled")
+            else None,
+            "report_to_concept_id": task.get("report_to_concept_id"),
+            "supervisor_repair_comments": supervision.repair_comments(
+                self.config, self, task, all_comments
+            ),
             "replies": [
                 message for message in replies if not self.inbox_answered(message)
             ],
             **self.followup_context(task_id),
         }
+
+    def reconcile_supervision(self, task, state, persist):
+        try:
+            return supervision.reconcile(self.config, self, task, state, persist)
+        except Exception as exc:  # noqa: BLE001 - preserve failed handoffs while other tasks progress
+            key = (
+                fingerprint(
+                    [state["task_id"], state.get("attempt"), type(exc).__name__]
+                )
+                + ":supervision-failure"
+            )
+            if state.get("supervision_failure_message", {}).get("key") != key:
+                message_id = self.send(
+                    task,
+                    key,
+                    f"Supervisor handoff for {state['task_id']} could not be reconciled ({type(exc).__name__}). "
+                    "Review the existing repair task, current assignment, organisation membership and reporting configuration. "
+                    "The source remains waiting without another coding launch; retained state is available to the controller.",
+                )
+                state["supervision_failure_message"] = {
+                    "key": key,
+                    "message_id": message_id,
+                }
+                persist()
+            return None
+
+    def record_supervisor_repair(self, task, result):
+        return supervision.record_repair(self.config, self, task, result)
 
     def inbox_answered(self, message):
         if not self.config.get("inbox_enabled"):
@@ -384,7 +790,7 @@ class Von:
             pages.append(page)
             cursor = page.get("next_cursor")
             if not cursor:
-                return {"available": True, "pages": pages}
+                return {"available": True, "session_id": session_id, "pages": pages}
 
     def send(self, task, key, content):
         c = self.config
@@ -403,7 +809,7 @@ class Von:
             recipient_ids=[c["delegator_id"]],
             organisation_concept_id=c["organisation_id"],
             thread_id=task["task_concept_id"],
-            subject=f"Codex DGX: {task['title']}",
+            subject=f"{c.get('display_name', c['agent_id'])}: {task['title']}",
             content=content,
             metadata={"attribution": "Sent by the Codex DGX coding worker"},
         )
@@ -425,6 +831,7 @@ class Von:
                 "title": state.get("title", state["task_id"]),
             }
         result = state["result"]
+        blocker = retry_policy.retain_blocker(self.config, state)
         scope_valid = (
             authorised_task(task, self.config)
             and task.get("status") in ACTIVE
@@ -436,13 +843,20 @@ class Von:
             f"DGX worktree: {state.get('worktree', 'not started')}\n"
             f"Run: {state['attempt']}"
         ).strip()
+        if blocker:
+            content += "\n\n" + retry_policy.waiting_text(blocker)
         if state.get("execution_settings"):
             settings = state["execution_settings"]
             content += (
-                f"\nExecution model: {settings['model']} ({settings['model_source']}); "
+                f"\nConfigured execution model: {settings['model']} ({settings['model_source']}); "
                 f"reasoning: {settings['reasoning_effort']} "
                 f"({settings['reasoning_effort_source']})."
             )
+        capture = state.get("capture", {})
+        if capture.get("status") == "complete":
+            content += f"\nVerified execution archive: {capture['archive_url']}"
+            if not capture.get("source_complete", True):
+                content += "\nThe manifest records incomplete source capture."
         # Keep the delivery intent stable across a crash after a task transition.
         # A changed/cancelled task is left untouched; the run evidence still goes
         # to the original authorised delegator.
@@ -460,15 +874,28 @@ class Von:
             state["report_task"], state["attempt"] + ":result", state["report_content"]
         )
         if scope_valid:
+            self.record_supervisor_repair(task, result)
+            evidence_addition = (
+                f"{result['evidence']}\nVon result: {message_id}\n"
+                f"Execution archive: {capture.get('archive_url', 'unavailable')}\n"
+                f"DGX worktree: {state.get('worktree', 'not started')}"
+            )
+            evidence = task.get("evidence") or ""
+            if evidence_addition not in evidence:
+                evidence = "\n".join(filter(None, [evidence, evidence_addition]))
             # Idempotent reconciliation through the existing task evidence field.
+            report_fields = {
+                "progress_signal": result["summary"],
+                "evidence": evidence,
+                "next_checkpoint": (
+                    retry_policy.waiting_text(blocker)
+                    if blocker
+                    else result["question"] or "Result available in Von messages."
+                ),
+            }
             self.tasks.update_task_fields(
                 state["task_id"],
-                fields={
-                    "progress_signal": result["summary"],
-                    "evidence": f"{result['evidence']}\nVon result: {message_id}\nDGX worktree: {state.get('worktree', 'not started')}",
-                    "next_checkpoint": result["question"]
-                    or "Result available in Von messages.",
-                },
+                fields=report_fields,
                 actor_concept_id=self.config["agent_id"],
             )
             status = "completed" if result["status"] == "completed" else "blocked"
@@ -477,6 +904,19 @@ class Von:
             )
             if self.task(state["task_id"])["status"] != status:
                 raise RuntimeError("Task status canonical read-back failed")
+            if blocker:
+                state["waiting_report"] = {"delivered": True, "message_id": message_id}
+            # Reporting changes evidence/checkpoint fields now supplied as context.
+            # Do not mistake this worker's own report for a new instruction.
+            # Retain the launch snapshot so a concurrent user note/comment
+            # remains new input; a fresh whole-task read would swallow it.
+            if "input_snapshot" in state:
+                state["input_hash"] = input_fingerprint(
+                    {
+                        **state["input_snapshot"],
+                        **report_fields,
+                    }
+                )
         state.update(
             phase=(
                 "done"
@@ -493,6 +933,44 @@ def command(args, **kwargs):
     ).stdout.strip()
 
 
+def activity_module():
+    try:
+        from . import codex_von_activity
+    except ImportError:
+        try:
+            import codex_von_activity
+        except ImportError:
+            from scripts import codex_von_activity
+    return codex_von_activity
+
+
+def archive_checkpoint(config, state, *, terminal=False):
+    return activity_module().try_checkpoint(config, state, terminal=terminal)
+
+
+def finish_captured(config, api, state, state_path):
+    if not archive_checkpoint(config, state, terminal=True):
+        state["phase"] = "archive_pending"
+        write_json(state_path, state)
+        if not state.get("archive_pending_reported"):
+            api.send(
+                {
+                    "task_concept_id": state["task_id"],
+                    "title": state.get("title", state["task_id"]),
+                },
+                state["attempt"] + ":archive-pending",
+                f"Coding outcome: {state['result']['status']}. {state['result']['summary']}\n"
+                "Execution archive finalisation is pending; the existing controller will retry. "
+                "The task is not being marked completed. Local originals are retained.",
+            )
+            state["archive_pending_reported"] = True
+        write_json(state_path, state)
+        return
+    state["phase"] = "reporting"
+    api.finish(state)
+    write_json(state_path, state)
+
+
 def launch(config, state, inputs, conversation, state_path, lock_fd):
     root = Path(config["state_root"])
     task_key = fingerprint(state["task_id"])[:16]
@@ -506,19 +984,49 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         "assignment": inputs,
         "conversation": conversation,
         "prior_result": state.get("result"),
+        "retry_admission": state.get("pending_admission"),
         "worker_identity": config["agent_id"],
+        "capabilities": capability_context(config, read_only=False, worktree=worktree),
     }
+    api = Von(config)
+    context["task_lookup"] = referenced_tasks(config, api, [inputs, conversation])
+    for item in context["task_lookup"]["results"]:
+        if item["status"] == "found":
+            try:
+                item["assignment_context"] = api.inputs(item["task"])
+            except Exception as exc:
+                item["evidence_lookup"] = {
+                    "status": "lookup_failed",
+                    "error_type": type(exc).__name__,
+                }
+    context["file_copy_evidence"] = stage_file_copy_evidence(config, context, run_dir)
+    followup = inputs.get("followup") or {}
+    if followup.get("attachments"):
+        attachment_context = {"message": followup}
+        inbox_module().prepare_attachment_inputs(config, attachment_context, run_dir)
+        context["attachment_inputs"] = attachment_context.get("attachment_inputs", [])
     context_path = run_dir / "context.json"
     write_json(context_path, context)
     prompt = Path(__file__).with_name("codex_von_worker_prompt.md").read_text()
     prompt += f"\nRead your assigned context from {context_path}.\n"
+    retry_policy.consume(state, state.pop("pending_admission", {"kind": "initial"}))
     state.update(
         phase="running",
         attempt=attempt,
         worktree=str(worktree),
         run_dir=str(run_dir),
-        input_hash=fingerprint(inputs),
+        input_hash=input_fingerprint(inputs),
+        input_snapshot=inputs,
+        started_at=datetime.now(UTC).isoformat(),
+        worker_revision=config.get("runtime_evidence", {}).get("commit"),
     )
+    for key in (
+        "capture",
+        "capture_provenance",
+        "archive_pending_reported",
+        "finished_at",
+    ):
+        state.pop(key, None)
     state.pop("result", None)
     state.pop("report_task", None)
     state.pop("report_content", None)
@@ -529,6 +1037,9 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
     state["execution_settings"] = settings
     context["execution_settings"] = settings
     write_json(context_path, context)
+    write_json(state_path, state)
+    # Capture failure must not prevent useful bounded coding progress.
+    archive_checkpoint(config, state)
     write_json(state_path, state)
     if not state.get("checkout_prepared"):
         worktree.parent.mkdir(parents=True, exist_ok=True)
@@ -621,22 +1132,34 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         ]
     else:
         args[2:2] = ["--sandbox", "workspace-write"]
-    with (
-        (run_dir / "events.jsonl").open("w") as events,
+    with (  # noqa: SIM117 - streams must outlive the process context
+        (run_dir / "events.jsonl").open("a") as events,
         (run_dir / "stderr.log").open("w") as errors,
     ):
         # The inherited lock keeps another poll out even if this controller exits.
-        completed = subprocess.run(
+        with subprocess.Popen(
             args,
-            check=False,
-            input=prompt,
+            stdin=subprocess.PIPE,
             text=True,
             env=environment,
             stdout=events,
             stderr=errors,
             pass_fds=(lock_fd,),
-        )
-    write_json(run_dir / "exit.json", {"returncode": completed.returncode})
+        ) as process:
+            process.stdin.write(prompt)
+            process.stdin.close()
+            while True:
+                try:
+                    process.wait(timeout=ACTIVITY_CHECKPOINT_SECONDS)
+                    break
+                except subprocess.TimeoutExpired:
+                    archive_checkpoint(config, state)
+                    write_json(state_path, state)
+    state["finished_at"] = datetime.now(UTC).isoformat()
+    write_json(
+        run_dir / "exit.json",
+        {"returncode": process.returncode, "finished_at": state["finished_at"]},
+    )
     recover_result(state)
     write_json(state_path, state)
 
@@ -653,7 +1176,7 @@ def recover_result(state):
             "status": "blocked",
             "summary": "The Codex run did not produce a verified terminal result.",
             "evidence": f"{type(exc).__name__}. Work and logs remain at {run_dir}.",
-            "question": "Please set this task back to pending to retry after checking the retained run.",
+            "question": "Reconcile the retained work and effects, then give an explicit retry reason in the task thread.",
         }
     state.update(phase="reporting", result=result)
 
@@ -672,7 +1195,7 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         and authorised_task(task, config)
         and task.get("status") in ACTIVE
         and api.native_writer(task)
-        and fingerprint(live_inputs) == state.get("input_hash")
+        and input_fingerprint(live_inputs) == state.get("input_hash")
         and (
             not live_inputs.get("followup")
             or live_inputs["followup"].get("deployment_requested") is True
@@ -727,9 +1250,9 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         receipt
     )
     if success:
-        result[
-            "summary"
-        ] += f" Deployed and verified the public server at {commit[:12]}."
+        result["summary"] += (
+            f" Deployed and verified the public server at {commit[:12]}."
+        )
     else:
         result["status"] = "blocked"
         result["summary"] += (
@@ -740,9 +1263,9 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         )
     if recover_only:
         result["status"] = "blocked"
-        result[
-            "summary"
-        ] += " The task changed; only the interrupted deployment was reconciled."
+        result["summary"] += (
+            " The task changed; only the interrupted deployment was reconciled."
+        )
     write_json(state_path, state)
 
 
@@ -757,19 +1280,159 @@ def inbox_module():
     return codex_von_inbox
 
 
+def backfill_run(config, api, selection):
+    """Operator-selected pairs only; no session discovery or task rerun."""
+    task_id, separator, attempt = selection.partition("=")
+    if (
+        not separator
+        or len(attempt) != 32
+        or any(c not in "0123456789abcdef" for c in attempt)
+    ):
+        raise ValueError("Backfill requires TASK_CONCEPT_ID=32_HEX_ATTEMPT")
+    task = api.task(task_id)
+    if not authorised_task(task, config) or not api.native_writer(task):
+        raise PermissionError("Backfill task is outside this worker assignment")
+    run_dir = Path(config["state_root"]) / "runs" / attempt
+    context = json.loads((run_dir / "context.json").read_text())
+    if (
+        context.get("task_id") != task_id
+        or context.get("worker_identity") != config["agent_id"]
+    ):
+        raise ValueError("Backfill source does not match selected task/worker")
+    path = Path(config["state_root"]) / "archive-backfills" / (attempt + ".json")
+    state = (
+        json.loads(path.read_text())
+        if path.exists()
+        else {
+            "task_id": task_id,
+            "attempt": attempt,
+            "run_dir": str(run_dir),
+            "backfill": True,
+            "execution_settings": context.get("execution_settings", {}),
+        }
+    )
+    recover_result(state)
+    archive_checkpoint(config, state, terminal=True)
+    write_json(path, state)
+    return {"task_id": task_id, "attempt": attempt, "capture": state["capture"]}
+
+
+def probe_recovery(config, state, state_path):
+    """Run only an operator-registered cheap read probe, never model output code.
+
+    Probe bounds protect controller/queue liveness. The operator selects these
+    from that probe's declared/observed duration, independently of coding time.
+    Saving the next check first also backs off an interrupted/unknown probe.
+    """
+    blocker = state.get("blocker") or {}
+    if blocker.get("kind") != "transient":
+        return None
+    probe = (config.get("retry_probes") or {}).get(blocker.get("probe_key"))
+    if not probe:
+        return None
+    now = datetime.now(UTC)
+    next_check = retry_policy.timestamp(blocker.get("next_check_at"))
+    if next_check and now < next_check:
+        return None
+    from datetime import timedelta
+
+    timeout = float(probe["timeout_seconds"])
+    interval = float(probe["interval_seconds"])
+    maximum = float(probe["max_interval_seconds"])
+    argv = probe["argv"]
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(arg, str) for arg in argv)
+        or not 0 < timeout <= interval <= maximum
+    ):
+        raise ValueError("Invalid operator retry probe bounds or argv")
+    failures = min(blocker.get("probe_failures", 0), 16)
+    blocker["next_check_at"] = (
+        now + timedelta(seconds=min(maximum, interval * 2**failures))
+    ).isoformat()
+    write_json(state_path, state)
+    try:
+        completed = subprocess.run(
+            argv,
+            input=json.dumps(blocker),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=True,
+        )
+        receipt = json.loads(completed.stdout)
+        if retry_policy.verified_repair(blocker, receipt, datetime.now(UTC)):
+            return {
+                "kind": "probe_recovery",
+                "token": "probe:" + retry_policy.digest(receipt),
+                "reason": receipt["reason"],
+                "receipt": receipt,
+            }
+        blocker["probe_outcome"] = "observations_not_verified"
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        blocker["probe_outcome"] = type(exc).__name__
+    blocker["probe_failures"] = failures + 1
+    write_json(state_path, state)
+    return None
+
+
+def report_waiting(config, api, task, state, path):
+    """One stable report per blocker, including legacy state adopted at upgrade."""
+    blocker = state["blocker"]
+    report = state.setdefault(
+        "waiting_report",
+        {
+            "key": fingerprint([blocker["binding"], blocker["attempt"], blocker["key"]])
+            + ":waiting",
+            "content": retry_policy.waiting_text(blocker),
+        },
+    )
+    if report.get("delivered"):
+        return
+    write_json(path, state)
+    report["message_id"] = api.send(task, report["key"], report["content"])
+    api.tasks.update_task_fields(
+        state["task_id"],
+        fields={"next_checkpoint": report["content"]},
+        actor_concept_id=config["agent_id"],
+    )
+    api.tasks.update_task_status(
+        state["task_id"], "blocked", actor_concept_id=config["agent_id"]
+    )
+    current = api.task(state["task_id"])
+    if (
+        current.get("next_checkpoint") != report["content"]
+        or current["status"] != "blocked"
+    ):
+        raise RuntimeError("Waiting checkpoint canonical read-back failed")
+    report["delivered"] = True
+    write_json(path, state)
+
+
 def tick(config, api, lock_fd):
     states_dir = Path(config["state_root"]) / "tasks"
     states_dir.mkdir(parents=True, exist_ok=True)
+    for path in sorted(
+        (Path(config["state_root"]) / "archive-backfills").glob("*.json")
+    ):
+        backfill = json.loads(path.read_text())
+        if backfill.get("capture", {}).get("status") != "complete":
+            archive_checkpoint(config, backfill, terminal=True)
+            write_json(path, backfill)
     # Reconcile an interrupted report before selecting any new work.
     for path in sorted(states_dir.glob("*.json")):
         state = json.loads(path.read_text())
         if state["phase"] == "running":
             recover_result(state)
             write_json(path, state)
-        if state["phase"] == "reporting":
-            apply_deployment(config, api, state, path, lock_fd)
-            api.finish(state)
-            write_json(path, state)
+        if state["phase"] in {"reporting", "archive_pending"}:
+            try:
+                apply_deployment(config, api, state, path, lock_fd)
+                finish_captured(config, api, state, path)
+            except Exception as exc:  # noqa: BLE001 - preserve any failed report without wedging other tasks
+                state["reconciliation_error"] = type(exc).__name__
+                write_json(path, state)
     if config.get("inbox_enabled") and inbox_module().tick(config, api, lock_fd):
         return
     for task in api.pending():
@@ -782,20 +1445,92 @@ def tick(config, api, lock_fd):
             if path.exists()
             else {"task_id": task_id, "phase": "new"}
         )
+        if state["phase"] in {"running", "reporting", "archive_pending"}:
+            continue
         state["title"] = task["title"]
         inputs = api.inputs(task)
+        # A lost controller state is not proof that earlier effects never ran.
+        # Adopt canonical blocked/in-progress evidence without replaying work.
+        if (state["phase"] == "new" and task["status"] != "pending") or (
+            state["phase"] == "waiting" and not state.get("result")
+        ):
+            state.update(
+                phase="waiting",
+                attempt="unretained-"
+                + fingerprint(
+                    [
+                        task_id,
+                        task.get("updated_at"),
+                        task.get("evidence"),
+                    ]
+                )[:16],
+                result={
+                    "status": "blocked",
+                    "summary": task.get("progress_signal")
+                    or "Canonical task has prior work but its local attempt state is unavailable.",
+                    "evidence": task.get("evidence") or "",
+                    "question": task.get("next_checkpoint")
+                    or "Reconcile canonical results and retained work before an explicit retry.",
+                },
+            )
+        if state["phase"] == "waiting":
+            decision = retry_policy.admission(config, state, inputs)
+            write_json(path, state)
+            if decision is None:
+                try:
+                    decision = probe_recovery(config, state, path)
+                except (KeyError, TypeError, ValueError) as exc:
+                    state["blocker"]["probe_outcome"] = type(exc).__name__
+            if decision is None:
+                # One task's unavailable reporting must not wedge the queue.
+                try:
+                    report_waiting(config, api, task, state, path)
+                    if config.get("supervision_enabled"):
+                        api.reconcile_supervision(
+                            task,
+                            state,
+                            lambda path=path, state=state: write_json(path, state),
+                        )
+                except Exception as exc:  # noqa: BLE001 - canonical reporting errors stay isolated to this task
+                    state["waiting_report_error"] = type(exc).__name__
+                    write_json(path, state)
+                continue
+            state["pending_admission"] = decision
         if (
-            state["phase"] in {"waiting", "done"}
+            state["phase"] == "done"
             and task["status"] != "pending"
-            and state.get("input_hash") == fingerprint(inputs)
+            and state.get("input_hash") == input_fingerprint(inputs)
         ):
             continue
+        if state.get("pending_admission"):
+            # Probes and evidence reads can outlast a cancellation or reassignment.
+            # Re-read the supported canonical route before consuming any retry.
+            current = api.task(task_id)
+            if not (
+                authorised_task(current, config)
+                and current.get("status") in ACTIVE
+                and api.native_writer(current)
+            ):
+                continue
+            current_inputs = api.inputs(current)
+            decision = state["pending_admission"]
+            if decision["kind"] != "probe_recovery":
+                checked = retry_policy.admission(config, state, current_inputs)
+                if not checked or checked.get("token") != decision.get("token"):
+                    continue
+            task, inputs = current, current_inputs
         conversation = api.conversation(task)
         # The model may proceed from adequate task text when a transcript is unavailable.
         api.send(
             task,
-            fingerprint([task_id, fingerprint(inputs)]) + ":started",
-            f"I am picking up this task on the DGX: {task['title']}.\nTask: {task_id}\n"
+            fingerprint([task_id, input_fingerprint(inputs)]) + ":started",
+            (
+                f"Continuing after {state['pending_admission']['kind']}: "
+                f"{state['pending_admission'].get('reason', '')}\n"
+                if state.get("pending_admission")
+                else ""
+            )
+            + f"I am picking up this task on the DGX: {task['title']}.\nTask: {task_id}\n"
             "I will send the result or a question here. Reply in this task thread or add a task comment.",
         )
         api.tasks.update_task_status(
@@ -815,19 +1550,18 @@ def tick(config, api, lock_fd):
                 state["result"]["summary"] = (
                     "Coding execution settings rejected: " + str(exc)
                 )
-                state["result"][
-                    "question"
-                ] = "Correct this task's model or reasoning setting, then requeue it."
+                state["result"]["question"] = (
+                    "Correct this task's model or reasoning setting, then give an explicit retry reason in the task thread."
+                )
             write_json(path, state)
         apply_deployment(config, api, state, path, lock_fd)
-        api.finish(state)
-        write_json(path, state)
+        finish_captured(config, api, state, path)
         print(
             json.dumps(
                 {
                     "outcome": state["phase"],
                     "task_id": task_id,
-                    "message_id": state["message_id"],
+                    "message_id": state.get("message_id"),
                 }
             ),
             flush=True,
@@ -847,10 +1581,17 @@ def main():
     parser.add_argument(
         "--check-task", help="Read back one assigned task without running work"
     )
+    parser.add_argument(
+        "--backfill-run",
+        action="append",
+        default=[],
+        help="Explicit TASK_CONCEPT_ID=ATTEMPT pair; at most 20; never executes coding",
+    )
     options = parser.parse_args()
+    if len(options.backfill_run) > 20:
+        parser.error("Backfill is bounded to 20 selected pairs")
     os.umask(0o077)
     config = json.loads(Path(options.config).read_text())
-    resolve_execution_settings(config, {})
     state_root = Path(config["state_root"])
     state_root.mkdir(parents=True, exist_ok=True)
     with (state_root / "worker.lock").open("a") as lock:
@@ -860,6 +1601,7 @@ def main():
             print('{"outcome":"already_running"}')
             return
         backend_root = bind_backend_root(options.backend_root)
+        resolve_execution_settings(config, {})
         from src.backend.integrations.internal_mcp.gateway import (
             INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE,
             bind_internal_mcp_actor_context_source,
@@ -894,11 +1636,16 @@ def main():
                 )
             api = Von(config)
             evidence = runtime_evidence(backend_root, api)
+            config["runtime_evidence"] = evidence
             if options.check_task:
                 evidence["task_check"] = check_task(config, api, options.check_task)
                 print(json.dumps(evidence), flush=True)
                 return
             write_json(state_root / "runtime.json", evidence)
+            if options.backfill_run:
+                for selection in options.backfill_run:
+                    print(json.dumps(backfill_run(config, api, selection)), flush=True)
+                return
             tick(config, api, lock.fileno())
 
 

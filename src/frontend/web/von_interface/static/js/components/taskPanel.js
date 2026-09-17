@@ -5,13 +5,21 @@
  * Tasks are stored as Vontology concepts and accessed via REST API.
  */
 
+import { copyJsonTextWithButtonFeedback } from '../utils/copyJsonButtonState.js';
+import { buildTaskLink, readTaskLink } from '../utils/taskLinks.js';
+import { openTaskRunActivity } from './taskRunActivity.js';
 import { deleteJson, getJson, patchJson, postJson, getUserContext, ensureUniqueWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
 import { activateTab } from '../tabNavigation.js';
 import { showToast } from '../utils/toast.js';
 import { renderMarkdownViaServer } from '../markdownUtils.js';
-import { selectBestNameForContext } from '../utils/nameSelection.js';
+import { selectBestNameForContext, selectShortestNameForContext } from '../utils/nameSelection.js';
 
 // Task panel state
+const _taskTabs = new Map();
+let _taskTabStackExpanded = false;
+let _taskTabCounter = 0;
+let _taskTabStackEl = null;
+let _taskTabRefreshSequence = 0;
 let _panelEl = null;
 let _taskListEl = null;
 let _globalTasksContainer = null;  // Container for global tasks tab
@@ -29,6 +37,11 @@ let _filterTaskSourceId = 'all';
 let _isGlobalTabMode = false;  // True when rendering into global tasks tab
 let _taskDetailState = {};  // taskId -> detail panel state
 let _selectedTaskId = '';
+let _selectionCleared = false;
+let _pendingTaskNavigation = null;
+let _taskLinkConsumed = false;
+let _referencedGlobalTaskId = '';
+let _panelReturnFocus = null;
 let _panelTaskIds = null;
 let _panelLoadGeneration = 0;
 let _bulkTaskVisibility = 'exclude';
@@ -48,6 +61,7 @@ let _globalTaskLoadGeneration = 0;
 let _activeOrganisationConceptId;
 let _taskOrganisationOptions = [];
 let _taskOrganisationOptionsLoaded = false;
+const _taskOrganisationNameRequests = new Map();
 let _taskTaxonomy = {
     task_types: [],
     task_sources: [],
@@ -81,7 +95,8 @@ const TASK_EXTERNAL_RESOURCE_ACTION_HREF_PATTERN = /^\/api\/tasks\/[A-Za-z0-9%_-
 const TASK_STATUS_OPTIONS = [
     { value: 'pending', label: 'Pending', icon: '⏳' },
     { value: 'in_progress', label: 'In Progress', icon: '🔄' },
-    { value: 'completed', label: 'Completed', icon: '✅' },
+    { value: 'completed', label: 'Completed', icon: '✅', description: 'Work finished; not necessarily deployed' },
+    { value: 'deployed', label: 'Deployed', icon: '🚀', description: 'Work deployed to its target runtime' },
     { value: 'cancelled', label: 'Cancelled', icon: '❌' },
     { value: 'blocked', label: 'Blocked', icon: '🚫' },
 ];
@@ -175,11 +190,16 @@ async function ensureTaskOrganisationOptionsLoaded() {
 }
 
 function resetTaskPanelScopedState(activeOrganisationConceptId, { actorChanged = false } = {}) {
+    const hadActiveTaskTab = [..._taskTabs.values()].some(tab => tab.content.classList.contains('active'));
+    for (const taskId of [..._taskTabs.keys()]) closeTaskTab(taskId, { activateFallback: false });
+    if (hadActiveTaskTab) activateTab('chatTab');
     _panelTaskIds = null;
     _panelLoadGeneration += 1;
     _taskQueueActivityGeneration += 1;
     stopTaskQueueActivityPolling();
     _taskQueueActivityLoadPromise = null;
+    _pendingTaskNavigation = null;
+    _referencedGlobalTaskId = '';
     _activeOrganisationConceptId = activeOrganisationConceptId;
     _globalTaskLoadGeneration += 1;
     _isLoading = false;
@@ -197,6 +217,7 @@ function resetTaskPanelScopedState(activeOrganisationConceptId, { actorChanged =
     _hiddenBulkTaskCollections = [];
     _taskQueueActivity = [];
     _taskQueueActivityError = '';
+    _taskOrganisationNameRequests.clear();
     if (actorChanged) {
         _taskOrganisationOptions = [];
         _taskOrganisationOptionsLoaded = false;
@@ -384,6 +405,21 @@ function getHiddenBulkTaskCollections(task) {
         && typeof collection.collection_id === 'string'
         && collection.collection_id.trim()
     ));
+}
+
+function projectHomeNotice(project) {
+    const home = project?.write_home;
+    if (!home || home.writable_here) return '';
+    const label = home.state === 'replica' ? 'Read-only project copy.' : 'Project transfer in progress.';
+    const freshness = home.snapshot_at ? ` Snapshot: ${escapeHtml(String(home.snapshot_at))}.` : '';
+    let route = '';
+    try {
+        const url = new URL(home.url);
+        if (['https:', 'http:'].includes(url.protocol)) {
+            route = ` <a href="${escapeHtml(url.href)}" target="_blank" rel="noopener noreferrer">Open the project’s write home</a>`;
+        }
+    } catch (_) { /* A missing route must not break project navigation. */ }
+    return `<span class="task-project-home-notice">${label}${freshness}${route}</span>`;
 }
 
 function normaliseBulkTaskCollectionSummary(collection) {
@@ -709,6 +745,7 @@ function formatDateTimeOrDash(value) {
 }
 
 function getTaskDetailState(taskId) {
+    if (_taskTabs.has(taskId)) return _taskTabs.get(taskId).detailState;
     if (!_taskDetailState[taskId]) {
         _taskDetailState[taskId] = {
             expanded: false,
@@ -753,6 +790,20 @@ export function initializeTaskPanel() {
     ensureTaskPanelOrganisationSwitchListener();
     ensureTaskPanelAuthStatusListener();
     renderTaskGroupFilterControls();
+
+    _panelEl.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            hideTaskPanel();
+        }
+    });
+    document.addEventListener('pointerdown', (event) => {
+        if (_isVisible && !_panelEl.contains(event.target)
+            && !event.target.closest('#taskPanelToggleBtn')) {
+            hideTaskPanel({ restoreFocus: false });
+        }
+    });
 
     // Set up close button
     const closeBtn = document.getElementById('closeTaskPanel');
@@ -820,12 +871,14 @@ export function showTaskPanel(options = {}) {
         _isGlobalTabMode = false;
         syncTaskQueueActivityPolling();
         _taskListEl = document.getElementById('taskList') || _taskListEl;
+        if (!_isVisible) _panelReturnFocus = document.activeElement;
         _panelEl.classList.remove('hidden');
         _panelEl.setAttribute('aria-hidden', 'false');
         _panelEl.querySelectorAll('.task-create-form, .task-filter-row').forEach(element => {
             element.classList.toggle('hidden', _panelTaskIds !== null);
         });
         _isVisible = true;
+        document.getElementById('closeTaskPanel')?.focus();
         // Auto-refresh tasks when panel becomes visible
         return refreshTasks();
     }
@@ -867,11 +920,12 @@ async function loadReferencedPanelTasks() {
 /**
  * Hide the task panel.
  */
-export function hideTaskPanel() {
+export function hideTaskPanel({ restoreFocus = true } = {}) {
     if (_panelEl) {
         _panelEl.classList.add('hidden');
         _panelEl.setAttribute('aria-hidden', 'true');
         _isVisible = false;
+        if (restoreFocus && _panelReturnFocus?.isConnected) _panelReturnFocus.focus();
     }
 }
 
@@ -906,6 +960,7 @@ async function openGlobalTasks() {
     _tasks = [];
     _taskDetailState = {};
     _selectedTaskId = '';
+    _referencedGlobalTaskId = '';
     ensureTaskPanelOrganisationSwitchListener();
     ensureTaskPanelAuthStatusListener();
     ensureTaskQueueActivityPollingListeners();
@@ -936,6 +991,33 @@ async function openGlobalTasks() {
         loadGlobalTasks({ telemetry }),
         loadTaskQueueActivity(),
     ]);
+    const linkedTaskId = !_taskLinkConsumed && readTaskLink();
+    if (!_pendingTaskNavigation && linkedTaskId) {
+        _taskLinkConsumed = true;
+        const scopeGeneration = _taskQueueActivityGeneration;
+        const loadGeneration = _globalTaskLoadGeneration;
+        try {
+            const task = await getJson(`/api/tasks/${encodeURIComponent(linkedTaskId)}`);
+            if (scopeGeneration !== _taskQueueActivityGeneration || loadGeneration !== _globalTaskLoadGeneration) return;
+            if (getTaskId(task) !== linkedTaskId) throw new Error('Task link target mismatch');
+            _pendingTaskNavigation = task;
+        } catch (_) {
+            if (scopeGeneration !== _taskQueueActivityGeneration || loadGeneration !== _globalTaskLoadGeneration) return;
+            clearTaskSelection();
+            showToast('Could not open linked task', 'error');
+        }
+    }
+    if (_pendingTaskNavigation) {
+        const task = _pendingTaskNavigation;
+        _pendingTaskNavigation = null;
+        const taskId = getTaskId(task);
+        if (!_tasks.some(item => getTaskId(item) === taskId)) _tasks.push(task);
+        _referencedGlobalTaskId = taskId;
+        await selectTask(taskId);
+        const inspector = _globalTasksContainer.querySelector('#globalTaskInspector');
+        inspector?.setAttribute('tabindex', '-1');
+        inspector?.focus();
+    }
     syncTaskQueueActivityPolling();
 }
 
@@ -987,6 +1069,7 @@ function renderGlobalTasksTabContent() {
                     <option value="pending">Pending</option>
                     <option value="in_progress">In Progress</option>
                     <option value="completed">Completed</option>
+                    <option value="deployed">Deployed</option>
                     <option value="cancelled">Cancelled</option>
                     <option value="blocked">Blocked</option>
                 </select>
@@ -1022,7 +1105,7 @@ function renderGlobalTasksTabContent() {
                 </div>
             </div>
             <div id="globalTaskSummary" class="global-task-summary" aria-live="polite"></div>
-            <div id="globalTaskProjectInfo" class="global-task-summary">${escapeHtml(_taskProjects.find((project) => project.concept_id === _selectedProjectId)?.description || '')}</div>
+            <div id="globalTaskProjectInfo" class="global-task-summary">${escapeHtml(_taskProjects.find((project) => project.concept_id === _selectedProjectId)?.description || '')} ${projectHomeNotice(_taskProjects.find((project) => project.concept_id === _selectedProjectId))}</div>
             <div id="globalBulkTaskVisibilityControl" class="bulk-task-visibility-control hidden" aria-live="polite"></div>
             <div id="globalTaskLoadProgress" class="task-load-progress" aria-live="polite"></div>
             <section id="globalTaskQueueActivity" class="task-detail-section" aria-live="polite"></section>
@@ -1111,6 +1194,9 @@ function renderGlobalTasksTabContent() {
                 const details = await getJson(`/api/tasks/projects/${encodeURIComponent(_selectedProjectId)}`);
                 if (generation !== _globalTaskLoadGeneration) return;
                 _projectCollections = details.collections || [];
+                if (details.project) {
+                    _taskProjects = _taskProjects.map((project) => project.concept_id === _selectedProjectId ? details.project : project);
+                }
             } catch (error) {
                 if (generation !== _globalTaskLoadGeneration) return;
                 showToast('Could not load project collections', 'error');
@@ -1175,6 +1261,11 @@ function renderGlobalTasksTabContent() {
     const createBtn = _globalTasksContainer.querySelector('#globalCreateTaskBtn');
     if (createBtn) {
         createBtn.addEventListener('click', handleGlobalCreateTask);
+    }
+    const selectedHome = _taskProjects.find((project) => project.concept_id === _selectedProjectId)?.write_home;
+    if (selectedHome && !selectedHome.writable_here) {
+        _globalTasksContainer.querySelectorAll('.global-tasks-create input, .global-tasks-create textarea, .global-tasks-create select, .global-tasks-create button')
+            .forEach((control) => { control.disabled = true; });
     }
 
     // Update the task list element reference for global mode
@@ -1255,7 +1346,7 @@ export async function setCurrentSession(sessionId) {
  * Get the current task count for badge display.
  */
 export function getTaskCount() {
-    return _tasks.filter(t => t.status !== 'completed' && t.status !== 'cancelled').length;
+    return _tasks.filter(t => !['completed', 'deployed', 'cancelled'].includes(t.status)).length;
 }
 
 /**
@@ -1505,6 +1596,7 @@ function getFilteredTasks() {
     // Exact references remain reachable regardless of saved list filters.
     if (!_isGlobalTabMode && _panelTaskIds !== null) return _tasks;
     return _tasks.filter((task) => {
+        if (_isGlobalTabMode && getTaskId(task) === _referencedGlobalTaskId) return true;
         if (!taskMatchesGlobalScope(task)) {
             return false;
         }
@@ -1537,6 +1629,7 @@ function getFilteredTasks() {
 }
 
 function ensureSelectedTaskStillValid(filteredTasks = null) {
+    if (_selectionCleared) return;
     const visibleTasks = Array.isArray(filteredTasks) ? filteredTasks : getFilteredTasks();
     if (visibleTasks.length === 0) {
         _selectedTaskId = '';
@@ -1552,7 +1645,7 @@ function renderGlobalTaskSummary(filteredTasks = getFilteredTasks()) {
     const summaryEl = _globalTasksContainer?.querySelector('#globalTaskSummary');
     if (!summaryEl) return;
 
-    const activeCount = filteredTasks.filter((task) => !['completed', 'cancelled'].includes(task.status)).length;
+    const activeCount = filteredTasks.filter((task) => !['completed', 'deployed', 'cancelled'].includes(task.status)).length;
     const sourcedCount = filteredTasks.filter((task) => task.task_source_id).length;
     const typedCount = filteredTasks.filter((task) => Array.isArray(task.task_type_ids) && task.task_type_ids.length > 0).length;
     const selectedTask = filteredTasks.find((task) => getTaskId(task) === _selectedTaskId) || null;
@@ -1878,7 +1971,7 @@ function renderTaskList() {
         html += '</div>';
     } else {
         const grouped = groupTasksByStatus(filteredTasks);
-        const boardStatuses = ['in_progress', 'pending', 'blocked', 'completed', 'cancelled'];
+        const boardStatuses = ['in_progress', 'pending', 'blocked', 'completed', 'deployed', 'cancelled'];
         html = '<div class="task-board-view">';
         boardStatuses.forEach((status) => {
             html += renderTaskGroup(status, grouped[status] || []);
@@ -1887,6 +1980,7 @@ function renderTaskList() {
     }
 
     _taskListEl.innerHTML = html;
+    hydrateTaskOrganisationChips();
     if (isBoardView) {
         _taskListEl.scrollLeft = previousScrollLeft;
         _taskListEl.scrollTop = previousScrollTop;
@@ -1921,7 +2015,7 @@ function renderTaskGroup(status, tasks) {
         <div class="task-group" data-status="${status}">
             <div class="task-group-header">
                 <span class="task-group-icon">${statusInfo.icon}</span>
-                <span class="task-group-label">${statusInfo.label}</span>
+                <span class="task-group-label" title="${escapeHtml(statusInfo.description || statusInfo.label)}">${statusInfo.label}</span>
                 <span class="task-group-count">(${tasks.length})</span>
             </div>
             <div class="task-group-body">
@@ -2644,6 +2738,26 @@ function renderTaskHistoryRows(history) {
     `).join('');
 }
 
+function hydrateTaskOrganisationChips() {
+    _taskListEl.querySelectorAll('.task-organisation-chip[data-organisation-id]').forEach((chip) => {
+        const conceptId = chip.dataset.organisationId;
+        if (!conceptId) return;
+        let request = _taskOrganisationNameRequests.get(conceptId);
+        if (!request) {
+            request = getJson(`/api/concepts/${encodeURIComponent(conceptId)}`)
+                .then((concept) => Array.isArray(concept?.names) && concept.names.length
+                    ? concept.names : concept?.raw_doc?.names)
+                .catch(() => null);
+            _taskOrganisationNameRequests.set(conceptId, request);
+        }
+        void request.then((names) => {
+            if (!chip.isConnected || _taskOrganisationNameRequests.get(conceptId) !== request) return;
+            const shortestName = selectShortestNameForContext(names);
+            if (shortestName) chip.textContent = shortestName;
+        });
+    });
+}
+
 function getTaskOrganisationDisplayName(organisationConceptId) {
     const conceptId = normaliseTaskConceptId(organisationConceptId || '');
     if (!conceptId) return 'Unscoped';
@@ -2686,6 +2800,21 @@ function renderTaskOrganisationField(task) {
     `;
 }
 
+function renderTaskDeployments(task) {
+    const deployments = task.deployments || [];
+    if (!deployments.length) return '';
+    return `<section aria-label="Builds and deployments"><h4>Builds and deployments</h4>
+      ${deployments.map(deployment => `<article class="task-deployment">
+        <button type="button" class="task-concept-link" data-concept-id="${escapeHtml(deployment.concept_id)}" data-concept-name="${escapeHtml(deployment.deployment_id)}">${escapeHtml(deployment.deployment_id)}</button>
+        <p>${escapeHtml(deployment.environment)} · ${escapeHtml(deployment.status)} · ${escapeHtml(deployment.target || 'Target not recorded')}</p>
+        <p>Build: ${escapeHtml(deployment.build?.build_id || '')}<br>Source revision: ${escapeHtml(deployment.build?.source_revision || '')}<br>Deployed: ${escapeHtml(deployment.deployed_at || 'Not recorded')}</p>
+        ${deployment.status !== 'verified' ? '<p>This deployment is not currently verified.</p>' : ''}
+        <details><summary>Deployment evidence and history</summary><pre>${escapeHtml(JSON.stringify(deployment.observations || [], null, 2))}</pre></details>
+        ${deployment.status === 'verified' ? `<button type="button" class="task-select-deployment-btn" data-task-id="${escapeHtml(getTaskId(task))}" data-concept-id="${escapeHtml(deployment.concept_id)}">Use as current work product</button>` : ''}
+      </article>`).join('')}
+    </section>`;
+}
+
 function renderTaskWorkProduct(task, detailState) {
     const product = detailState?.product || task.current_work_product;
     const messages = {
@@ -2699,8 +2828,9 @@ function renderTaskWorkProduct(task, detailState) {
     const productId = product?.concept_id || '';
     const execute = canExecuteTaskWithVon(task);
     const active = isTaskExecutionLaunchSuppressed(taskId);
-    return `<section class="task-work-product" aria-label="Current work product">
+    return `${renderTaskDeployments(task)}<section class="task-work-product" aria-label="Current work product">
         <h4>Current work product</h4>
+        ${product?.kind === 'deployment' ? `<p>Deployment: ${escapeHtml(product.deployment?.status || 'unreported')} (${escapeHtml(product.deployment?.environment || '')})</p>` : ''}
         <p>${product?.status === 'ready' ? escapeHtml(productId) : escapeHtml(messages[product?.status] || 'Open task details to check its current product.')}</p>
         ${product?.status === 'ready' ? `<button type="button" class="task-open-product-btn" data-task-id="${escapeHtml(taskId)}" ${detailState.productLoading ? 'disabled' : ''}>${detailState.productLoading ? 'Opening…' : 'Open current work product'}</button>` : ''}
         ${productId ? `<button type="button" class="task-concept-link" data-concept-id="${escapeHtml(productId)}" data-concept-name="${escapeHtml(productId)}">Inspect product concept</button>` : ''}
@@ -2724,6 +2854,7 @@ async function openTaskWorkProduct(taskId) {
     detailState.productError = '';
     detailState.productHtml = '';
     renderTaskList();
+    renderTaskTab(taskId);
     try {
         const product = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/work-product`);
         if (generation !== _taskQueueActivityGeneration) return;
@@ -2738,8 +2869,17 @@ async function openTaskWorkProduct(taskId) {
         detailState.productError = 'Could not open the current product. Try again.';
     } finally {
         detailState.productLoading = false;
-        if (generation === _taskQueueActivityGeneration) renderTaskList();
+        if (generation === _taskQueueActivityGeneration) {
+            renderTaskList();
+            renderTaskTab(taskId);
+        }
     }
+}
+
+function renderTaskCopyLink(taskId) {
+    return `<span class="task-copy-link-control"><button type="button" class="copy-id-button task-copy-link-btn"
+        data-task-id="${escapeHtml(taskId)}" title="Copy link" aria-label="Copy link">📋</button>
+        <span class="sr-only" role="status" aria-live="polite"></span></span>`;
 }
 
 function renderTaskDetailsPanel(task, detailState) {
@@ -2775,6 +2915,7 @@ function renderTaskDetailsPanel(task, detailState) {
 
     return `
         <div class="task-detail-panel" data-task-id="${escapeHtml(taskId)}">
+            ${renderTaskDelegation(detailTask)}
             ${renderTaskWorkProduct(detailTask, detailState)}
             <div class="task-detail-section">
                 <h4>Editable task context</h4>
@@ -2899,6 +3040,7 @@ function renderTaskDetailsPanel(task, detailState) {
 
             <div class="task-detail-section">
                 <h4>Attachments</h4>
+                <button class="task-run-activity-btn" data-task-id="${escapeHtml(taskId)}">Coding run activity</button>
                 <ul class="task-detail-list">
                     ${renderTaskAttachmentRows(detailState.attachments)}
                 </ul>
@@ -3012,7 +3154,7 @@ function renderTaskExternalResourceActions(task) {
     `;
 }
 
-function renderTaskInspector(task, detailState) {
+function renderTaskInspector(task, detailState, { inTaskTab = false } = {}) {
     const detailTask = detailState?.task || task;
     const taskId = getTaskId(detailTask);
     const sourceSummary = getTaskSourceSummary(detailTask);
@@ -3049,14 +3191,16 @@ function renderTaskInspector(task, detailState) {
             <div class="task-inspector-header">
                 <div class="task-inspector-heading">
                     <div class="task-inspector-eyebrow">${escapeHtml(detailTask.reference_code || taskId)}</div>
-                    <h3>${escapeHtml(detailTask.title || 'Untitled task')}</h3>
+                    <h3>${escapeHtml(detailTask.title || 'Untitled task')} ${renderTaskCopyLink(taskId)}</h3>
                     <p>${escapeHtml(detailTask.description || 'No description yet.')}</p>
                 </div>
                 <div class="task-inspector-badges">
-                    <span class="task-status-badge">${escapeHtml(getStatusInfo(detailTask.status).label)}</span>
+                    ${renderTaskDelegation(detailTask)}
+                    <span class="task-status-badge" title="${escapeHtml(getStatusInfo(detailTask.status).description || getStatusInfo(detailTask.status).label)}">${escapeHtml(getStatusInfo(detailTask.status).label)}</span>
                     <span class="task-priority-chip">${escapeHtml(getPriorityInfo(detailTask.priority).label)}</span>
                     ${renderTaskExecuteWithVonButton(detailTask, 'task-inspector-execute-btn')}
                     ${renderTaskDiscussButton(detailTask, 'task-inspector-discuss-btn')}
+                    ${!inTaskTab ? renderOpenTaskTabButton(taskId) : ''}
                 </div>
             </div>
 
@@ -3205,6 +3349,7 @@ function renderTaskInspector(task, detailState) {
 
             <div class="task-detail-section">
                 <h4>Attachments</h4>
+                <button class="task-run-activity-btn" data-task-id="${escapeHtml(taskId)}">Coding run activity</button>
                 <ul class="task-detail-list">
                     ${renderTaskAttachmentRows(detailState?.attachments)}
                 </ul>
@@ -3237,6 +3382,143 @@ function renderTaskInspector(task, detailState) {
     `;
 }
 
+function renderOpenTaskTabButton(taskId) {
+    return `<button type="button" class="task-open-in-tab-btn btn-mini" data-task-id="${escapeHtml(taskId)}">Open in Tab</button>`;
+}
+
+// Reuse the concept stack presentation, with independent task contents and recency.
+function rebuildTaskTabStack() {
+    if (!_taskTabs.size) {
+        _taskTabStackEl?.remove();
+        _taskTabStackEl = null;
+        _taskTabStackExpanded = false;
+    } else {
+        if (!_taskTabStackEl) {
+            _taskTabStackEl = document.createElement('div');
+            _taskTabStackEl.id = 'taskTabStack';
+            _taskTabStackEl.className = 'concept-tab-bucket task-tab-stack';
+            _taskTabStackEl.setAttribute('role', 'group');
+            _taskTabStackEl.setAttribute('aria-label', 'Open task tabs');
+            const container = document.getElementById('tabContainer');
+            const anchor = container.querySelector('[data-tab="globalTasksTab"]');
+            container.insertBefore(_taskTabStackEl, anchor?.parentElement === container ? anchor : null);
+        }
+        const entries = [..._taskTabs.values()].reverse();
+        const primary = document.createElement('div');
+        primary.className = 'concept-tab-bucket-primary';
+        primary.appendChild(entries[0].button);
+        const overflow = document.createElement('div');
+        overflow.id = 'taskTabStackOverflow';
+        overflow.className = 'concept-tab-bucket-panel';
+        overflow.hidden = !_taskTabStackExpanded;
+        if (entries.length > 1) {
+            const toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.className = 'concept-tab-bucket-toggle';
+            toggle.textContent = `+${entries.length - 1}`;
+            toggle.setAttribute('aria-label', `${_taskTabStackExpanded ? 'Hide' : 'Show'} ${entries.length - 1} more task tabs`);
+            toggle.setAttribute('aria-expanded', String(_taskTabStackExpanded));
+            toggle.setAttribute('aria-controls', overflow.id);
+            toggle.onclick = () => {
+                _taskTabStackExpanded = !_taskTabStackExpanded;
+                rebuildTaskTabStack();
+                _taskTabStackEl.querySelector('.concept-tab-bucket-toggle')?.focus();
+            };
+            primary.appendChild(toggle);
+            entries.slice(1).forEach(entry => overflow.appendChild(entry.button));
+        }
+        _taskTabStackEl.classList.toggle('is-expanded', _taskTabStackExpanded);
+        _taskTabStackEl.replaceChildren(primary, overflow);
+    }
+    document.dispatchEvent(new CustomEvent('von:tab-strip-layout-changed'));
+}
+
+function activateTaskTab(taskId) {
+    const tab = _taskTabs.get(taskId);
+    if (!tab) return;
+    _taskTabs.delete(taskId);
+    _taskTabs.set(taskId, tab);
+    _taskTabStackExpanded = false;
+    rebuildTaskTabStack();
+    activateTab(tab.content.id);
+    tab.button.querySelector('.task-tab-open').focus();
+}
+
+function closeTaskTab(taskId, { activateFallback = true } = {}) {
+    const tab = _taskTabs.get(taskId);
+    if (!tab) return;
+    const wasActive = tab.content.classList.contains('active');
+    tab.button.remove();
+    tab.content.remove();
+    _taskTabs.delete(taskId);
+    rebuildTaskTabStack();
+    if (wasActive && activateFallback) {
+        const remaining = [..._taskTabs.keys()].pop();
+        if (remaining) activateTaskTab(remaining);
+        else {
+            activateTab('globalTasksTab');
+            void showGlobalTasks();
+            document.querySelector('[data-tab="globalTasksTab"]')?.focus();
+        }
+    }
+}
+
+function renderTaskTab(taskId) {
+    const tab = _taskTabs.get(taskId);
+    if (!tab) return;
+    const task = tab.detailState.task || tab.task;
+    const title = task.title || 'Untitled task';
+    tab.button.querySelector('.task-tab-open').textContent = `📋 ${title}`;
+    tab.button.title = title;
+    tab.button.querySelector('.close-tab').setAttribute('aria-label', `Close task tab: ${title}`);
+    tab.content.innerHTML = `<button type="button" class="task-tab-refresh btn-mini">Refresh task</button>${renderTaskInspector(task, tab.detailState, { inTaskTab: true })}`;
+    tab.content.querySelector('.task-tab-refresh').onclick = () => void loadTaskDetails(taskId);
+    attachTaskEventListeners([tab.content]);
+}
+
+export async function openTaskInTab(rawTaskId) {
+    const taskId = normaliseTaskConceptId(rawTaskId);
+    if (!taskId) return;
+    const container = document.getElementById('tabContainer');
+    const area = document.querySelector('.tab-content-area');
+    if (!container || !area) {
+        showToast('Task tabs are unavailable in this view.', 'error');
+        return;
+    }
+    ensureTaskPanelOrganisationSwitchListener();
+    ensureTaskPanelAuthStatusListener();
+    hideTaskPanel({ restoreFocus: false });
+    if (_taskTabs.has(taskId)) {
+        activateTaskTab(taskId);
+        return;
+    }
+    const task = _tasks.find(item => getTaskId(item) === taskId) || { task_concept_id: taskId };
+    const detailState = getTaskDetailState(taskId);
+    const content = document.createElement('div');
+    content.id = `taskTab_${++_taskTabCounter}`;
+    content.className = 'tab-content task-tab-content';
+    content.dataset.taskId = taskId;
+    const button = document.createElement('div');
+    button.className = 'tab-button closable task-tab-button';
+    button.dataset.tab = content.id;
+    button.dataset.taskId = taskId;
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'task-tab-open tab-button-label';
+    open.onclick = () => activateTaskTab(taskId);
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'close-tab';
+    close.textContent = '×';
+    close.onclick = (event) => { event.stopPropagation(); closeTaskTab(taskId); };
+    button.append(open, close);
+    area.appendChild(content);
+    _taskTabs.set(taskId, { task, detailState, button, content });
+    renderTaskTab(taskId);
+    activateTaskTab(taskId);
+    await loadTaskDetails(taskId);
+}
+
 function renderGlobalTaskInspector() {
     const inspectorEl = _globalTasksContainer?.querySelector('#globalTaskInspector');
     if (!inspectorEl || !_isGlobalTabMode) return;
@@ -3263,11 +3545,35 @@ function renderGlobalTaskInspector() {
     }
 
     const detailState = getTaskDetailState(_selectedTaskId);
-    inspectorEl.innerHTML = renderTaskInspector(selectedTask, detailState);
+    inspectorEl.innerHTML = `<button type="button" class="task-clear-selection-btn" aria-label="Close task details">Close task details ×</button>${renderTaskInspector(selectedTask, detailState)}`;
+    inspectorEl.querySelector('.task-clear-selection-btn').addEventListener('click', clearTaskSelection);
+    _globalTasksContainer.onkeydown = (event) => {
+        if (!_selectedTaskId || event.key !== 'Escape' || event.defaultPrevented
+            || event.target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
+        event.preventDefault();
+        clearTaskSelection();
+    };
+}
+
+function clearTaskSelection() {
+    const previousId = _selectedTaskId;
+    _selectionCleared = true;
+    _selectedTaskId = '';
+    renderTaskList();
+    const previousCard = [...(_taskListEl?.querySelectorAll('.task-item') || [])]
+        .find((item) => item.dataset.taskId === previousId);
+    (previousCard || _taskListEl)?.focus({ preventScroll: true });
+}
+
+function renderTaskDelegation(task) {
+    return task?.assignee_concept_id === '#V#codex_dgx'
+        ? '<span class="task-source-chip task-delegation-chip" title="Assigned to Codex DGX; execution has not necessarily started">Delegated to Codex DGX</span>'
+        : '';
 }
 
 async function selectTask(taskId, { loadDetails = true } = {}) {
     if (!taskId) return;
+    _selectionCleared = false;
     _selectedTaskId = taskId;
     renderTaskList();
     if (!loadDetails) return;
@@ -3322,7 +3628,7 @@ function renderTaskItem(task) {
     let dueDateHtml = '';
     if (task.due_date) {
         const dueDate = new Date(task.due_date);
-        const isOverdue = dueDate < new Date() && task.status !== 'completed' && task.status !== 'cancelled';
+        const isOverdue = dueDate < new Date() && !['completed', 'deployed', 'cancelled'].includes(task.status);
         dueDateHtml = `
             <span class="task-due-date ${isOverdue ? 'overdue' : ''}" title="Due date">
                 📅 ${dueDate.toLocaleDateString()}
@@ -3358,7 +3664,8 @@ function renderTaskItem(task) {
     const organisationChipHtml = `
         <div class="task-meta-chip-row">
             <span class="task-source-chip task-organisation-chip ${task.organisation_concept_id ? '' : 'task-organisation-unscoped'}"
-                title="Task organisation scope">
+                data-organisation-id="${escapeHtml(normaliseTaskConceptId(task.organisation_concept_id || ''))}"
+                title="Task organisation scope: ${escapeHtml(getTaskOrganisationDisplayName(task.organisation_concept_id))}">
                 ${escapeHtml(getTaskOrganisationDisplayName(task.organisation_concept_id))}
             </span>
         </div>
@@ -3389,12 +3696,14 @@ function renderTaskItem(task) {
                 <span class="task-priority" title="Priority: ${priorityInfo.label}">${priorityInfo.icon}</span>
                 ${referenceCodeHtml}
                 ${titleHtml}
-                <span class="task-status-badge" title="Status">${statusInfo.icon} ${escapeHtml(statusInfo.label)}</span>
+                ${!_isGlobalTabMode ? renderTaskCopyLink(taskId) : ''}
+                <span class="task-status-badge" title="${escapeHtml(statusInfo.description || statusInfo.label)}">${statusInfo.icon} ${escapeHtml(statusInfo.label)}</span>
             </div>
             <div class="task-item-body">
                 <p class="task-description">${truncatedDescription}</p>
                 ${typeChipsHtml}
                 ${organisationChipHtml}
+                ${renderTaskDelegation(task)}
                 ${bulkCollectionChipsHtml}
                 ${labelsHtml}
                 ${componentsHtml}
@@ -3413,9 +3722,11 @@ function renderTaskItem(task) {
                 <div class="task-actions">
                     ${renderTaskExecuteWithVonButton(task)}
                     ${renderTaskDiscussButton(task)}
-                    <button class="task-detail-toggle-btn" data-task-id="${taskId}" title="${_isGlobalTabMode ? 'Inspect task details' : 'Show task details'}">
-                        ${_isGlobalTabMode ? 'Inspect' : (detailState.expanded ? 'Hide details' : 'Details')}
+                    <button type="button" class="task-detail-toggle-btn" data-task-id="${taskId}" ${!_isGlobalTabMode ? `aria-expanded="${detailState.expanded}"` : ''} title="${_isGlobalTabMode ? 'Inspect task details' : (detailState.expanded ? 'Hide task details' : 'Show task details')}">
+                        ${_isGlobalTabMode ? 'Inspect' : (detailState.expanded ? 'Hide details' : 'Show details')}
                     </button>
+                    ${renderOpenTaskTabButton(taskId)}
+                    ${!_isGlobalTabMode ? `<button type="button" class="task-open-in-tasks-btn btn-mini" data-task-id="${taskId}">Open in Tasks</button>` : ''}
                     <select class="task-status-select" data-task-id="${taskId}" title="Change status">
                         ${TASK_STATUS_OPTIONS.map(opt => `
                             <option value="${opt.value}" ${task.status === opt.value ? 'selected' : ''}>
@@ -3447,6 +3758,8 @@ function escapeHtml(str) {
 function replaceCachedTask(updatedTask) {
     const updatedTaskId = getTaskId(updatedTask);
     if (!updatedTaskId) return;
+    const tab = _taskTabs.get(updatedTaskId);
+    if (tab) tab.task = updatedTask;
     const existingIndex = _tasks.findIndex((item) => getTaskId(item) === updatedTaskId);
     if (existingIndex >= 0) {
         _tasks[existingIndex] = updatedTask;
@@ -3457,9 +3770,12 @@ function replaceCachedTask(updatedTask) {
 async function loadTaskDetails(taskId, { refreshList = false } = {}) {
     const detailState = getTaskDetailState(taskId);
     const scopeGenerationAtStart = _taskQueueActivityGeneration;
+    const requestSequence = ++_taskTabRefreshSequence;
+    detailState.requestSequence = requestSequence;
     detailState.loading = true;
     detailState.error = null;
     renderTaskList();
+    renderTaskTab(taskId);
 
     try {
         const [task, commentsResult, attachmentsResult, historyResult, worklogResult] = await Promise.all([
@@ -3469,7 +3785,7 @@ async function loadTaskDetails(taskId, { refreshList = false } = {}) {
             getJson(`/api/tasks/${encodeURIComponent(taskId)}/history?limit=200`),
             getJson(`/api/tasks/${encodeURIComponent(taskId)}/worklog?limit=200`),
         ]);
-        if (scopeGenerationAtStart !== _taskQueueActivityGeneration) return;
+        if (scopeGenerationAtStart !== _taskQueueActivityGeneration || detailState.requestSequence !== requestSequence) return;
         detailState.task = task;
         detailState.comments = commentsResult.comments || [];
         detailState.attachments = attachmentsResult.attachments || [];
@@ -3481,10 +3797,15 @@ async function loadTaskDetails(taskId, { refreshList = false } = {}) {
         }
     } catch (err) {
         console.error('[taskPanel] Failed to load task details:', err);
-        detailState.error = 'Failed to load task details';
+        if (scopeGenerationAtStart === _taskQueueActivityGeneration && detailState.requestSequence === requestSequence) {
+            detailState.error = 'Failed to load task details';
+        }
     } finally {
-        detailState.loading = false;
-        renderTaskList();
+        if (scopeGenerationAtStart === _taskQueueActivityGeneration && detailState.requestSequence === requestSequence) {
+            detailState.loading = false;
+            renderTaskList();
+            renderTaskTab(taskId);
+        }
     }
 }
 
@@ -3528,7 +3849,7 @@ async function saveTaskParityFields(taskId, panelEl) {
     setIfPresent('.task-detail-due-input', 'due_date', localInputValueToIso);
 
     const previousOrganisationId = normaliseTaskConceptId(
-        (_tasks.find((task) => getTaskId(task) === taskId)?.organisation_concept_id) || '',
+        (getTaskDetailState(taskId).task?.organisation_concept_id || _tasks.find((task) => getTaskId(task) === taskId)?.organisation_concept_id) || '',
     );
     const organisationInput = panelEl.querySelector('.task-detail-organisation-input');
     const requestedOrganisationId = normaliseTaskConceptId(
@@ -3540,6 +3861,7 @@ async function saveTaskParityFields(taskId, panelEl) {
     await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, payload);
     showToast('Task fields updated', 'success');
     if (Object.prototype.hasOwnProperty.call(payload, 'organisation_concept_id')) {
+        closeTaskTab(taskId);
         if (_isGlobalTabMode) {
             _selectedTaskId = '';
             delete _taskDetailState[taskId];
@@ -3654,8 +3976,8 @@ async function openTaskConversation(sessionId) {
 /**
  * Attach event listeners to task items.
  */
-function attachTaskEventListeners() {
-    const roots = [
+function attachTaskEventListeners(explicitRoots = null) {
+    const roots = explicitRoots || [
         _taskListEl,
         _globalTasksContainer?.querySelector('#globalTaskInspector'),
     ].filter(Boolean);
@@ -3663,11 +3985,31 @@ function attachTaskEventListeners() {
     if (roots.length === 0) return;
 
     roots.forEach((root) => {
+        root.querySelectorAll('.task-run-activity-btn').forEach((button) => {
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void openTaskRunActivity(button.dataset.taskId);
+            });
+        });
         root.querySelectorAll('.task-execute-with-von-btn').forEach((button) => {
             button.addEventListener('click', async (event) => {
                 event.preventDefault();
                 event.stopPropagation();
                 await executeTaskWithVon(event.currentTarget.dataset.taskId, { continuation: event.currentTarget.dataset.continue === 'true' });
+            });
+        });
+
+        root.querySelectorAll('.task-copy-link-btn').forEach((button) => {
+            button.addEventListener('click', async (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const copied = await copyJsonTextWithButtonFeedback(button, buildTaskLink(button.dataset.taskId), {
+                    successLabel: '✔', errorLabel: '✕', fallbackLabel: '📋',
+                });
+                button.parentElement.querySelector('[role="status"]').textContent = copied ? 'Link copied to clipboard' : 'Copy failed';
+                button.focus({ preventScroll: true });
+                showToast(copied ? 'Link copied to clipboard' : 'Copy failed', copied ? 'success' : 'error');
             });
         });
 
@@ -3705,6 +4047,26 @@ function attachTaskEventListeners() {
             });
         });
 
+        root.querySelectorAll('.task-open-in-tab-btn').forEach((button) => {
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void openTaskInTab(button.dataset.taskId);
+            });
+        });
+
+        root.querySelectorAll('.task-open-in-tasks-btn').forEach((button) => {
+            button.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const task = _tasks.find(item => getTaskId(item) === button.dataset.taskId);
+                if (!task) return;
+                _pendingTaskNavigation = task;
+                hideTaskPanel({ restoreFocus: false });
+                activateTab('globalTasksTab');
+                void showGlobalTasks();
+            });
+        });
+
         root.querySelectorAll('.task-detail-toggle-btn').forEach((btn) => {
             btn.addEventListener('click', async (e) => {
                 e.stopPropagation();
@@ -3714,6 +4076,8 @@ function attachTaskEventListeners() {
                     await selectTask(taskId);
                 } else {
                     await toggleTaskDetails(taskId);
+                    Array.from(_panelEl.querySelectorAll('.task-detail-toggle-btn'))
+                        .find(button => button.dataset.taskId === taskId)?.focus();
                 }
             });
         });
@@ -3835,14 +4199,15 @@ function attachTaskEventListeners() {
                 void openTaskWorkProduct(button.dataset.taskId);
             });
         });
-        root.querySelectorAll('.task-save-product-btn').forEach(button => {
+        root.querySelectorAll('.task-save-product-btn, .task-select-deployment-btn').forEach(button => {
             button.addEventListener('click', async event => {
                 event.stopPropagation();
                 const taskId = button.dataset.taskId;
-                const input = button.closest('.task-work-product').querySelector('.task-current-product-input');
+                const input = button.closest('.task-work-product')?.querySelector('.task-current-product-input');
+                const productId = button.classList.contains('task-select-deployment-btn') ? button.dataset.conceptId : (input.value.trim() || null);
                 button.disabled = true;
                 try {
-                    await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, { current_work_product_concept_id: input.value.trim() || null });
+                    await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, { current_work_product_concept_id: productId });
                     const detail = getTaskDetailState(taskId);
                     detail.product = null;
                     detail.productHtml = '';
@@ -3961,6 +4326,7 @@ async function updateTaskStatus(taskId, newStatus) {
         await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, { status: newStatus });
         showToast('Task updated', 'success');
         await refreshTasks();
+        if (_taskTabs.has(taskId)) await loadTaskDetails(taskId);
     } catch (err) {
         console.error('[taskPanel] Failed to update task:', err);
         showToast('Failed to update task', 'error');
@@ -3975,6 +4341,7 @@ async function deleteTask(taskId) {
         await deleteJson(`/api/tasks/${encodeURIComponent(taskId)}`);
         showToast('Task deleted', 'success');
 
+        closeTaskTab(taskId);
         // Remove from local cache and re-render
         _tasks = _tasks.filter(t => getTaskId(t) !== taskId);
         refreshTaskGroupOptions();

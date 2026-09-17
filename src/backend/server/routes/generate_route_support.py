@@ -340,6 +340,7 @@ def _persist_generate_turn_messages(
     persist_user_message: bool = True,
     assistant_message_metadata: Mapping[str, Any] | None = None,
     user_image_attachments: list[dict[str, Any]] | None = None,
+    assistant_content_parts: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     def _maybe_span(
         *, operation_name: str, attributes: Mapping[str, Any] | None = None
@@ -404,7 +405,7 @@ def _persist_generate_turn_messages(
                     "role": "user",
                     "content": prompt_text,
                     "author_user_id": user_concept_id,
-                    "image_attachments": list(user_image_attachments or []),
+                    **({"image_attachments": list(user_image_attachments)} if user_image_attachments else {}),
                 }
                 if request_id:
                     user_message["turn_id"] = f"u-{request_id}"
@@ -434,7 +435,8 @@ def _persist_generate_turn_messages(
         if callable(refresh_llm_debug_timing_fn):
             refresh_llm_debug_timing_fn(llm_debug_payload)
         with _maybe_span(operation_name="persist_assistant_message"):
-            image_attachments = []
+            from ...services.conversation_output_service import image_assets
+            image_attachments = image_assets(assistant_content_parts or [])
             for tool_msg in tool_messages:
                 try:
                     tool_payload = json.loads(tool_msg.get("content", "{}"))
@@ -444,7 +446,8 @@ def _persist_generate_turn_messages(
             assistant_message = {
                 "role": "assistant",
                 "content": response_text,
-                "image_attachments": image_attachments,
+                **({"image_attachments": list({asset["concept_id"]: asset for asset in image_attachments if asset.get("concept_id")}.values())} if image_attachments else {}),
+                **({"content_parts": list(assistant_content_parts)} if assistant_content_parts else {}),
                 **(
                     dict(assistant_message_metadata)
                     if isinstance(assistant_message_metadata, Mapping)

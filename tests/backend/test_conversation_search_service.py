@@ -595,3 +595,46 @@ def test_backfill_indexes_old_visible_phrase_and_title_only(monkeypatch):
     ] == [1, 3]
     assert "private system text" not in str(projection)
     assert "private tool output" not in str(projection)
+
+
+@pytest.mark.parametrize("sort", ["relevance", "updated"])
+def test_metadata_precedes_high_semantic_scores_across_pages(monkeypatch, sort):
+    from src.backend.services import conversation_search_service as service
+
+    rows = [
+        {"session_id": "title", "session_name": "Cooling buildings", "last_message_at": "2020-01-01"},
+        {"session_id": "participant", "session_name": "Notes", "participant_ids": ["#V#cooling_buildings_team"], "last_message_at": "2020-01-02"},
+        {"session_id": "topic", "session_name": "Design", "last_message_at": "2026-01-01"},
+    ]
+    monkeypatch.setattr(service, "list_actor_conversations", lambda **kw: {"conversations": rows, "coverage_complete": True})
+    monkeypatch.setattr(service, "_lexical_candidates", lambda **kw: ([], {"status": "valid_empty"}))
+    monkeypatch.setattr(service, "search_conversation_preference_session_ids", lambda **kw: [])
+    calls = []
+
+    class Rag:
+        def query(self, query, **kwargs):
+            calls.append((query, kwargs))
+            # Vector results need not contain any query words; neither the
+            # title nor transcript here shares words with the topic query.
+            return [
+                {"score": 1000, "text": "Passive ventilation reduces indoor temperatures.", "metadata": {"session_id": "topic", "role": "assistant"}},
+                {"score": .8, "text": "Shaded facades reduce heat gain.", "metadata": {"session_id": "title", "role": "user"}},
+                {"score": 9000, "text": "Private", "metadata": {"session_id": "foreign", "role": "user"}},
+            ]
+
+    monkeypatch.setattr(service, "get_rag_service", lambda: Rag())
+    found, cursor = [], None
+    while True:
+        result = service.search_actor_conversations(actor_user_id="#V#alice", namespace="#V#alice@lab", query="cooling buildings", sort=sort, page_size=1, cursor=cursor)
+        found.extend(result["results"])
+        cursor = result["next_cursor"]
+        if not cursor:
+            break
+    assert [r["session_id"] for r in found] == (["title", "participant", "topic"] if sort == "relevance" else ["topic", "participant", "title"])
+    title = next(r for r in found if r["session_id"] == "title")
+    assert {"display_name", "semantic_content"} <= set(title["match"]["fields"])
+    topic = next(r for r in found if r["session_id"] == "topic")
+    assert topic["match"]["fields"] == ["semantic_content"]
+    assert "ventilation" in topic["match"]["snippet"]
+    assert calls[0][1]["namespace"] == "#V#alice@lab"
+    assert calls[0][1]["permissions_context"]["mode"] == "chat"

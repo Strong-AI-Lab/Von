@@ -7,6 +7,7 @@ jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => 
     getUserContext: jest.fn(() => ({ user_id: '#V#agent_filter_user', org_id: '#V#test_org' })),
     postJson: jest.fn(async () => ({ status: 'updated', namespace: '#V#agent_filter_user@test_org' })),
     getWindowSessionId: jest.fn(() => 'test-window-session-id'),
+    ensureUniqueWindowSessionId: jest.fn(async () => 'test-window-session-id'),
     WINDOW_SESSION_HEADER: 'X-Von-Window-Session'
 }));
 
@@ -221,6 +222,29 @@ describe('chat session agent-created filtering', () => {
                 namespace: '#V#agent_filter_user@test_org',
             }),
         }));
+    });
+
+    test.each(['ctrlclick', 'F10', 'ContextMenu'])('%s opens normal conversation options with focus recovery', async gesture => {
+        require(chatTabModulePath);
+        await window.refreshChatSessionTabsForOrgSwitch();
+        const row = document.querySelector('[data-session-id="human-1"]');
+        row.focus();
+        const before = global.fetch.mock.calls.length;
+        row.dispatchEvent(gesture === 'ctrlclick'
+            ? new MouseEvent('click', { ctrlKey: true, bubbles: true, cancelable: true })
+            : new KeyboardEvent('keydown', { key: gesture, shiftKey: gesture === 'F10', bubbles: true, cancelable: true }));
+        expect(global.fetch.mock.calls).toHaveLength(before);
+        const menu = document.querySelector('.chat-session-menu.open');
+        expect(menu).not.toBeNull();
+        expect(document.activeElement.textContent).toBe('Rename');
+        expect(row.getAttribute('aria-expanded')).toBe('true');
+        document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+        expect(document.activeElement.textContent).toBe('Move to Organisation…');
+        document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+        expect(document.activeElement.textContent).toBe('Rename');
+        document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        expect(document.activeElement).toBe(row);
+        expect(row.getAttribute('aria-expanded')).toBe('false');
     });
 
     test('modifier-click opens layout options without creating a chat and persists the left list', async () => {

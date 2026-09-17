@@ -18,6 +18,40 @@ def png():
     return stream.getvalue()
 
 
+def test_upload_preserves_original_filename_but_uses_safe_blob_key(monkeypatch):
+    from src.backend.services import blob_uploads, computer_file_copy_service
+    from src.backend.db.repositories.concepts_repository import ConceptsRepository
+
+    queries, blobs, records = [], [], []
+    monkeypatch.setattr(
+        ConceptsRepository, "find_one", lambda query, *a: queries.append(query)
+    )
+
+    def put(**kwargs):
+        blobs.append(kwargs)
+        return SimpleNamespace(
+            ref=SimpleNamespace(backend="local", key=kwargs["key"], uri="blob:test")
+        )
+
+    def create(**kwargs):
+        records.append(kwargs)
+        return SimpleNamespace(concept_id="#V#original_name")
+
+    monkeypatch.setattr(blob_uploads, "put_bytes_durable", put)
+    monkeypatch.setattr(
+        computer_file_copy_service, "create_computer_file_copy_instance", create
+    )
+    filename = "Māori diagram (original).png"
+    result = images.store_image(
+        data=png(), filename=filename, user_concept_id="#V#owner"
+    )
+    assert result["filename"] == filename
+    assert records[0]["name"] == filename
+    assert queries[0]["attributes.original_filename"] == filename
+    assert blobs[0]["metadata"]["original_filename"] == filename
+    assert blobs[0]["key"].endswith("Maori_diagram_original.png")
+
+
 def test_detects_actual_media_and_rejects_corrupt_oversized_and_animated():
     data = png()
     info = images.inspect_image(data)
@@ -302,3 +336,34 @@ def test_archive_resource_citations_resolve_only_to_authenticated_source_route()
     links = BeautifulSoup(html, "html.parser").find_all("a")
     assert links[0]["href"] == "/von/api/otter-archive/artifacts/" + artifact
     assert not links[1].has_attr("href")
+
+
+def test_picker_upload_validates_bytes_and_returns_request_descriptor(monkeypatch):
+    from flask import Blueprint, Flask
+    from src.backend.server.routes.conversation_image_routes import register_image_routes
+
+    stored = []
+
+    def store(**kwargs):
+        info = images.inspect_image(kwargs['data'])
+        stored.append(kwargs)
+        return {**info, 'concept_id': '#V#phone_image', 'filename': kwargs['filename']}
+
+    monkeypatch.setattr(images, 'store_image', store)
+    app = Flask(__name__)
+    bp = Blueprint('picker_test', __name__)
+    register_image_routes(bp)
+    app.register_blueprint(bp, url_prefix='/von')
+    client = app.test_client()
+    assert client.post('/von/api/images/upload').status_code == 401
+    with override_current_actor('#V#owner', None):
+        assert client.post('/von/api/images/upload').status_code == 400
+        invalid = client.post('/von/api/images/upload', data={'file': (io.BytesIO(b'bad'), 'phone.png')})
+        assert invalid.status_code == 400
+        assert invalid.json['error'] == 'invalid_image'
+        response = client.post('/von/api/images/upload', data={'file': (io.BytesIO(png()), 'phone.png')})
+    assert response.status_code == 201
+    assert response.json['image_attachment']['concept_id'] == '#V#phone_image'
+    assert response.json['image_attachment']['content_type'] == 'image/png'
+    assert len(stored) == 1
+    assert stored[0]['user_concept_id'] == '#V#owner'

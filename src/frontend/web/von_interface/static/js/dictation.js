@@ -72,6 +72,7 @@ export function createDictationController({ input, button, status, cancelButton,
             : voiceActive
                 ? 'Voice conversation is active. Click to switch to dictation. Shift-click or long-press to end voice.'
                 : 'Click to dictate into your draft. Shift-click or long-press to start a voice conversation: speech is sent automatically and Von replies aloud.';
+        if (!onAlternateClick) button.title = next === 'recording' ? 'Finish dictation and add it to your draft' : 'Dictate into your draft';
         button.classList.toggle('dictation-recording', next === 'recording');
         button.classList.toggle('active-voice', voiceActive);
         button.disabled = next === 'transcribing' || next === 'requesting';
@@ -139,11 +140,13 @@ export function createDictationController({ input, button, status, cancelButton,
     async function transcribe(capture) {
         if (!valid(capture)) return;
         render('transcribing', 'Transcribing with conversation vocabulary…');
+        capture.model ??= selectedTranscriptionModel();
         capture.abort = new AbortController();
         const form = new FormData();
         const mime = capture.blob.type.split(';')[0];
         form.append('audio', capture.blob, mime === 'audio/mp4' ? 'dictation.mp4' : 'dictation.webm');
         form.append('language', capture.context.language || '');
+        form.append('model', capture.model || '');
         form.append('context', capture.context.text || '');
         form.append('vocabulary', JSON.stringify(capture.context.vocabulary || []));
         try {
@@ -163,7 +166,7 @@ export function createDictationController({ input, button, status, cancelButton,
         statusDismissed = false;
         if (current) cancel();
         const context = getContext();
-        const capture = { key: context.key, context, base: input.value,
+        const capture = { key: context.key, context, base: input.value, model: selectedTranscriptionModel(),
             selection: { start: input.selectionStart, end: input.selectionEnd }, chunks: [], bytes: 0 };
         capture.completion = new Promise(resolve => { capture.resolve = resolve; });
         current = capture;
@@ -261,7 +264,8 @@ export function createDictationController({ input, button, status, cancelButton,
 
     async function refreshCapabilities() {
         try {
-            const response = await fetchImpl('/api/speech/capabilities', { credentials: 'same-origin', cache: 'no-store' });
+            const model = selectedTranscriptionModel();
+            const response = await fetchImpl('/api/speech/capabilities' + (model ? `?model=${encodeURIComponent(model)}` : ''), { credentials: 'same-origin', cache: 'no-store' });
             const data = await response.json();
             capability = response.ok ? { ...data.transcription, streaming: data.streaming } : { available: false, reason: 'Sign in to use recorded transcription.' };
         } catch (_) {
@@ -302,6 +306,7 @@ export function createDictationController({ input, button, status, cancelButton,
     root.addEventListener?.('pagehide', cancel);
     root.addEventListener?.('focus', refreshCapabilities);
     root.addEventListener?.('von-preferences-changed', refreshCapabilities);
+    root.document?.addEventListener('von:settingsChanged', refreshCapabilities);
     root.document?.addEventListener('visibilitychange', visibility);
     render('idle');
     void refreshCapabilities();
@@ -324,6 +329,8 @@ export function createDictationController({ input, button, status, cancelButton,
             retryButton.removeEventListener('click', retry); root.removeEventListener?.('pagehide', cancel);
             root.removeEventListener?.('focus', refreshCapabilities);
             root.removeEventListener?.('von-preferences-changed', refreshCapabilities);
+            root.document?.removeEventListener('von:settingsChanged', refreshCapabilities);
             root.document?.removeEventListener('visibilitychange', visibility);
         } };
 }
+import { selectedTranscriptionModel } from './modelInventory.js';

@@ -19,6 +19,7 @@ from .task_execution_service import (
     VON_SYSTEM_CONCEPT_ID,
     InvalidTaskExecutionData,
     TaskExecutionAccessError,
+    independent_task_session_id,
     reconcile_task_execution_queue_record,
     task_execution_concept_id_for_launch,
     task_execution_enqueue_submission_id_for_launch,
@@ -179,7 +180,7 @@ def _enqueue_task_execution(
         prompt_raw=_build_task_execution_prompt(
             task, task_execution_concept_id=task_execution_concept_id
         ),
-        session_id=task["conversation_session_id"],
+        session_id=execution_envelope["workflow_inputs"]["conversation_session_id"],
         session_name=task.get("conversation_name"),
         status=chat_prompt_queue_service.STATUS_QUEUED,
         source="von_task",
@@ -203,8 +204,14 @@ def submit_task_execution(
     model_provider: str | None = None,
     model_parameters: dict[str, Any] | None = None,
     source_workflow_instance_id: str | None = None,
+    independent: bool = False,
 ) -> tuple[dict[str, Any], int]:
-    """Submit/reconcile one launch; keep its outbox on an uncertain receipt."""
+    """Submit/reconcile one launch; keep its outbox on an uncertain receipt.
+
+    Trusted callers may select independent execution for background work. It
+    uses a separate task-owned carrier; the source task/conversation is still
+    verified and retained. This option is not read from the request payload.
+    """
 
     task_execution: dict[str, Any] | None = None
     queue_record: dict[str, Any] | None = None
@@ -288,6 +295,34 @@ def submit_task_execution(
             execution_envelope["workflow_inputs"][
                 "source_workflow_instance_id"
             ] = source_workflow_instance_id
+        if independent:
+            execution_session_id = independent_task_session_id(
+                task_concept_id=task["task_concept_id"],
+                creator_concept_id=actor_context["actor_concept_id"],
+                organisation_concept_id=actor_context["organisation_concept_id"],
+            )
+            if execution_session_id == task["conversation_session_id"]:
+                raise TaskExecutionAccessError(
+                    "task_execution_conversation_mismatch",
+                    "Independent execution requires a separate source conversation",
+                )
+            chat_history_service.create_chat_session(
+                user_id=actor_context["actor_concept_id"],
+                session_id=execution_session_id,
+                session_name=task.get("title"),
+                namespace=actor_context["namespace"],
+                organisation_concept_id=actor_context["organisation_concept_id"],
+                role_in_org=None,
+                origin_kind="background_task",
+                created_by_actor_concept_id=VON_SYSTEM_CONCEPT_ID,
+                is_agent_created=True,
+                focal_concept_ids=[task["task_concept_id"]],
+            )
+            execution_envelope["workflow_inputs"].update(
+                task_execution_context="independent",
+                source_conversation_session_id=task["conversation_session_id"],
+                conversation_session_id=execution_session_id,
+            )
         scope = {
             "user_concept_id": actor_context["actor_concept_id"],
             "organisation_concept_id": actor_context["organisation_concept_id"],
@@ -296,7 +331,9 @@ def submit_task_execution(
         conversation_key = build_conversation_key(
             owner_user_id=actor_context["actor_concept_id"],
             history_namespace=actor_context["namespace"],
-            conversation_session_id=task["conversation_session_id"],
+            conversation_session_id=execution_envelope["workflow_inputs"][
+                "conversation_session_id"
+            ],
         )
         queue_record = _enqueue_task_execution(
             scope=scope,

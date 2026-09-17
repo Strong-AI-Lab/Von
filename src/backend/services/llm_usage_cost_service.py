@@ -500,6 +500,8 @@ def _estimate_call_cost(
         "status": status,
         "amount": rendered_amount,
         "known_amount": rendered_known_amount,
+        "amount_decimal": str(amount) if rendered_amount is not None else None,
+        "known_amount_decimal": str(known_amount) if rendered_known_amount is not None else None,
         "currency": currency,
         "reason": reason,
         "pricing": metadata,
@@ -658,7 +660,7 @@ def _cost_summary(calls: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
     currency = next(iter(currencies)) if len(currencies) == 1 else None
     known_values = [
-        _decimal(cost.get("known_amount"))
+        _decimal(cost.get("known_amount_decimal") or cost.get("known_amount"))
         for cost in costs
         if currency and cost.get("currency") == currency
     ]
@@ -706,6 +708,8 @@ def _cost_summary(calls: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "status": status,
         "amount": _amount(known_amount) if status == "estimated" else None,
         "known_amount": _amount(known_amount),
+        "amount_decimal": str(known_amount) if status == "estimated" else None,
+        "known_amount_decimal": str(known_amount) if known_amount is not None else None,
         "currency": currency,
         "priced_call_count": priced,
         "partial_call_count": partial,

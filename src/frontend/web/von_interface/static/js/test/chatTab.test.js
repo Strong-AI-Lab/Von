@@ -1,5 +1,6 @@
 jest.mock('../workflowStudioAccess.js', () => ({ canUseWorkflowStudio: jest.fn(() => true) }));
 import {
+    retryConversationReadsAfterConnectionRecovery,
     __testOnly_buildThinkingProgressPresentation,
     __testOnly_buildThinkingCardProgressViewModel,
     __testOnly_buildRetainedThinkingCardRequestFromDebugData,
@@ -2729,6 +2730,36 @@ describe('loadChatHistory degraded handling', () => {
         delete global.fetch;
         __testOnly_resetHistoryUiState();
         __testOnly_setActiveChatSession(null, null);
+    });
+
+    test('connection recovery retries failed reads for the same conversation without altering the draft or sending', async () => {
+        document.body.insertAdjacentHTML('beforeend', '<textarea id="promptInput">Keep this unsent text</textarea><div id="chatSessionTabs"></div>');
+        let available = false;
+        global.fetch = jest.fn(async (url) => {
+            if (!available) throw new TypeError('Failed to fetch');
+            if (url.startsWith('/von/history/sessions')) return { ok: true, json: async () => ({
+                sessions: [{ session_id: 'session-1', session_name: 'Session 1', message_count: 1 }],
+                active_session_id: 'session-1'
+            }) };
+            if (url.startsWith('/von/history?')) return { ok: true, json: async () => ({
+                history: [{ role: 'user', content: 'Recovered conversation' }],
+                segments_returned: 1, total_segments: 1
+            }) };
+            return { ok: true, json: async () => ({}) };
+        });
+        expect(await __testOnly_loadChatHistory()).toBe(false);
+        available = true;
+        await retryConversationReadsAfterConnectionRecovery();
+        expect(document.getElementById('scrollableField').textContent).toContain('Recovered conversation');
+        expect(document.getElementById('promptInput').value).toBe('Keep this unsent text');
+        expect(fetch.mock.calls.some(([url]) => url.startsWith('/von/history/sessions'))).toBe(true);
+        const historyReads = fetch.mock.calls.filter(([url]) => url.startsWith('/von/history?'));
+        expect(historyReads).toHaveLength(2);
+        expect(historyReads.every(([url]) => new URL(url, 'http://localhost').searchParams.get('session_id') === 'session-1')).toBe(true);
+        expect(fetch.mock.calls.every(([, options]) => !options?.method || options.method === 'GET')).toBe(true);
+        // Repeated successful health checks must not replace a successfully loaded transcript.
+        await retryConversationReadsAfterConnectionRecovery();
+        expect(fetch.mock.calls.filter(([url]) => url.startsWith('/von/history?'))).toHaveLength(2);
     });
 
     test('preserves rendered history and surfaces a banner when the backend reports degraded history', async () => {
@@ -8087,6 +8118,9 @@ describe('thinking card toggle accessibility', () => {
         jest.spyOn(window, 'scrollTo').mockImplementation(({ top }) => {
             window.scrollY = Math.min(top, document.documentElement.scrollHeight - window.innerHeight);
         });
+        document.getElementById('scrollableField').getBoundingClientRect = () => ({
+            bottom: document.documentElement.scrollHeight - 200 - window.scrollY
+        });
         let resolveGenerate;
         global.fetch = jest.fn((url, options = {}) => {
             if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
@@ -8109,7 +8143,7 @@ describe('thinking card toggle accessibility', () => {
             }
             expect(resolveGenerate).toBeDefined();
             expect(document.querySelector('.user-turn').textContent).toContain('Show the latest turn');
-            expect(window.scrollY).toBe(document.documentElement.scrollHeight - window.innerHeight);
+            expect(window.scrollY).toBe(document.documentElement.scrollHeight - 176 - window.innerHeight);
             if (scrollAway) window.scrollY = 100;
             window.scrollTo.mockClear();
             resolveGenerate();
@@ -8120,7 +8154,7 @@ describe('thinking card toggle accessibility', () => {
                 expect(window.scrollY).toBe(100);
             } else {
                 expect(window.scrollTo).toHaveBeenCalled();
-                expect(window.scrollY).toBe(document.documentElement.scrollHeight - window.innerHeight);
+                expect(window.scrollY).toBe(document.documentElement.scrollHeight - 176 - window.innerHeight);
             }
         } finally {
             for (const [target, key, descriptor] of [
@@ -11360,6 +11394,65 @@ describe('chat message layout hooks', () => {
     });
 });
 
+describe('turn reference context menu', () => {
+    const flushMicrotasks = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+    test('copies stored sources and preserves keyboard and native interactions', async () => {
+        const { postJson } = require('../apiService.js');
+        const reference = '#V#conversation_fixture_turn_612d73746f726564';
+        postJson.mockResolvedValue({ success: true, concept_reference: reference });
+        const writeText = jest.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+        const previousMenu = document.querySelector('.chat-session-menu');
+        document.body.innerHTML = '<div id="scrollableField"></div>';
+        if (previousMenu) document.body.appendChild(previousMenu);
+        __testOnly_setActiveChatSession('source-session', 'Source');
+        for (const [sender, turnId] of [['User', 'u-stored'], ['Von', 'a-stored']]) {
+            __testOnly_appendMessage(sender, 'Saved text', turnId, false, true);
+            const turn = document.querySelector(`[data-turn-id="${turnId}"]`);
+            const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 30, clientY: 40 });
+            turn.querySelector('.chat-message-text').dispatchEvent(event);
+            expect(event.defaultPrevented).toBe(true);
+            const item = document.querySelector('.chat-session-menu [role="menuitem"]');
+            expect(item.textContent).toBe('Copy turn reference');
+            expect(document.activeElement).toBe(item);
+            __testOnly_setActiveChatSession('other-session', 'Other');
+            item.click();
+            await flushMicrotasks();
+            expect(postJson).toHaveBeenLastCalledWith('/von/api/session/conversation_reference', {
+                session_id: 'source-session', metadata_only: true, turn_id: turnId
+            });
+            expect(writeText).toHaveBeenLastCalledWith(reference);
+            expect(document.activeElement).toBe(turn);
+            __testOnly_setActiveChatSession('source-session', 'Source');
+        }
+        const turn = document.querySelector('[data-turn-id="a-stored"]');
+        turn.dispatchEvent(new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true }));
+        expect(document.querySelector('.chat-session-menu').classList.contains('open')).toBe(true);
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        expect(document.activeElement).toBe(turn);
+        const link = document.createElement('a');
+        link.href = '#example';
+        turn.appendChild(link);
+        const nativeMenu = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+        link.dispatchEvent(nativeMenu);
+        expect(nativeMenu.defaultPrevented).toBe(false);
+        const selection = window.getSelection();
+        turn.querySelector('.chat-message-text').textContent = 'Selected answer';
+        selection.selectAllChildren(turn.querySelector('.chat-message-text'));
+        expect(selection.toString()).toBe('Selected answer');
+        const selectedMenu = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+        turn.dispatchEvent(selectedMenu);
+        expect(selectedMenu.defaultPrevented).toBe(false);
+        selection.removeAllRanges();
+        const copies = writeText.mock.calls.length;
+        postJson.mockResolvedValue({ success: false });
+        turn.querySelector('.conversation-turn-copy').click();
+        await flushMicrotasks();
+        expect(writeText).toHaveBeenCalledTimes(copies);
+        __testOnly_setActiveChatSession(null, null);
+    });
+});
+
 describe('relation truth-state display elements', () => {
     beforeEach(() => {
         const { createVontologyCartouche, normalisePotentialConceptId } = require('../utils/textDecorator.js');
@@ -12818,6 +12911,8 @@ describe('scroll to latest message affordance', () => {
         Object.defineProperty(document.documentElement, 'scrollHeight', { value: 1200, configurable: true });
         Object.defineProperty(window, 'innerHeight', { value: 600, configurable: true });
         Object.defineProperty(window, 'scrollY', { value: 100, writable: true, configurable: true });
+        document.getElementById('scrollableField').getBoundingClientRect = () => ({ bottom: 1000 - window.scrollY });
+        document.querySelector('.chat-composer').getBoundingClientRect = () => ({ height: 100 });
         window.scrollTo = jest.fn(({ top }) => {
             window.scrollY = top;
         });
@@ -12828,11 +12923,11 @@ describe('scroll to latest message affordance', () => {
         __testOnly_updateScrollToEndButtonVisibility(scrollableField);
         const button = __testOnly_ensureScrollToEndButton(scrollableField);
         expect(button).toBeTruthy();
-        expect(button.parentElement).toBe(document.querySelector('.chat-composer'));
+        expect(button.parentElement).toBe(document.querySelector('.chat-transcript-navigation'));
         expect(button.classList.contains('visible')).toBe(true);
         expect(button.getAttribute('aria-hidden')).toBe('false');
 
-        window.scrollY = 610;
+        window.scrollY = 524;
         __testOnly_updateScrollToEndButtonVisibility(scrollableField);
         expect(button.classList.contains('visible')).toBe(false);
         expect(button.getAttribute('aria-hidden')).toBe('true');
@@ -12849,7 +12944,7 @@ describe('scroll to latest message affordance', () => {
         button.click();
 
         expect(window.scrollTo).toHaveBeenCalledWith({
-            top: 1200,
+            top: 524,
             behavior: 'smooth'
         });
 

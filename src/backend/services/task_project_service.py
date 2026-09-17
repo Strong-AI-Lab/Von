@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..security.access_control import can_access_concept
+from .task_project_home_service import project_home_summaries
 from .concept_service import (
     ConceptNotFoundError,
     create_concept,
@@ -57,7 +58,36 @@ def _record(concept_id, key):
 
 
 def get_task_project(project_concept_id):
-    return _record(project_concept_id, PROJECT_RECORD)
+    result = _record(project_concept_id, PROJECT_RECORD)
+    home = project_home_summaries([project_concept_id]).get(project_concept_id)
+    if home:
+        result["write_home"] = home
+    return result
+
+
+def task_execution_home(task_concept_id):
+    """Return only the routing facts needed by an actor who can read this task.
+
+    Assignment may grant access to one private-project task. It must neither
+    require nor grant visibility of the whole project's content.
+    """
+    task = ConceptsRepository.find_one(
+        {"concept_id": task_concept_id}, projection={"metadata.project_concept_id": 1}
+    )
+    if not task:
+        raise ValueError("Task is not accessible")
+    project_id = (task.get("metadata") or {}).get("project_concept_id")
+    if not project_id:
+        return None
+    project = ConceptsRepository.collection().find_one(
+        {"concept_id": project_id}, projection={"attributes.task_project.writer": 1}
+    )
+    return {
+        "writer": ((project or {}).get("attributes") or {})
+        .get("task_project", {})
+        .get("writer"),
+        "write_home": project_home_summaries([project_id]).get(project_id),
+    }
 
 
 def get_task_collection(collection_concept_id):
@@ -93,10 +123,16 @@ def list_task_projects(*, limit=100, offset=0):
         limit=max(1, min(int(limit), 200)),
         skip=max(0, int(offset)),
     )
-    return [
+    result = [
         {"concept_id": doc["concept_id"], **doc["attributes"][PROJECT_RECORD]}
         for doc in docs
     ]
+
+    homes = project_home_summaries([row["concept_id"] for row in result])
+    for row in result:
+        if row["concept_id"] in homes:
+            row["write_home"] = homes[row["concept_id"]]
+    return result
 
 
 def ensure_jira_project(

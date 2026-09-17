@@ -137,4 +137,32 @@ describe('footer DB badge outage state handling', () => {
         expect(serverRtt?.title).toContain('Browser ↔ Von server round trip');
         expect(dbLatency?.title).toContain('measured inside the Von server');
     });
+
+    test.each([
+        [250, 100, true, true],
+        [251, 0.8, false, true],
+        [601, 101, false, false],
+        [50, 501, true, false],
+        [50, null, true, false],
+    ])('collapses only fast known measurements (RTT %s, DB %s)', async (rtt, db, quietRtt, quietDb) => {
+        let clock = 0;
+        jest.spyOn(performance, 'now').mockImplementation(() => clock);
+        installFetchMock(buildDbInfo({ mongoPingLatencyMs: db }));
+        const fetchMock = global.fetch;
+        global.fetch = jest.fn((url, options) => {
+            if (String(url).includes('/db/info')) clock += rtt;
+            return fetchMock(url, options);
+        });
+        const { setModelInfoFooterText, setFooterServerReachability } = require(domUtilsPath);
+        setFooterServerReachability(true);
+        await setModelInfoFooterText();
+        const badge = await waitForDbBadgeReady();
+        expect(badge.tabIndex).toBe(0);
+        expect(badge.querySelector('.server-rtt-latency').classList.contains('footer-quiet-metric')).toBe(quietRtt);
+        expect(badge.querySelector('.db-latency').classList.contains('footer-quiet-metric')).toBe(quietDb);
+        setFooterServerReachability(false);
+        expect(badge.querySelectorAll('.footer-quiet-metric')).toHaveLength(0);
+        setFooterServerReachability(true);
+        expect(badge.querySelector('.db-latency').classList.contains('footer-quiet-metric')).toBe(quietDb);
+    });
 });

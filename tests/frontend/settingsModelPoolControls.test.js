@@ -5,6 +5,7 @@ const path = require('path');
 
 import {
     __testOnly_addOrUpdateWorkflowPoolEntry,
+    __testOnly_allowAndSaveWorkflowPoolEntry,
     __testOnly_applyCapabilityIndexStatusCard,
     __testOnly_applySharedRuntimeModelWriteAccess,
     __testOnly_buildPersistedLlmSelections,
@@ -146,7 +147,55 @@ describe('settings model scope and workflow pool controls', () => {
             model_parameters: { reasoning_effort: 'low' },
         })).toBe(true);
         expect(document.getElementById('addOpenAiToWorkflowPoolButton').textContent)
-            .toBe('Pending allowed-model save');
+            .toBe('Save allowed model now');
+        expect(document.getElementById('addOpenAiToWorkflowPoolButton').disabled).toBe(false);
+    });
+
+    test('Allow checks the provider, persists once, retains existing entries and enables use after read-back', async () => {
+        sessionStorage.setItem('von_current_user', JSON.stringify({ concept_id: '#V#user-a' }));
+        const primary = { provider: 'ollama', model: 'gemma4:latest', scope: 'user' };
+        const old = { provider: 'openrouter', model: 'existing' };
+        const added = { provider: 'openai', model: 'gpt-5.6-luna', model_parameters: { reasoning_effort: 'low' } };
+        __testOnly_setModelScopeState({ resolvedLlm: primary, enabledLlms: [primary, old] });
+        let stored;
+        global.fetch.mockImplementation(async (url, options) => {
+            if (url.includes('/models/inventory/')) return { ok: true, json: async () => ({ available: true, models: [{ ...added, available: true }] }) };
+            if (options?.method === 'POST') {
+                stored = JSON.parse(options.body);
+                return { ok: true, json: async () => ({ resolved_llm: primary, enabled_llms: stored.enabled_llms }) };
+            }
+            return { ok: true, json: async () => ({ resolved_llm: primary, enabled_llms: stored?.enabled_llms || [] }) };
+        });
+        expect(await __testOnly_allowAndSaveWorkflowPoolEntry(added)).toBe(true);
+        expect(stored.enabled_llms).toEqual(expect.arrayContaining([old, added]));
+        expect(stored.active_llm.model).toBe(primary.model);
+        expect(document.getElementById('testOpenAiModelButton').disabled).toBe(false);
+        expect(document.getElementById('modelPoolStatusMessage').textContent).toContain('saved');
+        expect((await __testOnly_reloadScopedModelSettings()).applied).toBe(true);
+        expect(document.getElementById('testOpenAiModelButton').disabled).toBe(false);
+        expect(stored.enabled_llms.filter(entry => entry.model === added.model)).toHaveLength(1);
+    });
+
+    test('unavailable providers do not mutate the staged pool and expose an actionable failure', async () => {
+        __testOnly_setModelScopeState({ resolvedLlm: { provider: 'ollama', model: 'primary', scope: 'user' } });
+        global.fetch.mockResolvedValue({ ok: true, json: async () => ({ available: false, error: 'OpenRouter: configure provider key.', models: [] }) });
+        expect(await __testOnly_allowAndSaveWorkflowPoolEntry({ provider: 'openrouter', model: 'missing' })).toBe(false);
+        expect(__testOnly_getScopedModelState().enabledAlternatives).toEqual([]);
+        expect(document.getElementById('modelPoolStatusMessage').textContent).toContain('configure provider key');
+        expect(global.fetch.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(false);
+    });
+
+    test('failed persistence retains the edit and exposes the real error with a retry button', async () => {
+        sessionStorage.setItem('von_current_user', JSON.stringify({ concept_id: '#V#user-a' }));
+        __testOnly_setModelScopeState({ resolvedLlm: { provider: 'ollama', model: 'primary', scope: 'user' } });
+        const added = { provider: 'openai', model: 'gpt-5.6-luna', model_parameters: { reasoning_effort: 'low' } };
+        global.fetch.mockImplementation(async (url) => url.includes('/models/inventory/')
+            ? { ok: true, json: async () => ({ available: true, models: [{ ...added, available: true }] }) }
+            : { ok: false, status: 500, json: async () => ({ message: 'Canonical persistence unavailable; retry.' }) });
+        expect(await __testOnly_allowAndSaveWorkflowPoolEntry(added)).toBe(false);
+        expect(document.getElementById('modelPoolStatusMessage').textContent).toContain('Canonical persistence unavailable');
+        expect(document.getElementById('addOpenAiToWorkflowPoolButton').disabled).toBe(false);
+        expect(document.getElementById('testOpenAiModelButton').disabled).toBe(true);
     });
 
     test('fetches and renders bounded actor-scoped cost evidence without inventing zero', async () => {
@@ -446,6 +495,8 @@ describe('settings model scope and workflow pool controls', () => {
             .rejects.toThrow('finish loading');
         expect(global.fetch).not.toHaveBeenCalled();
 
+        // Allow the asynchronous window-session header preparation to complete.
+        await new Promise(resolve => setTimeout(resolve, 0));
         pending.get('/api/settings/?user_concept_id=%23V%23user-b&organisation_concept_id=%23V%23org&model_scope=user')({
             ok: true,
             json: async () => ({

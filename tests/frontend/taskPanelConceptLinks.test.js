@@ -52,6 +52,34 @@ describe('task panel concept links', () => {
         jest.restoreAllMocks();
     });
 
+    test('organisation chips use shortest names, language ranking and safe fallbacks', async () => {
+        const { getJson } = require(apiServiceModulePath);
+        const labels = ['University Of Auckland Strong Ai Lab', 'Research Institute', 'Single', 'Fallback', 'Unavailable'];
+        getJson.mockImplementation((url) => {
+            if (url === '/von/api/organisations/my_organisations') return Promise.resolve({
+                organisations: labels.map((name, i) => ({ concept_id: `#V#org_${i}`, name })) });
+            if (url.startsWith('/api/tasks/?')) return Promise.resolve({ tasks: labels.map((name, i) => ({
+                task_concept_id: `#V#task_${i}`, title: name, status: 'pending', priority: 'low',
+                organisation_concept_id: `#V#org_${i}` })) });
+            if (url.startsWith('/api/concepts/')) {
+                const i = Number(url.slice(-1));
+                if (i === 4) return Promise.reject(new Error('Unavailable'));
+                const names = i === 3 ? [] : [{ name: labels[i], language: 'en-NZ' }];
+                if (i < 2) names.push({ name: ['SAIL', 'RI'][i], language: 'en-NZ', type: 'ABBR' },
+                    { name: 'X', language: 'fr' });
+                return Promise.resolve({ raw_doc: { names } });
+            }
+            return Promise.resolve({});
+        });
+        const { showGlobalTasks } = require(taskPanelModulePath);
+        await showGlobalTasks();
+        await flushMicrotasks();
+        const chips = Array.from(document.querySelectorAll('.task-organisation-chip'));
+        expect(chips.map((chip) => chip.textContent.trim())).toEqual(['SAIL', 'RI', 'Single', 'Fallback', 'Unavailable']);
+        expect(chips[0].title).toContain(labels[0]);
+        expect(chips[0].dataset.organisationId).toBe('#V#org_0');
+    });
+
     test('renders task title and parent as clickable concept links and dispatches concept navigation', async () => {
         const { getJson } = require(apiServiceModulePath);
         getJson.mockImplementation((url) => {

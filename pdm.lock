@@ -14,7 +14,7 @@ requires-python = ">=3.11"
 sources = []
 
 [metadata.lock_inputs.project.groups]
-default = ["Jinja2", "MarkupSafe", "PyYAML", "Pygments", "SPARQLWrapper", "Werkzeug", "Whoosh", "annotated-types", "anyio", "asttokens", "beautifulsoup4", "beautifulsoup4", "bibtexparser", "black", "bleach", "blinker", "boto3", "cachetools", "certifi", "charset-normalizer", "click", "colorama", "comm", "cryptography", "customtkinter", "darkdetect", "datetime", "debugpy", "decorator", "distro", "docutils", "exceptiongroup", "executing", "extract-msg", "fastapi", "feedparser", "flask", "flask-testing", "gcloud", "google-api-core", "google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib", "google-genai", "googleapis-common-protos", "h11", "httpcore", "httplib2", "httpx", "idna", "ipykernel", "ipython", "itsdangerous", "jedi", "jupyter-client", "jupyter-core", "latexcodec", "llama-index", "markdown", "matplotlib-inline", "mcp", "mypy-extensions", "nest-asyncio", "node", "npm", "numpy", "oauth2client", "oauthlib", "odfpy", "odict", "ollama", "openai", "opencv-python-headless", "openpyxl", "openstacksdk", "optional-django", "packaging", "pandas", "parso", "pathspec", "pdfminer-six", "pillow", "platformdirs", "plumber", "prompt-toolkit", "proto-plus", "psutil", "pure-eval", "pyasn1", "pyasn1-modules", "pybtex", "pybtex-apa7-style", "pybtex-docutils", "pydantic", "pydantic-core", "pymongo", "pymupdf", "pyparsing", "pysimplegui", "pytesseract", "python-dateutil", "python-docx", "python-dotenv", "python-pptx", "pytz", "pywin32; platform_system == \"Windows\"", "pyzmq", "rdflib", "requests", "requests-oauthlib", "rsa", "setuptools", "six", "slack-bolt", "sniffio", "stack-data", "striprtf", "tavily-python", "tokenize-rt", "tornado", "tqdm", "traitlets", "typing-extensions", "tzdata", "uritemplate", "urllib3", "uv", "uvicorn", "waitress", "wcwidth", "zope-component", "zope-deferredimport", "zope-deprecation", "zope-event", "zope-hookable", "zope-interface", "zope-lifecycleevent", "zope-proxy"]
+default = ["Jinja2", "MarkupSafe", "PyYAML", "Pygments", "SPARQLWrapper", "Werkzeug", "Whoosh", "annotated-types", "anyio", "asttokens", "beautifulsoup4", "beautifulsoup4", "bibtexparser", "black", "bleach", "blinker", "boto3", "cachetools", "certifi", "charset-normalizer", "click", "colorama", "comm", "cryptography", "customtkinter", "darkdetect", "datetime", "debugpy", "decorator", "distro", "docutils", "exceptiongroup", "executing", "extract-msg", "fastapi", "feedparser", "flask", "flask-testing", "gcloud", "google-api-core", "google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib", "google-genai", "googleapis-common-protos", "h11", "httpcore", "httplib2", "httpx", "idna", "ipykernel", "ipython", "itsdangerous", "jedi", "jupyter-client", "jupyter-core", "latexcodec", "llama-index", "markdown", "matplotlib-inline", "mcp", "mypy-extensions", "nest-asyncio", "node", "npm", "numpy", "oauth2client", "oauthlib", "odfpy", "odict", "ollama", "openai", "opencv-python-headless", "openpyxl", "openstacksdk", "optional-django", "packaging", "pandas", "parso", "pathspec", "pdfminer-six", "pillow", "platformdirs", "plumber", "prompt-toolkit", "proto-plus", "psutil", "pure-eval", "pyasn1", "pyasn1-modules", "pybtex", "pybtex-apa7-style", "pybtex-docutils", "pydantic", "pydantic-core", "pymongo", "pymupdf", "pyparsing", "pysimplegui", "pytesseract", "python-dateutil", "python-docx", "python-dotenv", "python-pptx", "pytz", "pywebpush", "pywin32; platform_system == \"Windows\"", "pyzmq", "rdflib", "requests", "requests-oauthlib", "rsa", "setuptools", "six", "slack-bolt", "sniffio", "stack-data", "striprtf", "tavily-python", "tokenize-rt", "tornado", "tqdm", "traitlets", "typing-extensions", "tzdata", "uritemplate", "urllib3", "uv", "uvicorn", "waitress", "wcwidth", "zope-component", "zope-deferredimport", "zope-deprecation", "zope-event", "zope-hookable", "zope-interface", "zope-lifecycleevent", "zope-proxy"]
 dev = ["annotated-types", "anyio", "blinker", "mongomock", "pymongo", "pyright", "pytest", "pytest-asyncio", "pytest-cov", "pytest-mock", "ruff"]
 geo = ["geopandas", "pyogrio", "pyproj", "shapely"]
 
@@ -1772,6 +1772,18 @@ groups = ["default"]
 files = [
     {file = "h11-0.16.0-py3-none-any.whl", hash = "sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86"},
     {file = "h11-0.16.0.tar.gz", hash = "sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1"},
+]
+
+[[package]]
+name = "http-ece"
+version = "1.2.1"
+summary = "Encrypted Content Encoding for HTTP"
+groups = ["default"]
+dependencies = [
+    "cryptography>=2.5",
+]
+files = [
+    {file = "http_ece-1.2.1.tar.gz", hash = "sha256:8c6ab23116bbf6affda894acfd5f2ca0fb8facbcbb72121c11c75c33e7ce8cff"},
 ]
 
 [[package]]
@@ -3575,6 +3587,19 @@ files = [
 ]
 
 [[package]]
+name = "py-vapid"
+version = "1.9.4"
+summary = "Simple VAPID header generation library"
+groups = ["default"]
+dependencies = [
+    "cryptography>=46",
+]
+files = [
+    {file = "py_vapid-1.9.4-py2.py3-none-any.whl", hash = "sha256:f165a5bf90dcf966b226114f01f178f137579a09784c7f0628fa2f0a299741b6"},
+    {file = "py_vapid-1.9.4.tar.gz", hash = "sha256:a004023560cbc54e34fc06380a0580f04ffcc788e84fb6d19e9339eeb6551a28"},
+]
+
+[[package]]
 name = "pyasn1"
 version = "0.6.4"
 requires_python = ">=3.8"
@@ -4233,6 +4258,24 @@ groups = ["default", "dev"]
 files = [
     {file = "pytz-2026.3.post1-py2.py3-none-any.whl", hash = "sha256:dd95840dd199baea12d9cc096a1d452caa6596a1c1e4b5f3dbd1541855d5e815"},
     {file = "pytz-2026.3.post1.tar.gz", hash = "sha256:2211d3fcf9a797d3405cac96ac7f61d80e6a644f72a3309607282fe8a2010c5d"},
+]
+
+[[package]]
+name = "pywebpush"
+version = "2.5.0"
+requires_python = ">=3.10"
+summary = "WebPush publication library"
+groups = ["default"]
+dependencies = [
+    "aiohttp",
+    "cryptography>=47.0.0",
+    "http-ece>=1.1.0",
+    "py-vapid>=1.7.0",
+    "requests>=2.21.0",
+]
+files = [
+    {file = "pywebpush-2.5.0-py3-none-any.whl", hash = "sha256:b5f5d45024223a04e73fe17f7a8e62540f35bbcc62b49e64d0a1080ff2dc26f2"},
+    {file = "pywebpush-2.5.0.tar.gz", hash = "sha256:8260f8e42d70ed95a3bd00527ffcb43b5b3df8983a4a48b059fe29b06dc3d92c"},
 ]
 
 [[package]]

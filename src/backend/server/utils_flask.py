@@ -222,6 +222,7 @@ def _build_durable_workflow_bootstrap_summary(
         "entity_information_retrieval_workflow_bootstrap",
         "concept_search_instance_retrieval_workflow_bootstrap",
         "lab_status_digest_workflow_bootstrap",
+        "conversation_naming_workflow_bootstrap",
         "spreadsheet_programme_workflow_bootstrap",
         "represented_artefact_creation_workflow_bootstrap",
         "multilingual_concept_enrichment_workflow_bootstrap",
@@ -491,6 +492,9 @@ def _start_durable_workflow_system(
         from ..services.concept_search_instance_retrieval_workflow_vontology_service import (
             bootstrap_canonical_concept_search_instance_retrieval_workflow,
         )
+        from ..services.conversation_naming_workflow_vontology_service import (
+            bootstrap_canonical_conversation_naming_workflow,
+        )
         from ..services.lab_status_digest_workflow_vontology_service import (
             bootstrap_canonical_lab_status_digest_workflow,
         )
@@ -704,6 +708,10 @@ def _start_durable_workflow_system(
             label="concept-search instance retrieval workflow",
             bootstrap_fn=bootstrap_canonical_concept_search_instance_retrieval_workflow,
         )
+        conversation_naming_workflow_bootstrap_report = _run_workflow_family_bootstrap(
+            label="owned unnamed-conversation naming workflow",
+            bootstrap_fn=bootstrap_canonical_conversation_naming_workflow,
+        )
         lab_status_digest_workflow_bootstrap_report = _run_workflow_family_bootstrap(
             label="lab and project status digest workflow",
             bootstrap_fn=bootstrap_canonical_lab_status_digest_workflow,
@@ -816,6 +824,9 @@ def _start_durable_workflow_system(
         result["concept_search_instance_retrieval_workflow_bootstrap"] = (
             concept_search_instance_retrieval_workflow_bootstrap_report
         )
+        result["conversation_naming_workflow_bootstrap"] = (
+            conversation_naming_workflow_bootstrap_report
+        )
         result["lab_status_digest_workflow_bootstrap"] = (
             lab_status_digest_workflow_bootstrap_report
         )
@@ -899,6 +910,11 @@ def _start_durable_workflow_system(
             app_logger.warning(
                 "[durable_workflows] concept-search instance retrieval workflow bootstrap failed: %s",
                 concept_search_instance_retrieval_workflow_bootstrap_report,
+            )
+        if not bool(conversation_naming_workflow_bootstrap_report.get("success", False)):
+            app_logger.warning(
+                "[durable_workflows] conversation naming workflow bootstrap failed: %s",
+                conversation_naming_workflow_bootstrap_report,
             )
         if not bool(lab_status_digest_workflow_bootstrap_report.get("success", False)):
             app_logger.warning(
@@ -1566,6 +1582,12 @@ def create_flask_app(
     _bootstrap_constitutive_relation_requirements_for_startup(app)
     _configure_durable_workflow_startup(app)
     _maybe_start_external_conversation_import_worker(app)
+    from ..services.web_push_service import start_worker as start_web_push_worker
+
+    try:
+        start_web_push_worker()
+    except Exception:
+        app.logger.warning("Web Push startup unavailable; canonical messaging is unaffected")
     _maybe_start_chat_prompt_queue_dispatcher(app)
     _log_prompt_concept_health(app)
 
@@ -2589,6 +2611,9 @@ def _register_default_blueprints(app: Flask) -> None:
     app.register_blueprint(admin_bp, url_prefix="/admin")
     app.register_blueprint(task_bp, url_prefix="/api/tasks")
     app.register_blueprint(message_bp, url_prefix="/api/messages")
+    from .routes.web_push_routes import web_push_bp
+
+    app.register_blueprint(web_push_bp)
     app.register_blueprint(ontology_authority_bp)
     app.register_blueprint(auth_bp, url_prefix="/von")
     app.register_blueprint(agent_gmail_oauth_bp, url_prefix="/von")

@@ -18,6 +18,12 @@ def app_client():
         yield app, client
 
 
+@pytest.fixture(autouse=True)
+def isolated_read_state(monkeypatch):
+    # This endpoint suite tests listing, not the independent unread store.
+    monkeypatch.setattr("src.backend.services.conversation_read_service.project_unread", lambda actor, rows: rows)
+
+
 def _session_result(sessions, **overrides):
     payload = {
         "sessions": sessions,
@@ -133,6 +139,7 @@ def test_history_sessions_passes_agent_visibility_and_returns_counts(
         "human-1",
         "agent-new",
     ]
+    assert called["include_imported"] is False
     assert called["agent_visibility"] == "exclude"
     assert called["keep_newest_agent_created"] == "true"
     assert payload["agent_visibility_applied"] is True
@@ -562,3 +569,22 @@ def test_history_sessions_returns_effective_active_session_id_when_authorised(
     payload = response.get_json()
     assert payload["authenticated"] is True
     assert payload["active_session_id"] == "sess-1"
+
+
+@pytest.mark.parametrize("include_imported", [False, True])
+def test_history_sessions_import_display_is_explicit(monkeypatch, app_client, include_imported):
+    _, client = app_client
+    monkeypatch.setattr("src.backend.security.access_control.get_effective_user_concept_id", lambda: "#V#u")
+    monkeypatch.setattr(von_routes, "get_effective_context", lambda *a, **k: {"namespace": "#V#u", "chat_session_id": None})
+    observed = {}
+    def summaries(*a, **kwargs):
+        observed.update(kwargs)
+        return _session_result([{"session_id": "native"}, {"session_id": "imported", "origin_kind": "external_conversation_import"}])
+    monkeypatch.setattr(von_routes.chat_history_service, "get_chat_history_session_summaries_result", summaries)
+    monkeypatch.setattr("src.backend.services.shared_conversation_service.list_accepted_invites_for_user", lambda **k: [])
+    monkeypatch.setattr("src.backend.services.shared_conversation_service.list_outgoing_accepted_invites_for_user", lambda **k: [])
+    monkeypatch.setattr(von_routes.conversation_management_service, "apply_conversation_preferences", lambda **k: k["conversations"])
+    response = client.get("/von/history/sessions?include_imported=" + str(include_imported).lower())
+    assert response.status_code == 200
+    assert observed["include_imported"] is include_imported
+    assert [r["session_id"] for r in response.json["sessions"]] == (["native", "imported"] if include_imported else ["native"])

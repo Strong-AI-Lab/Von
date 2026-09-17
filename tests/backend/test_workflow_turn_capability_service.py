@@ -250,7 +250,11 @@ def test_discovery_marks_declared_write_workflow_without_hiding_unknowns(
     assert unknown_entry["effect_profile"]["operational_state_effect"] is True
 
 
-def test_execution_arguments_bind_workflow_and_actor_server_side():
+def test_execution_arguments_bind_workflow_and_actor_server_side(monkeypatch):
+    monkeypatch.setattr(
+        "src.backend.services.workflow_file_source_service.project_workflow_file_sources",
+        lambda *args, **kwargs: [],
+    )
     from src.backend.services.workflow_turn_capability_service import (
         build_workflow_execution_arguments,
     )

@@ -398,6 +398,62 @@ def get_task_taxonomy_route() -> ResponseReturnValue:
         return jsonify({"error": "Internal server error"}), 500
 
 
+@task_bp.route("/deployment-vocabulary", methods=["POST"])
+@task_bp.route("/deployments", methods=["POST"])
+@task_bp.route("/deployments/<deployment_id>", methods=["GET"])
+@task_bp.route("/builds/<build_id>/deployments", methods=["GET"])
+@task_bp.route("/<task_concept_id>/deployments", methods=["GET"])
+def deployment_evidence_route(deployment_id=None, build_id=None, task_concept_id=None):
+    """Actor-scoped receipt ingestion and represented evidence traversal."""
+    from ...services import deployment_evidence_service as evidence
+
+    actor = _get_current_user_concept_id()
+    if not actor:
+        return jsonify({"error": "Authentication required"}), 401
+    try:
+        if request.method == "POST":
+            if request.path.endswith("/deployment-vocabulary"):
+                evidence.bootstrap_vocabulary(
+                    actor=actor, organisation=_get_current_org_concept_id()
+                )
+                return jsonify({"concept_ids": list(evidence.VOCABULARY)}), 200
+            return (
+                jsonify(
+                    evidence.ingest_deployment(
+                        request.get_json(silent=True),
+                        actor=actor,
+                        organisation=_get_current_org_concept_id(),
+                    )
+                ),
+                200,
+            )
+        if task_concept_id:
+            return (
+                jsonify(
+                    {"deployments": evidence.list_task_deployments(task_concept_id)}
+                ),
+                200,
+            )
+        if build_id:
+            return (
+                jsonify({"deployments": evidence.list_build_deployments(build_id)}),
+                200,
+            )
+        return jsonify(evidence.get_deployment(deployment_id)), 200
+    except TaskNotFoundError:
+        return jsonify({"error": "Task unavailable"}), 404
+    except evidence.DeploymentEvidenceError as exc:
+        return jsonify({"error": str(exc)}), 409 if request.method == "POST" else 404
+    except Exception:
+        logger.exception("Deployment evidence operation failed")
+        return (
+            jsonify(
+                {"error": "Evidence operation unavailable; retry the same receipt"}
+            ),
+            503,
+        )
+
+
 @task_bp.route("/<task_concept_id>/work-product", methods=["GET"])
 def get_task_work_product_route(task_concept_id: str) -> ResponseReturnValue:
     """Read the selected product through the same actor-visible task boundary."""
@@ -416,6 +472,9 @@ def get_task_route(task_concept_id: str) -> ResponseReturnValue:
     """Get a task by concept_id."""
     try:
         result = dict(get_task(task_concept_id))
+        from ...services.deployment_evidence_service import list_task_deployments
+
+        result["deployments"] = list_task_deployments(task_concept_id)
         actions = list_task_external_resource_actions(result)
         result["external_resource_actions"] = [
             {
@@ -479,7 +538,7 @@ def update_task_route(task_concept_id: str) -> ResponseReturnValue:
     """Update a task.
 
     Request body (all fields optional):
-        status: str (pending, in_progress, completed, cancelled, blocked)
+        status: str (pending, in_progress, completed, deployed, cancelled, blocked)
         assignee_concept_id: str
         title: str
         description: str
@@ -747,6 +806,7 @@ def search_tasks_route() -> ResponseReturnValue:
 
         result = search_tasks(
             query=request.args.get("query"),
+            search_mode=request.args.get("search_mode", "lexical"),
             project_concept_id=request.args.get("project_concept_id"),
             collection_concept_id=request.args.get("collection_concept_id"),
             status_filter=request.args.get("status_filter"),
@@ -1274,3 +1334,49 @@ def remove_task_link_route(task_concept_id: str) -> ResponseReturnValue:
 def remove_task_link_post_route(task_concept_id: str) -> ResponseReturnValue:
     """Remove a typed link between tasks via POST payload."""
     return remove_task_link_route(task_concept_id)
+
+@task_bp.route("/<task_concept_id>/runs", methods=["GET"])
+@task_bp.route("/<task_concept_id>/runs/<run_id>", methods=["GET"])
+@task_bp.route("/<task_concept_id>/runs/<run_id>/download", methods=["GET"])
+def task_run_archive_route(task_concept_id: str, run_id: str | None = None):
+    """Read private worker activity through the trusted browser actor context."""
+    from flask import Response
+    from ...services import task_run_archive_service as archives
+
+    try:
+        # Reject client identity headers even in a permissive local profile.
+        if not _get_current_user_concept_id() or not _get_current_org_concept_id():
+            return jsonify({"error": "Trusted actor and organisation required"}), 401
+        if run_id is None:
+            result = archives.list_runs(
+                task_concept_id,
+                offset=max(0, int(request.args.get("offset", 0))),
+                limit=50,
+            )
+        elif request.path.endswith("/download"):
+            data = archives.download_archive(run_id, task_id=task_concept_id)
+            return Response(
+                data,
+                mimetype="application/zip",
+                headers={
+                    "Content-Disposition": f'attachment; filename="coding-run-{run_id}.zip"',
+                    "Cache-Control": "private, no-store",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+        else:
+            result = archives.read_activity(
+                run_id,
+                task_id=task_concept_id,
+                cursor=max(0, int(request.args.get("cursor", 0))),
+            )
+        response = jsonify(result)
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+    except PermissionError:
+        return jsonify({"error": "Run unavailable in this actor scope"}), 403
+    except ValueError:
+        return jsonify({"error": "Invalid activity cursor"}), 400
+    except Exception:
+        logger.warning("Task run archive read failed", exc_info=False)
+        return jsonify({"error": "Run capture storage unavailable; retry later"}), 503

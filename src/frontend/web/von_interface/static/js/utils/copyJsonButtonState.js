@@ -209,6 +209,7 @@ function copyTextFallback(text) {
         return false;
     }
 
+    const previousFocus = document.activeElement;
     const textArea = document.createElement('textarea');
     textArea.value = String(text ?? '');
     textArea.style.position = 'fixed';
@@ -228,6 +229,9 @@ function copyTextFallback(text) {
         copied = false;
     } finally {
         document.body.removeChild(textArea);
+        if (previousFocus?.isConnected && typeof previousFocus.focus === 'function') {
+            previousFocus.focus({ preventScroll: true });
+        }
     }
     return copied;
 }

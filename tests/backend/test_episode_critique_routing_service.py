@@ -203,3 +203,73 @@ def test_route_episode_critique_memory_reuses_existing_task_and_jira(monkeypatch
     )
     assert recorded["routing"]["repeat_count"] == 3
     assert recorded["routing"]["decision"] == svc.ROUTING_DECISION_TASK_AND_JIRA
+
+
+def test_namespaced_remediation_waits_for_scope_identity_and_can_retry(monkeypatch):
+    state = _sample_state()
+    state.update(user_id=None, org_id=None)
+    created = []
+    receipts = []
+    references = []
+    monkeypatch.setattr(
+        svc, "get_episode_critique_memories_collection", lambda: _StubCollection(count=0)
+    )
+    monkeypatch.setattr(svc, "find_task_by_external_reference", lambda **kwargs: None)
+    monkeypatch.setattr(
+        svc, "create_task",
+        lambda **kwargs: created.append(kwargs) or {"task_concept_id": "#V#task_new"},
+    )
+    monkeypatch.setattr(
+        svc, "upsert_task_external_reference",
+        lambda *args, **kwargs: references.append(kwargs),
+    )
+    monkeypatch.setattr(
+        svc, "upsert_deduplicated_jira_issue",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected Jira effect")),
+    )
+    monkeypatch.setattr(
+        svc, "record_episode_critique_memory_routing",
+        lambda **kwargs: receipts.append(kwargs) or {"success": True, "state": state},
+    )
+
+    result = svc.route_episode_critique_memory(memory_state=state)
+
+    assert result["success"] is False
+    assert result["error"] == "remediation_task_scope_identity_missing"
+    assert created == []
+    assert references == []
+    assert receipts[-1]["routing"]["error"] == result["error"]
+    assert state["user_id"] is None
+    assert state["org_id"] is None
+
+    # Normal explicit identity propagation recovers without changing the critique.
+    recovered = svc.route_episode_critique_memory(
+        memory_state={**state, "user_id": "#V#user", "org_id": "#V#org"}
+    )
+    assert recovered["success"] is True
+    assert recovered["task_action"] == "created_new"
+    assert len(created) == 1
+    assert created[0]["created_by_concept_id"] == "#V#user"
+    assert created[0]["assignee_concept_id"] == "#V#user"
+    assert created[0]["organisation_concept_id"] == "#V#org"
+    assert len(references) == 1
+
+
+def test_namespaced_memory_only_critique_does_not_require_task_identity(monkeypatch):
+    state = _sample_state(verdict="pass")
+    state.update(user_id=None, org_id=None)
+    monkeypatch.setattr(
+        svc, "get_episode_critique_memories_collection", lambda: _StubCollection(count=0)
+    )
+    monkeypatch.setattr(svc, "find_task_by_external_reference", lambda **kwargs: None)
+    monkeypatch.setattr(
+        svc, "record_episode_critique_memory_routing",
+        lambda **kwargs: {"success": True, "state": state},
+    )
+    monkeypatch.setattr(
+        svc, "create_task",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("unexpected task creation")),
+    )
+    result = svc.route_episode_critique_memory(memory_state=state)
+    assert result["success"] is True
+    assert result["decision"] == svc.ROUTING_DECISION_MEMORY_ONLY

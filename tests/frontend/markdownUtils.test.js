@@ -104,3 +104,34 @@ describe('markdownUtils', () => {
         expect(html).not.toContain('</li><br><li>');
     });
 });
+
+describe('shared conversation links', () => {
+    const bare = 'https://github.com/Strong-AI-Lab/knowkat/pull/5';
+    const labelled = 'https://github.com/Strong-AI-Lab/Von-Private/pull/67';
+    const parse = html => { const el = document.createElement('div'); el.innerHTML = html; return el; };
+    test('detects bare links and preserves destinations and trailing punctuation', () => {
+        expect(detectMarkdown(`Published ${bare}.`)).toBe(true);
+        const el = parse(simpleMarkdownToHtml(`Published (${bare}), [PR](${labelled}). https://example.org/a(b)?x=1&y=2!`));
+        expect([...el.querySelectorAll('a')].map(a => a.getAttribute('href'))).toEqual([bare, labelled, 'https://example.org/a(b)?x=1&y=2']);
+        expect(el.textContent).toBe(`Published (${bare}), PR. https://example.org/a(b)?x=1&y=2!`);
+        expect([...el.querySelectorAll('a')].every(a => a.rel === 'noopener noreferrer' && a.target === '_blank')).toBe(true);
+    });
+    test('keeps code literal, rejects executable schemes and escapes injected markup', () => {
+        const el = parse(simpleMarkdownToHtml('`[literal](https://example.org) https://example.org`\n\n```\nhttps://example.org\n```\n\n[bad](javascript:alert) [bad](data:text/html,x) [bad](vbscript:x) <img src=x onerror=alert(1)>'));
+        expect(el.querySelectorAll('a, img, script')).toHaveLength(0);
+        expect(el.querySelector('code').textContent).toBe('[literal](https://example.org) https://example.org');
+    });
+    test('labelled query strings are escaped once and existing concept links survive', () => {
+        const el = parse(simpleMarkdownToHtml('[query](https://example.org/?a=1&b=2) [task](#V#task_example)'));
+        expect(el.querySelector('a').getAttribute('href')).toBe('https://example.org/?a=1&b=2');
+        expect(el.querySelectorAll('a')[1].getAttribute('href')).toBe('#V#task_example');
+    });
+    test('server-rendered text is linkified without nesting anchors or touching code', async () => {
+        const { renderMarkdownViaServer } = require('../../src/frontend/web/von_interface/static/js/markdownUtils.js');
+        global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ html: `<p>${bare}. <a href="${labelled}">PR</a> <code>${bare}</code></p>` }) });
+        const el = parse(await renderMarkdownViaServer(bare));
+        expect([...el.querySelectorAll('a')].map(a => a.getAttribute('href'))).toEqual([bare, labelled]);
+        expect(el.querySelector('code a')).toBeNull();
+        delete global.fetch;
+    });
+});

@@ -2728,3 +2728,101 @@ def test_restart_reconciles_existing_assistant_result_without_replaying_work():
         )
         == 0
     )
+
+
+def test_attachment_only_queue_preserves_exact_descriptor_ids():
+    scope = queue_service.build_queue_scope(user_concept_id="#V#alice", organisation_concept_id="#V#org")
+    record = _create_server_queue_record(scope=scope, submission_id="attachment-only",
+        prompt="", execution_envelope={"image_attachment_ids":["#V#file"]})
+    assert record["prompt_raw"] == ""
+    persisted = mongo_client.get_chat_prompt_queue_collection().find_one({"queue_id": record["queue_id"]})
+    assert persisted["execution_envelope"]["image_attachment_ids"] == ["#V#file"]
+
+
+@pytest.mark.parametrize(
+    "process_state,receipt_status,history_present,expected",
+    [
+        ("dead", None, False, "failed"),
+        ("dead", "completed", True, "completed"),
+        ("dead", "failed", True, "failed"),
+        ("dead", "completed", False, "failed"),
+        ("live", None, False, None),
+        ("denied", None, False, None),
+        ("foreign", None, False, None),
+        ("renewed", None, False, None),
+    ],
+)
+def test_stopped_server_recovery_never_replays_or_steals_live_work(
+    monkeypatch, process_state, receipt_status, history_present, expected
+):
+    from src.backend.services import (
+        chat_history_service as h,
+        turn_execution_record_service as records,
+    )
+    from unittest.mock import MagicMock
+
+    now = datetime.now(timezone.utc)
+    host = queue_service.socket.gethostname()
+    owner = (
+        f"{host}:987654:old" if process_state != "foreign" else "other-host:987654:old"
+    )
+    row = {
+        "queue_id": "dead-turn",
+        "user_concept_id": "#V#u",
+        "namespace": "#V#u",
+        "organisation_concept_id": None,
+        "session_id": "session",
+        "client_request_id": "request",
+        "dispatch_mode": "server",
+        "status": "in_progress",
+        "attempt_id": "attempt",
+        "server_instance_id": owner,
+        "active_conversation_key": "conversation",
+        "lease_expires_at": (
+            now + timedelta(seconds=90)
+            if process_state == "renewed"
+            else now - timedelta(seconds=90)
+        ),
+    }
+    coll = queue_service._collection()
+    coll.insert_one(row)
+
+    def probe(pid, signal):
+        if process_state == "live":
+            return
+        if process_state == "denied":
+            raise PermissionError()
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(queue_service.os, "kill", probe)
+    history = MagicMock()
+    history.find_one.return_value = {"_id": 1} if history_present else None
+    monkeypatch.setattr(h, "get_chat_history_collection_service", lambda **kw: history)
+    monkeypatch.setattr(
+        records,
+        "get_turn_execution_record_projection",
+        lambda **kw: {
+            "user_id": "#V#u",
+            "session_id": "session",
+            "execution_terminal_status": receipt_status,
+        },
+    )
+    result = queue_service.terminalise_one_stopped_server_attempt(
+        current_server_instance_id=f"{host}:1:current"
+    )
+    if expected is None:
+        assert result is None
+        assert coll.find_one({"queue_id": "dead-turn"})["status"] == "in_progress"
+    else:
+        assert result["status"] == expected
+        stored = coll.find_one({"queue_id": "dead-turn"})
+        assert "active_conversation_key" not in stored
+        assert coll.count_documents({}) == 1
+        if expected == "failed":
+            assert "No automatic replay" in stored["last_error"]
+        assert (
+            queue_service.terminalise_one_stopped_server_attempt(
+                current_server_instance_id=f"{host}:1:current"
+            )
+            is None
+        )

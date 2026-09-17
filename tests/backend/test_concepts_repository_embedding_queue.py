@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+import mongomock
 
 from src.backend.db.repositories import concepts_repository as repository_module
 from src.backend.db.repositories.concepts_repository import ConceptsRepository
@@ -16,8 +17,13 @@ class _WriteResult:
 
 class _FakeConceptsCollection:
     def __init__(self) -> None:
+        self.reads = mongomock.MongoClient().test.concepts
+        self.reads.insert_many([{"concept_id": "#V#example"}, {"concept_id": "#V#message"}])
         self.inserted: list[dict[str, Any]] = []
         self.updated: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+
+    def find(self, query, projection=None):
+        return self.reads.find(query, projection)
 
     def insert_one(self, document: dict[str, Any]) -> _WriteResult:
         self.inserted.append(document)

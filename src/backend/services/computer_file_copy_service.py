@@ -714,6 +714,26 @@ def resolve_file_copy_blob_info(
 
     blob_key = _first_text_value(concept_id, "#V#has_blob_key")
     if not blob_key:
+        # Early Jira attachment imports persisted complete blob attributes but
+        # could omit both the format marker and blob text relations. Preserve
+        # canonical text precedence; this only recovers that legacy format.
+        if (
+            attrs.get("source_system") == "jira_attachment"
+            and isinstance(attrs.get("blob_key"), str)
+            and attrs["blob_key"].strip()
+            and attrs.get("blob_backend")
+            and attrs.get("sha256")
+            and isinstance(attrs.get("size_bytes"), int)
+        ):
+            return FileCopyBlobInfo(
+                concept_id=concept_id,
+                blob_key=attrs["blob_key"],
+                blob_backend=attrs["blob_backend"],
+                blob_uri=attrs.get("blob_uri"),
+                content_type=attrs.get("content_type"),
+                original_filename=attrs.get("original_filename"),
+                size_bytes=attrs["size_bytes"],
+            )
         return None
 
     blob_backend = _first_text_value(concept_id, "#V#has_blob_backend")
@@ -744,6 +764,37 @@ def resolve_file_copy_blob_info(
     )
 
 
+def _file_copy_content_visible_to_actor(
+    *,
+    concept_doc: Mapping[str, Any],
+    user_concept_id: str | None,
+    organisation_concept_id: str | None,
+    namespace: str | None,
+) -> bool:
+    """Apply the same attachment binding to cached content and source bytes."""
+    image_attrs = concept_doc.get("attributes") or {}
+    if image_attrs.get("conversation_image"):
+        if not user_concept_id or image_attrs.get("user_concept_id") != user_concept_id:
+            return False
+        source = image_attrs.get("image_provenance") or {}
+        if source.get("kind") == "otter_archive":
+            from ..integrations.internal_mcp.otter_archive_proxy_mcp import (
+                otter_archive_resource_binding_for_user,
+            )
+
+            if otter_archive_resource_binding_for_user(user_concept_id) != source.get(
+                "resource_id"
+            ):
+                return False
+
+    return _file_copy_visible_to_actor(
+        concept_doc=concept_doc,
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+    )
+
+
 def fetch_file_copy_bytes(
     *,
     file_copy_concept_id: str,
@@ -758,22 +809,7 @@ def fetch_file_copy_bytes(
     if not isinstance(concept_doc, Mapping):
         return {"success": False, "error": "not_found"}
 
-    image_attrs = concept_doc.get("attributes") or {}
-    if image_attrs.get("conversation_image"):
-        if not user_concept_id or image_attrs.get("user_concept_id") != user_concept_id:
-            return {"success": False, "error": "not_found"}
-        source = image_attrs.get("image_provenance") or {}
-        if source.get("kind") == "otter_archive":
-            from ..integrations.internal_mcp.otter_archive_proxy_mcp import (
-                otter_archive_resource_binding_for_user,
-            )
-
-            if otter_archive_resource_binding_for_user(user_concept_id) != source.get(
-                "resource_id"
-            ):
-                return {"success": False, "error": "not_found"}
-
-    if not _file_copy_visible_to_actor(
+    if not _file_copy_content_visible_to_actor(
         concept_doc=concept_doc,
         user_concept_id=user_concept_id,
         organisation_concept_id=organisation_concept_id,

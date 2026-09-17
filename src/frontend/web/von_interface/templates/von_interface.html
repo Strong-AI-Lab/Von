@@ -3,9 +3,15 @@
 
 <head>
   <meta charset="UTF-8" />
+  <meta name="von-app-shell" content="1">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
   <title>Von</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='outage/outage.css') }}">
+  <link rel="manifest" href="/von/manifest.webmanifest">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png?v=20260915">
+  <meta name="theme-color" content="#245e47">
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/conversation-visuals/katex.min.css') }}">
 
   <!-- Favicon -->
   <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" type="image/x-icon">
@@ -59,14 +65,23 @@
             <span class="visually-hidden">Search</span>
           </h2>
           <div class="vontology-search" id="globalVontologySearchWrapper">
-            <input type="search" id="vontologySearchInput" placeholder="Search conversations and concepts…"
-              aria-label="Search conversations and concepts" role="combobox" aria-autocomplete="list" aria-expanded="false"
+            <input type="search" id="vontologySearchInput" placeholder="Search conversations, concepts and tasks…"
+              aria-label="Search conversations, concepts and tasks" role="combobox" aria-autocomplete="list" aria-expanded="false"
               aria-haspopup="listbox" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
               name="_vontology_search" />
             <div id="vontologySearchResults" class="vontology-search-results" role="listbox"
               aria-label="Search results">
             </div>
           </div>
+          <details id="searchContentTypes" class="search-content-types">
+            <summary aria-label="Search content types: all selected">Types <span id="searchContentTypesCount">All</span></summary>
+            <fieldset class="search-content-types-menu">
+              <legend>Search content types</legend>
+              <label><input type="checkbox" value="conversations" checked> Conversations</label>
+              <label><input type="checkbox" value="concepts" checked> Concepts</label>
+              <label><input type="checkbox" value="tasks" checked> Tasks</label>
+            </fieldset>
+          </details>
           <button id="conversationRecoveryButton" class="conversation-recovery-button" type="button" hidden
             aria-label="Open removed conversations" aria-pressed="false" title="Open removed conversations"
             data-keep-title="true">
@@ -188,13 +203,13 @@
   </div>
 
   <!-- Footer for Model Info -->
-  <div class="footer-container">
+  <div class="footer-container" tabindex="0" role="region" aria-label="Footer information">
     <p id="modelInfoFooter" class="footer-info">
 
     </p>
     <p id="languageIndicator" class="language-indicator">🌐 en-NZ</p>
     <p id="serverUptimeFooter" class="pid-indicator" title="Process uptime">
-      <span class="footer-label">Uptime:</span> <span id="serverUptimeValue" title="Process uptime">-</span>
+      <span id="serverUptimeInfo"><span class="footer-label">Uptime:</span> <span id="serverUptimeValue" title="Process uptime">-</span></span>
       <span id="serverRuntimeCostInfo" class="conversation-runtime-cost-segment server-runtime-cost-segment" hidden>
         <span class="footer-separator">|</span>
         <button id="serverRuntimeCostButton"

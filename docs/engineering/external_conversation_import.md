@@ -1,5 +1,13 @@
 # External conversation import
 
+Codex machine discovery includes both active and archived sessions. For forked
+Codex rollouts, the first session metadata owns the conversation identity;
+copied ancestor metadata does not replace it. Gemini A2A journals reuse the
+`a2a-server` identifier, so separate runs are distinguished by their stable
+`startTime`. The original identifier and the identity basis remain in the import
+report; raw source bytes are unchanged. A missing A2A start time falls back to
+the source hash, so append reconciliation cannot be guaranteed for that case.
+
 - **Kind:** Design and implementation boundary
 - **Lifecycle:** Active
 - **Authority:** Canonical reference within external transcript import scope,
@@ -40,6 +48,13 @@ The capability has five layers:
 3. Only ordinary user-visible human and assistant text is projected into the
    actor-scoped chat-history store. The projection carries external actor and
    event provenance and is marked read-only.
+   Recorded message dates are preserved. Missing message dates use the source
+   file's last-modified time, labelled `source_file_modified`; the original
+   source timestamp remains null and import time is recorded separately.
+   Re-import repairs older import-time fallbacks only for unchanged events.
+   Known providers use local Codex, Claude Code, Copilot and Gemini brand assets
+   in conversation rows and assistant avatars; these do not imply a registered
+   Von participant identity.
 4. Continue creates a new native conversation with a lineage receipt and a
    copy of the visible history. The source snapshot remains unchanged.
 5. Machine-wide discovery and execution use a persisted batch/item controller.
@@ -130,6 +145,24 @@ projection with an explicit loss count. The visible projection is bounded to
 20,000 messages, 4,000,000 total characters, and 250,000 characters per
 message. Any truncation or omission is reported in the preview and stored loss
 report rather than hidden.
+
+## Display in Conversations
+
+Raw-document identity includes provider account and workspace when present,
+matching the conversation's source scope. This prevents reused provider session
+IDs (including Gemini A2A runs with the same start time) from sharing one mutable
+raw-document pointer across workspaces. Existing raw artefacts remain retained;
+reconciliation can refresh an affected transcript's raw-document reference
+without replacing its history or dates.
+
+Imported conversations are hidden from the Conversations tray and its search
+results by default. Select **Show imported** in the tray filters to include them
+for the current page session. This uses the existing
+`origin_kind=external_conversation_import` provenance marker and filters owned
+history before pagination, so imports do not crowd ordinary conversations out
+of the list. Direct links still open imported conversations; their contents,
+dates, read-only status, and raw-source custody are unchanged. This display
+filter does not archive or delete anything.
 
 ## Durable batch lifecycle
 

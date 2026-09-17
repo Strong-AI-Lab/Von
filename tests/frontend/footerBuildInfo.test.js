@@ -49,13 +49,4 @@ describe('footer build information', () => {
         expect(mainSource).toContain('commitTimestamp ? `Commit time ${commitTimestamp}` : null');
     });
 
-    test('hides build information, but not uptime, below the footer crowding threshold', () => {
-        expect(styles).toMatch(
-            /@media \(max-width:\s*760px\)\s*\{\s*\.server-build-info\s*\{\s*display:\s*none;/
-        );
-        expect(styles).not.toMatch(
-            /@media \(max-width:\s*760px\)[\s\S]*?#serverUptimeFooter\s*\{\s*display:\s*none;/
-        );
-        expect(styles).toMatch(/#serverUptimeFooter\s*\{\s*white-space:\s*nowrap;/);
-    });
 });

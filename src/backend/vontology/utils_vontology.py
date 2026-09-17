@@ -532,6 +532,12 @@ def get_concept_display_name_with_names_fallback(concept: dict) -> str:
     if not isinstance(concept, dict):
         return "Unnamed Concept"
 
+    from ..services.conversation_concept_service import resolve_conversation_names
+
+    source_name = resolve_conversation_names([concept]).get(concept.get("concept_id"))
+    if source_name is not None:
+        return source_name
+
     # Try names array first - look for type "NL"
     names = concept.get("names")
     if isinstance(names, list):

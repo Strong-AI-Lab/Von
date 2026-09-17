@@ -752,6 +752,31 @@ function cartouchifyStandaloneVontologyCodeSpans(root) {
 	}
 }
 
+function unwrapVontologyConceptLinks(root, options) {
+	// Older responses invented /von/#V# URLs. Recover their exact IDs before
+	// annotation, which deliberately skips ordinary links. Do not interpret
+	// concept-looking fragments on external source pages as Von navigation.
+	const exclusions = Array.isArray(options.skipSelectors)
+		? options.skipSelectors.filter(selector => selector !== 'a')
+		: [];
+	for (const anchor of root.querySelectorAll('a[href]')) {
+		if (anchor.closest('pre, code')) continue;
+		if (shouldSkipTextNode(anchor.firstChild, exclusions)) continue;
+		try {
+			const url = new URL(anchor.getAttribute('href'), window.location.href);
+			const isVonOrigin = url.origin === window.location.origin
+				|| url.origin === 'https://von.curiouscat.cc';
+			if (!isVonOrigin || url.username || url.password || url.search) continue;
+			if (url.pathname !== '/von/' && url.pathname !== '/von') continue;
+			const conceptId = decodeURIComponent(url.hash);
+			if (!/^#V#[-A-Za-z0-9_./:–—]+$/.test(conceptId)) continue;
+			anchor.replaceWith(document.createTextNode(conceptId));
+		} catch (_) {
+			// Malformed URLs/escapes remain ordinary links.
+		}
+	}
+}
+
 /**
  * Traverse existing DOM content and replace raw #V# tokens in text nodes with
  * clickable anchors. This is useful after Markdown rendering.
@@ -762,6 +787,7 @@ export function linkifyVontologyTokensInElement(root, options = {}) {
 	if (!root) {
 		return;
 	}
+	unwrapVontologyConceptLinks(root, options);
 
 	const skipSelectors = Array.isArray(options.skipSelectors)
 		? options.skipSelectors
@@ -813,6 +839,7 @@ export function cartouchifyVontologyTokensInElement(root, options = {}) {
 	if (!root) {
 		return;
 	}
+	unwrapVontologyConceptLinks(root, options);
 
 	const skipSelectors = Array.isArray(options.skipSelectors)
 		? options.skipSelectors
@@ -890,4 +917,3 @@ try {
 } catch (_) {
 	// Ignore missing window in tests.
 }
-

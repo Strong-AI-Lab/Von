@@ -91,3 +91,78 @@ def test_deleted_messages_and_equal_timestamp_paging(collection):
         before=first["before"],
     )
     assert [m["concept_id"] for m in next_page["messages"]] == [a["concept_id"]]
+
+
+@pytest.fixture
+def reference_store(monkeypatch):
+    from src.backend.services import concept_service
+
+    store = {}
+    calls = []
+
+    def read(cid):
+        if cid not in store:
+            raise concept_service.ConceptNotFoundError(cid)
+        return store[cid]
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        scope = concept_service._resolve_creation_visibility_scope(
+            created_by_concept_id=kwargs['created_by_concept_id'],
+            organisation_concept_id=kwargs['organisation_concept_id'],
+            event_namespace=None,
+            visibility_scope_mode=kwargs['visibility_scope_mode'],
+        )
+        kwargs['relationships'] = scope['relationships']
+        store[kwargs["concept_id"]] = kwargs
+        return kwargs
+
+    monkeypatch.setattr(concept_service, "get_concept_by_concept_id_exact", read)
+    monkeypatch.setattr(concept_service, "create_concept", create)
+    return store, calls
+
+
+def test_reference_is_private_idempotent_and_retains_exact_locator(
+    collection, reference_store
+):
+    collection.insert_one(message(1))
+    store, calls = reference_store
+    first = catalogue.materialise_exchange_reference(
+        "#V#alice", ["#V#alice", "#V#bob"], organisation="#V#lab"
+    )
+    again = catalogue.materialise_exchange_reference(
+        "#V#alice", ["#V#bob", "#V#alice"], organisation="#V#lab"
+    )
+    assert first == again
+    assert len(calls) == 1
+    assert calls[0]["created_by_concept_id"] == "#V#alice"
+    assert calls[0]["organisation_concept_id"] == "#V#lab"
+    assert calls[0]["resolve_visibility_from_event_namespace"] is False
+    assert first["message_exchange_reference"]["participant_ids"] == [
+        "#V#alice",
+        "#V#bob",
+    ]
+    assert first["concept_id"] in store
+    assert store[first["concept_id"]]["relationships"] == {"#V#specific_to_user": ["#V#alice"]}
+    # Reuse must still prove that there is a currently visible source exchange.
+    collection.delete_many({})
+    with pytest.raises(PermissionError):
+        catalogue.materialise_exchange_reference(
+            "#V#alice", ["#V#alice", "#V#bob"], organisation="#V#lab"
+        )
+
+
+def test_reference_denies_other_actor_group_and_organisation(
+    collection, reference_store
+):
+    collection.insert_one(message(1))
+    for actor, participants, org in [
+        ("#V#eve", ["#V#alice", "#V#bob"], "#V#lab"),
+        ("#V#alice", ["#V#alice", "#V#bob", "#V#carol"], "#V#lab"),
+        ("#V#alice", ["#V#alice", "#V#bob"], "#V#other_lab"),
+    ]:
+        with pytest.raises(PermissionError):
+            catalogue.materialise_exchange_reference(
+                actor, participants, organisation=org
+            )
+    assert not reference_store[1]

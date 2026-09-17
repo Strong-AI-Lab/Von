@@ -958,6 +958,44 @@ def get_llm_info():
         return jsonify({"error": "Failed to retrieve LLM info."}), 500
 
 
+@settings_bp.route("/execution_cost_display", methods=["GET", "PUT"])
+def execution_cost_display():
+    """Read viewer-scoped thresholds or replace the authenticated user's pair."""
+    from ...services.execution_cost_display_service import (
+        PREDICATE, resolve_preferences, validate_preferences,
+    )
+
+    actor = get_effective_user_concept_id()
+    if not actor:
+        return _jsonify_no_store({"error": "authenticated_actor_context_required"}, 401)
+    effective = get_effective_context(
+        request.headers.get("X-Von-Window-Session"), dict(session), actor,
+    )
+    if request.method == "PUT":
+        import json
+        from ...services.ontology_mutation_command_service import execute_governed_ontology_method
+        from ...services.text_value_service import upsert_singleton_text_relation
+
+        try:
+            value = validate_preferences(request.get_json(silent=True))
+        except ValueError as exc:
+            return _jsonify_no_store({"error": str(exc)}, 400)
+        text = json.dumps(value, sort_keys=True)
+        provenance = {"source": "execution_cost_display_preferences", "actor_concept_id": actor}
+        result = execute_governed_ontology_method(
+            method_name="upsert_singleton_text_relation",
+            arguments={"concept_id": actor, "predicate": PREDICATE, "text": text,
+                       "language": "en-NZ", "provenance": provenance},
+            mutate=lambda: upsert_singleton_text_relation(
+                subject_concept_id=actor, predicate=PREDICATE, text=text,
+                lang="en-NZ", provenance=provenance,
+            ),
+        )
+        if result.get("success") is False:
+            return _jsonify_no_store(result, 503)
+    return _jsonify_no_store(resolve_preferences(actor, effective.get("organisation_id")))
+
+
 @settings_bp.route("/llm/cost_summary", methods=["GET"])
 def get_llm_cost_summary():
     """Return a bounded persisted cost summary for the current actor/model."""
@@ -2063,7 +2101,7 @@ def get_ollama_models():
 
 
 @settings_bp.route("/models/openai", methods=["GET"])
-def get_openai_models():
+def get_openai_models(*, include_all=False):
     """API endpoint to get available OpenAI models regardless of current selection."""
     try:
         # Get the configured OpenAI API key environment variable
@@ -2071,7 +2109,7 @@ def get_openai_models():
 
         # Create a direct OpenAIClient instance to get models
         client = OpenAIClient(api_key_env_var=api_key_env_var)
-        models = client.list_models()
+        models = client.list_models(include_all=True) if include_all else client.list_models()
 
         if models:
             current_app.logger.info(f"Retrieved {len(models)} OpenAI models")
@@ -2215,6 +2253,66 @@ def get_meta_models():
             {"error": "Could not load the supported Meta Muse catalogue."},
             400,
         )
+
+
+@settings_bp.route("/models/inventory/<provider>", methods=["GET"])
+def get_model_inventory(provider):
+    """Project discovery and transport metadata without enabling any model."""
+    from ...services.model_audio_metadata import recorded_transcription_supported
+    from ...services.model_registry_service import get_model_registry_snapshot
+    from ...languagemodels.model_defaults import TRANSCRIPTION_MODELS
+
+    loaders = {
+        "openai": lambda: get_openai_models(include_all=True),
+        "openrouter": get_openrouter_models,
+        "gemini": get_gemini_models,
+        "meta": get_meta_models,
+        "ollama": get_ollama_models_from_all_hosts,
+    }
+    if provider not in loaders:
+        return _jsonify_no_store({"error": "Unsupported model provider."}, 400)
+    response = current_app.make_response(loaders[provider]())
+    payload = response.get_json()
+    available = response.status_code == 200
+    discovered = payload.get("models", []) if isinstance(payload, dict) else payload
+    discovered = discovered if available and isinstance(discovered, list) else []
+    registry_models = get_model_registry_snapshot().get("models", [])
+    entries = []
+    for value in discovered:
+        model = (
+            value.get("model") or value.get("name")
+            if isinstance(value, dict)
+            else value
+        )
+        if not isinstance(model, str) or not model:
+            continue
+        entry = {"provider": provider, "model": model, "available": True}
+        if isinstance(value, dict) and (value.get("host") or value.get("host_url")):
+            entry["host"] = value.get("host") or value.get("host_url")
+        entries.append(entry)
+    if provider == "openai":
+        for model in TRANSCRIPTION_MODELS:
+            if not any(e["model"] == model for e in entries):
+                entries.append(
+                    {"provider": provider, "model": model, "available": False}
+                )
+    for entry in entries:
+        entry["audio_transcription"] = recorded_transcription_supported(
+            provider, entry["model"], registry_models=registry_models
+        )
+    return _jsonify_no_store(
+        {
+            "provider": provider,
+            "available": available,
+            "error": (
+                None
+                if available
+                else f"{provider}: catalogue unavailable; check the provider key, host and access, then refresh."
+            ),
+            "models": entries,
+        },
+        200,
+    )
 
 
 @settings_bp.route("/model_parameters/capabilities", methods=["GET"])

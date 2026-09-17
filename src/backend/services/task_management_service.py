@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from ..db.repositories.concepts_repository import ConceptsRepository
 from ..security.access_control import can_access_concept
+from .task_project_home_service import guard_task_write
 from ..security.visibility_predicates import (
     CANONICAL_SPECIFIC_TO_ORG_PREDICATE,
     SPECIFIC_TO_ORG_PREDICATES_READ,
@@ -36,6 +37,7 @@ from ..services.text_value_service import (
 from ..utils.concept_id_utils import (
     ensure_v_concept_prefix,
 )
+from ..utils.task_execution_preferences import normalise_task_execution_preference
 from .effort_unit_ontology_service import (
     ensure_effort_unit_ontology,
     extract_effort_unit_type_ids,
@@ -223,6 +225,8 @@ JIRA_MIGRATION_LABEL_CANDIDATES = ("migrated", "jira-migration", "jira_migration
 TASK_STATUS_PENDING = "pending"
 TASK_STATUS_IN_PROGRESS = "in_progress"
 TASK_STATUS_COMPLETED = "completed"
+# Finished work is completed; deployed additionally records runtime delivery.
+TASK_STATUS_DEPLOYED = "deployed"
 TASK_STATUS_CANCELLED = "cancelled"
 TASK_STATUS_BLOCKED = "blocked"
 
@@ -230,6 +234,7 @@ VALID_TASK_STATUSES = {
     TASK_STATUS_PENDING,
     TASK_STATUS_IN_PROGRESS,
     TASK_STATUS_COMPLETED,
+    TASK_STATUS_DEPLOYED,
     TASK_STATUS_CANCELLED,
     TASK_STATUS_BLOCKED,
 }
@@ -301,7 +306,29 @@ TASK_TRANSITION_DEFINITIONS: Dict[str, List[Dict[str, str]]] = {
             "to_status": TASK_STATUS_CANCELLED,
         },
     ],
+    TASK_STATUS_DEPLOYED: [
+        {
+            "transition_id": "mark_completed",
+            "name": "Return to completed",
+            "to_status": TASK_STATUS_COMPLETED,
+        },
+        {
+            "transition_id": "reopen_pending",
+            "name": "Reopen to pending",
+            "to_status": TASK_STATUS_PENDING,
+        },
+        {
+            "transition_id": "reopen_in_progress",
+            "name": "Reopen to in progress",
+            "to_status": TASK_STATUS_IN_PROGRESS,
+        },
+    ],
     TASK_STATUS_COMPLETED: [
+        {
+            "transition_id": "deploy",
+            "name": "Mark deployed",
+            "to_status": TASK_STATUS_DEPLOYED,
+        },
         {
             "transition_id": "reopen_pending",
             "name": "Reopen to pending",
@@ -425,6 +452,13 @@ def _relationship_id_list(value: Any) -> list[str]:
         seen.add(candidate)
         ordered.append(candidate)
     return ordered
+
+
+def _normalise_execution_preference(value: Any, *, field_name: str) -> str | None:
+    try:
+        return normalise_task_execution_preference(value, field_name=field_name)
+    except ValueError as exc:
+        raise InvalidTaskDataError(str(exc)) from exc
 
 
 def _normalise_optional_text(value: Any, *, field_name: str) -> str | None:
@@ -1274,6 +1308,7 @@ def _would_create_parent_cycle(
     return False
 
 
+@guard_task_write
 def create_task(
     title: str,
     description: str,
@@ -1398,10 +1433,10 @@ def create_task(
         reference_code,
         field_name="reference_code",
     )
-    requested_model = _normalise_optional_text(
+    requested_model = _normalise_execution_preference(
         requested_model, field_name="requested_model"
     )
-    requested_reasoning_effort = _normalise_optional_text(
+    requested_reasoning_effort = _normalise_execution_preference(
         requested_reasoning_effort, field_name="requested_reasoning_effort"
     )
     agent_creation_fingerprint = _normalise_optional_text(
@@ -1707,6 +1742,24 @@ def create_task(
         logger.debug("Failed to append task_created history event: %s", e)
 
     workflow_event_launch: dict[str, Any] | None = None
+    # A native create-and-assign by its current creator is deliberate dispatch.
+    # Historical/imported attribution does not supply that actor authority.
+    from ..security.access_control import get_effective_user_concept_id
+
+    if (
+        assignee_concept_id
+        and canonical_task_source_id == DEFAULT_TASK_SOURCE_ID
+        and created_by_concept_id
+        and get_effective_user_concept_id() == created_by_concept_id
+    ):
+        from .task_dispatch_authority_service import record_assignment
+
+        if record_assignment(result):
+            ConceptsRepository.update_one(
+                {"concept_id": task_concept_id},
+                {"$set": {"metadata.dispatch_requested": True}},
+            )
+            result["dispatch_requested"] = True
     # Event-driven workflow launch is best-effort and must not block task writes.
     try:
         workflow_event_launch = maybe_launch_task_created_workflow(
@@ -1730,6 +1783,9 @@ def create_task(
             "Task-created workflow launch skipped for %s: %s", task_concept_id, e
         )
 
+    from .task_reporting_service import resolve_task_reporting
+
+    result["reporting_resolution"] = resolve_task_reporting(result)
     return result
 
 
@@ -1746,7 +1802,11 @@ def get_task(task_concept_id: str) -> Dict[str, Any]:
         TaskNotFoundError: If task not found
     """
     task_concept_id, doc = _get_task_doc(task_concept_id)
-    return {**_build_task_response(doc), "current_work_product": resolve_task_work_product(doc)}
+    from .task_reporting_service import resolve_task_reporting
+
+    result = {**_build_task_response(doc), "current_work_product": resolve_task_work_product(doc)}
+    result["reporting_resolution"] = resolve_task_reporting(result)
+    return result
 
 
 def find_task_by_agent_creation_fingerprint(
@@ -2188,6 +2248,8 @@ def _build_task_response(
         "history_count": len(history),
         "external_references": external_references,
         "project_concept_id": metadata.get("project_concept_id"),
+        "federation": metadata.get("federation"),
+        "dispatch_requested": bool(metadata.get("dispatch_requested")),
         "collection_concept_ids": metadata.get("collection_concept_ids", []),
         "bulk_task_collections": bulk_task_collections,
         "hidden_by_default_bulk_task_collections": (
@@ -2209,7 +2271,7 @@ def update_task_status(
 
     Args:
         task_concept_id: The task's concept_id
-        status: New status (pending, in_progress, completed, cancelled, blocked)
+        status: New status (pending, in_progress, completed, deployed, cancelled, blocked)
         actor_concept_id: Trusted actor performing the transition, when available
 
     Returns:
@@ -2225,6 +2287,18 @@ def update_task_status(
             f"Invalid status '{status}'. Must be one of: {VALID_TASK_STATUSES}"
         )
 
+    return _update_validated_task_status(
+        task_concept_id, status, actor_concept_id=actor_concept_id
+    )
+
+
+@guard_task_write
+def _update_validated_task_status(
+    task_concept_id: str,
+    status: str,
+    *,
+    actor_concept_id: str | None = None,
+) -> Dict[str, Any]:
     task_concept_id, doc = _get_task_doc(task_concept_id)
 
     existing_task = _build_task_response(doc)
@@ -2357,6 +2431,7 @@ def update_task_status(
     return updated_task
 
 
+@guard_task_write
 def assign_task(
     task_concept_id: str, assignee_concept_id: str, *, update_visibility: bool = True
 ) -> Dict[str, Any]:
@@ -2390,19 +2465,12 @@ def assign_task(
         existing_assignees = [existing_assignees]
     if not isinstance(existing_assignees, list):
         existing_assignees = []
-    for old_assignee in existing_assignees:
-        ConceptsRepository.mutate_relationship_edge(
-            source_id=task_concept_id,
-            kind=PREDICATE_HAS_ASSIGNEE,
-            target_id=old_assignee,
-            action="remove",
-        )
-
-    ConceptsRepository.mutate_relationship_edge(
-        source_id=task_concept_id,
-        kind=PREDICATE_HAS_ASSIGNEE,
-        target_id=assignee_concept_id,
-        action="add",
+    # Related identities may be redacted in a personal scope. Replace the
+    # singleton edge exactly; enumerating the visible old targets can leave an
+    # invisible previous assignee in place.
+    ConceptsRepository.update_one(
+        {"concept_id": task_concept_id},
+        {"$set": {f"relationships.{PREDICATE_HAS_ASSIGNEE}": [assignee_concept_id]}},
     )
 
     # Source assignment records do not grant the source participant new access.
@@ -2435,7 +2503,28 @@ def assign_task(
         )
     except Exception as e:
         logger.debug("Failed to append task assignment history event: %s", e)
-    return get_task(task_concept_id)
+    assigned = get_task(task_concept_id)
+    if update_visibility and ConceptsRepository.find_one(
+        {
+            "concept_id": task_concept_id,
+            f"relationships.{PREDICATE_HAS_ASSIGNEE}": [assignee_concept_id],
+        },
+        projection={"_id": 1},
+    ):
+        from .task_dispatch_authority_service import record_assignment
+
+        # The actor supplied this identity and the actor-scoped query verified
+        # its exact edge. Do not require visibility of the agent's profile to
+        # acknowledge the actor's own assignment or establish dispatch.
+        assigned["assignee_concept_id"] = assignee_concept_id
+        receipt = record_assignment(assigned)
+        if receipt:
+            ConceptsRepository.update_one(
+                {"concept_id": task_concept_id},
+                {"$set": {"metadata.dispatch_requested": True}},
+            )
+            assigned["dispatch_requested"] = True
+    return assigned
 
 
 def get_tasks_for_user(
@@ -3373,6 +3462,21 @@ def _actor_scoped_task_query_candidates(
 
 
 def search_tasks(
+    *, query: str | None = None, search_mode: str = "lexical", **filters
+) -> Dict[str, Any]:
+    """Search canonical tasks lexically or by actor-scoped semantic relevance."""
+    if any(key.startswith("_") for key in filters):
+        raise InvalidTaskDataError("Internal search parameters are not accepted")
+    if search_mode == "semantic":
+        from .task_semantic_index_service import search_semantic_tasks
+
+        return search_semantic_tasks(query=query, filters=filters)
+    if search_mode != "lexical":
+        raise InvalidTaskDataError("search_mode must be lexical or semantic")
+    return _search_tasks(query=query, **filters)
+
+
+def _search_tasks(
     *,
     query: str | None = None,
     project_concept_id: str | None = None,
@@ -3406,10 +3510,12 @@ def search_tasks(
     updated_to: str | None = None,
     dependency_state: str | None = None,
     organisation_concept_id: str | None = None,
+    organisation_scope_mode: str | None = None,
     bulk_visibility: str | None = BULK_TASK_VISIBILITY_INCLUDE,
     bulk_collection_ids: list[str] | str | None = None,
     limit: int = 50,
     offset: int = 0,
+    _semantic_query: str | None = None,
 ) -> Dict[str, Any]:
     """Search tasks with Jira-style filters over Vontology-backed task concepts."""
 
@@ -3422,9 +3528,10 @@ def search_tasks(
     except (TypeError, ValueError):
         offset = 0
 
-    query_filter: Dict[str, Any] = {
-        "relationships.is_an_instance_of": TASK_SPECIFICATION_TYPE_ID
-    }
+    query_filter = _build_task_listing_query(
+        organisation_concept_id=organisation_concept_id,
+        organisation_scope_mode=organisation_scope_mode,
+    )
     if project_concept_id:
         query_filter["metadata.project_concept_id"] = project_concept_id
     if collection_concept_id:
@@ -3433,14 +3540,6 @@ def search_tasks(
         query_filter.setdefault("$and", []).append(
             collection_task_query(collection_concept_id)
         )
-    if organisation_concept_id:
-        org_id = _normalise_optional_concept_id(organisation_concept_id)
-        if not org_id:
-            raise InvalidTaskDataError(
-                f"Invalid organisation_concept_id: {organisation_concept_id}"
-            )
-        query_filter[f"metadata.{TASK_METADATA_KEY_ORGANISATION}"] = org_id
-
     assignee_id = None
     if assignee_concept_id is not None:
         assignee_id = _normalise_optional_concept_id(assignee_concept_id)
@@ -3489,6 +3588,11 @@ def search_tasks(
                 query_filter,
                 sort=[("updated_at", -1), ("created_at", -1), ("concept_id", 1)],
             )
+        )
+    if _semantic_query is not None:
+        # Do not index placeholder text after a failed canonical text read.
+        query_texts_by_task = get_texts_for_concepts(
+            [doc["concept_id"] for doc in docs]
         )
     tasks = _build_task_responses(docs, texts_by_task=query_texts_by_task)
 
@@ -3826,8 +3930,20 @@ def search_tasks(
         bulk_collection_ids=bulk_collection_ids,
     )
     tasks = visibility_payload["tasks"]
+    semantic_diagnostics = None
+    if _semantic_query is not None:
+        from .task_semantic_index_service import assemble_task_context, rank_tasks
+
+        tasks, semantic_diagnostics = rank_tasks(tasks, _semantic_query)
     total = len(tasks)
     paged = tasks[offset : offset + limit]
+    rag_context = None
+    if semantic_diagnostics is not None:
+        rag_context = assemble_task_context(paged)
+        paged = [
+            {key: value for key, value in task.items() if key != "retrieval_text"}
+            for task in paged
+        ]
     return {
         "tasks": paged,
         "total": total,
@@ -3844,6 +3960,14 @@ def search_tasks(
         "total_is_exhaustive": bool(
             query_candidate_prefilter.get("total_is_exhaustive", True)
         ),
+        **(
+            {
+                "semantic_retrieval": semantic_diagnostics,
+                "rag_context": rag_context,
+            }
+            if semantic_diagnostics is not None
+            else {}
+        ),
     }
 
 
@@ -3859,6 +3983,7 @@ def get_task_transitions(task_concept_id: str) -> Dict[str, Any]:
     }
 
 
+@guard_task_write
 def transition_task(
     task_concept_id: str,
     *,
@@ -3930,8 +4055,17 @@ def transition_task(
     }
 
 
+@guard_task_write
 def unassign_task(task_concept_id: str) -> Dict[str, Any]:
     task_concept_id, doc = _get_task_doc(task_concept_id)
+    if (doc.get("metadata") or {}).get("dispatch_requested"):
+        from .task_dispatch_authority_service import revoke_assignment
+
+        revoke_assignment(task_concept_id)
+        ConceptsRepository.update_one(
+            {"concept_id": task_concept_id},
+            {"$unset": {"metadata.dispatch_requested": ""}},
+        )
     current_assignees = doc.get("relationships", {}).get(PREDICATE_HAS_ASSIGNEE, [])
     if isinstance(current_assignees, str):
         current_assignees = [current_assignees]
@@ -3969,6 +4103,7 @@ def unassign_task(task_concept_id: str) -> Dict[str, Any]:
     return get_task(task_concept_id)
 
 
+@guard_task_write
 def set_task_parent(
     task_concept_id: str,
     parent_task_concept_id: str | None,
@@ -4049,6 +4184,7 @@ def set_task_parent(
     return get_task(task_concept_id)
 
 
+@guard_task_write
 def create_subtask(
     parent_task_concept_id: str,
     *,
@@ -4095,6 +4231,7 @@ def create_subtask(
     }
 
 
+@guard_task_write
 def set_task_epic(
     task_concept_id: str,
     epic_task_concept_id: str | None,
@@ -4152,6 +4289,7 @@ def set_task_epic(
     return get_task(task_concept_id)
 
 
+@guard_task_write
 def link_tasks(
     source_task_concept_id: str,
     target_task_concept_id: str,
@@ -4224,6 +4362,7 @@ def link_tasks(
     }
 
 
+@guard_task_write
 def unlink_tasks(
     source_task_concept_id: str,
     target_task_concept_id: str,
@@ -4294,6 +4433,7 @@ def unlink_tasks(
     }
 
 
+@guard_task_write
 def add_task_comment(
     task_concept_id: str,
     *,
@@ -4405,6 +4545,7 @@ def find_task_comment_by_effect_fingerprint(
     return None
 
 
+@guard_task_write
 def add_task_attachment_bytes(
     task_concept_id: str,
     *,
@@ -4478,6 +4619,7 @@ def add_task_attachment_bytes(
     )
 
 
+@guard_task_write
 def add_task_attachment(
     task_concept_id: str,
     *,
@@ -4609,6 +4751,7 @@ def list_task_attachments(
     }
 
 
+@guard_task_write
 def add_task_worklog(
     task_concept_id: str,
     *,
@@ -4661,6 +4804,7 @@ def add_task_worklog(
     return entry
 
 
+@guard_task_write
 def record_task_history_event(
     task_concept_id: str,
     *,
@@ -4744,6 +4888,7 @@ def get_task_history(
     }
 
 
+@guard_task_write
 def update_task_fields(
     task_concept_id: str,
     *,
@@ -4760,7 +4905,7 @@ def update_task_fields(
     existing_task = _build_task_response(task_doc)
     # Validate these settings before changing any of the requested task fields.
     execution_settings = {
-        key: _normalise_optional_text(fields[key], field_name=key)
+        key: _normalise_execution_preference(fields[key], field_name=key)
         for key in ("requested_model", "requested_reasoning_effort")
         if key in fields
     }
@@ -5513,6 +5658,7 @@ def find_task_by_external_reference(
     return _build_task_response(doc)
 
 
+@guard_task_write
 def upsert_task_external_reference(
     task_concept_id: str,
     *,
@@ -5624,6 +5770,7 @@ def _task_doc_has_bulk_collection(
     )
 
 
+@guard_task_write
 def backfill_jira_migration_bulk_task_collections(
     *,
     dry_run: bool = True,
@@ -5756,6 +5903,7 @@ def backfill_jira_migration_bulk_task_collections(
     }
 
 
+@guard_task_write
 def bulk_update_tasks(
     task_concept_ids: Iterable[str],
     *,
@@ -5809,6 +5957,7 @@ def bulk_update_tasks(
     }
 
 
+@guard_task_write
 def delete_task(task_concept_id: str) -> bool:
     """Delete (archive) a task.
 
@@ -5851,6 +6000,7 @@ __all__ = [
     "TASK_STATUS_PENDING",
     "TASK_STATUS_IN_PROGRESS",
     "TASK_STATUS_COMPLETED",
+    "TASK_STATUS_DEPLOYED",
     "TASK_STATUS_CANCELLED",
     "TASK_STATUS_BLOCKED",
     "VALID_TASK_STATUSES",
@@ -5905,3 +6055,57 @@ __all__ = [
     "bulk_update_tasks",
     "delete_task",
 ]
+
+
+@guard_task_write
+def refresh_coding_supervision_context(
+    repair_task_id: str,
+    *,
+    episode_key: str,
+    blocker: Dict[str, Any],
+    actor_concept_id: str,
+) -> Dict[str, Any]:
+    """Refresh a controller-created repair after the same unresolved blocker recurs.
+
+    Internal canonical service; not exposed as a model-selectable metadata write.
+    The originating agent can update only its own retained episode's observations.
+    Reporting responsibility does not change the creator/delegator or assignment.
+    """
+    repair_task_id, doc = _get_task_doc(repair_task_id)
+    references = (doc.get("metadata") or {}).get(
+        TASK_METADATA_KEY_EXTERNAL_REFERENCES
+    ) or {}
+    parent = references.get("coding_supervision") or {}
+    if (
+        parent.get("source_agent") != actor_concept_id
+        or parent.get("episode_key") != episode_key
+    ):
+        raise InvalidTaskDataError(
+            "Supervisor episode does not belong to this source controller"
+        )
+    source = get_task(parent["source_task_id"])
+    if (
+        source.get("assignee_concept_id") != actor_concept_id
+        or source.get("created_by_concept_id") != parent.get("delegator_id")
+        or source.get("organisation_concept_id") != parent.get("organisation_id")
+        or source.get("status") not in {"blocked", "pending", "in_progress"}
+        or blocker.get("binding") != parent["blocker"].get("binding")
+        or blocker.get("key") != parent["blocker"].get("key")
+        or blocker.get("scope") != parent["blocker"].get("scope")
+    ):
+        raise InvalidTaskDataError("Source authority or blocking episode changed")
+    updated = dict(parent)
+    updated["blocker"] = blocker
+    updated["prior_attempts"] = list(
+        dict.fromkeys([*parent.get("prior_attempts", []), parent["blocker"]["attempt"]])
+    )
+    ConceptsRepository.update_one(
+        {"concept_id": repair_task_id},
+        {
+            "$set": {
+                "metadata.external_references.coding_supervision": updated,
+                "updated_at": _now(),
+            }
+        },
+    )
+    return get_task(repair_task_id)

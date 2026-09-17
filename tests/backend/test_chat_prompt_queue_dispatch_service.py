@@ -15,6 +15,11 @@ def isolate_dispatcher_queue_reconciliation(monkeypatch):
     """Keep dispatch-unit tests independent from a live queue database."""
 
     monkeypatch.setattr(
+        "src.backend.services.background_workflow_continuation_service.reconcile_one_continuation",
+        lambda: False,
+    )
+
+    monkeypatch.setattr(
         dispatch_service.chat_prompt_queue_service,
         "claim_task_execution_terminal_reconciliation",
         lambda **_kwargs: None,
@@ -33,6 +38,11 @@ def isolate_dispatcher_queue_reconciliation(monkeypatch):
         dispatch_service.chat_prompt_queue_service,
         "reconcile_next_server_dispatch_handoff",
         lambda: None,
+    )
+    monkeypatch.setattr(
+        dispatch_service.chat_prompt_queue_service,
+        "terminalise_one_stopped_server_attempt",
+        lambda **_kwargs: None,
     )
     monkeypatch.setattr(
         dispatch_service.chat_prompt_queue_service,
@@ -99,6 +109,11 @@ def test_dispatcher_terminalises_requested_cancellation_before_new_work(
         "queue_id": "queue-cancelled",
         "status": "cancelled",
     }
+    monkeypatch.setattr(
+        dispatch_service.chat_prompt_queue_service,
+        "terminalise_one_stopped_server_attempt",
+        lambda **_kwargs: None,
+    )
     monkeypatch.setattr(
         dispatch_service.chat_prompt_queue_service,
         "terminalise_one_interrupted_cancellation",
@@ -940,3 +955,29 @@ def test_queue_cancellation_requests_bound_turn_without_releasing_fence(
         "status": "cancelling",
     }
     persist.assert_called_once_with(scope=scope, queue_id="queue-1")
+
+
+def test_workflow_continuation_dispatch_rechecks_revoked_organisation(monkeypatch):
+    from src.backend.server.routes import von_routes
+
+    record = {
+        **_reserved_record(),
+        "organisation_concept_id": "#V#org",
+        "namespace": "#V#user@org",
+        "workflow_continuation": {
+            "source_request_id": "original",
+            "source_queue_id": "original-queue",
+        },
+        "execution_envelope": {"model": "gpt-6-astra"},
+    }
+    monkeypatch.setattr(
+        "src.backend.services.organisation_membership_service.resolve_user_organisation_membership",
+        lambda *args: None,
+    )
+    generate = MagicMock()
+    monkeypatch.setattr(von_routes, "generate", generate)
+    outcome = von_routes.submit_server_dispatched_chat_prompt(Flask(__name__), record)
+    assert not outcome.accepted
+    assert not outcome.retryable
+    assert "revoked" in outcome.error
+    generate.assert_not_called()

@@ -615,6 +615,7 @@ def list_actor_conversations(
     organisation_concept_id: str | None = None,
     limit: int = 20,
     include_hidden: bool = False,
+    include_imported: bool = True,
     include_trashed: bool = False,
     cursor: str | None = None,
     name_present: bool | None = None,
@@ -636,6 +637,7 @@ def list_actor_conversations(
         "namespace": namespace,
         "organisation_concept_id": _normalise_concept_id(organisation_concept_id),
         "include_hidden": include_hidden,
+        "include_imported": include_imported,
         "include_trashed": include_trashed,
         "name_present": name_present,
         # Adapters may bind additional semantics without wrapping this already
@@ -712,6 +714,8 @@ def list_actor_conversations(
             projected = _project_actor_conversation_contract(
                 actor_user_id=actor, row=row
             )
+            if not include_imported and projected.get("origin_kind") == "external_conversation_import":
+                continue
             if projected.get("trashed") is True:
                 trashed_count += 1
                 if not include_trashed:
@@ -731,6 +735,7 @@ def list_actor_conversations(
             actor,
             namespace=namespace,
             include_legacy=True,
+            include_imported=include_imported,
             page_size=safe_limit,
             position=position,
         )
@@ -773,6 +778,19 @@ def list_actor_conversations(
         else:
             phase = "shared"
             position = None
+            if len(conversations) >= safe_limit:
+                # The owned stream is exhausted, but the shared stream has
+                # not been read. Preserve that transition for the next page.
+                next_cursor = encode_opaque_cursor(
+                    purpose="conversation_list",
+                    payload={
+                        "scope": cursor_scope,
+                        "phase": "shared",
+                        "position": None,
+                        "coverage": _cursor_coverage(),
+                    },
+                    ttl_seconds=_CONVERSATION_CURSOR_TTL_SECONDS,
+                )
 
     if phase == "shared" and next_cursor is None and len(conversations) < safe_limit:
         remaining = max(1, safe_limit - len(conversations))
@@ -921,6 +939,7 @@ def list_actor_conversations(
         "count": len(conversations),
         "limit": safe_limit,
         "include_hidden": include_hidden,
+        "include_imported": include_imported,
         "include_trashed": include_trashed,
         "hidden_count": hidden_count,
         "trashed_count": trashed_count,

@@ -211,7 +211,9 @@ def build_direct_message_delivery_identity(
         raise ValueError("organisation_concept_id is required")
     if not normalised_recipients:
         raise ValueError("At least one recipient is required")
-    if not isinstance(content, str) or not content.strip():
+    if not isinstance(content, str) or (
+        not content.strip() and not (metadata or {}).get("attachments")
+    ):
         raise ValueError("Message content cannot be empty")
 
     canonical_recipients = sorted(
@@ -329,7 +331,11 @@ def project_direct_message(message_doc: Dict[str, Any]) -> Dict[str, Any]:
         raw_read_by = [raw_read_by]
     if not isinstance(raw_read_by, list):
         raw_read_by = []
+    from .message_attachment_service import message_attachment_descriptors
+
+    attachments = message_attachment_descriptors(message_doc)
     return {
+        **({"attachments": attachments} if attachments else {}),
         "message_id": str(message_doc.get("concept_id") or ""),
         "sender_id": sender_ids[0] if sender_ids else None,
         "recipient_ids": relationship_values(PREDICATE_RECIPIENT),
@@ -393,7 +399,9 @@ def create_message(
         raise ValueError("sender_id is required")
     if not recipient_ids:
         raise ValueError("At least one recipient is required")
-    if not content or not content.strip():
+    if not isinstance(content, str) or (
+        not content.strip() and not (metadata or {}).get("attachments")
+    ):
         raise ValueError("Message content cannot be empty")
 
     # Normalise IDs
@@ -428,6 +436,12 @@ def create_message(
     metadata_payload = {
         str(k): v for k, v in metadata_payload.items() if isinstance(k, str)
     }
+    if metadata_payload.get("attachments"):
+        from .message_attachment_service import authorise_message_attachments
+
+        metadata_payload["attachments"] = authorise_message_attachments(
+            [a["concept_id"] for a in metadata_payload["attachments"]], sender_id
+        )
     attribution = metadata_payload.get("attribution")
     if not isinstance(attribution, str) or not attribution.strip():
         attribution = f"Sent by Von on behalf of {sender_id}"
@@ -814,10 +828,15 @@ def get_conversation_between_users(
     user_id_2: str,
     limit: int = 50,
     skip: int = 0,
+    *,
+    organisation_concept_id: Optional[str] = None,
+    as_of: Optional[datetime] = None,
+    newest_first: bool = False,
 ) -> List[Dict[str, Any]]:
     """Get all messages between two users (direct conversation).
 
-    Returns messages in both directions, sorted by time.
+    Returns messages in both directions, sorted by time. Existing UI pagination
+    remains oldest-first; bounded agent context may select recent scoped rows.
     """
     if not user_id_1 or not user_id_2:
         return []
@@ -843,11 +862,19 @@ def get_conversation_between_users(
         ],
     }
 
+    if organisation_concept_id is not None:
+        base_filter["concept_data.organisation_concept_id"] = organisation_concept_id
+    if as_of is not None:
+        base_filter["created_at"] = {"$lte": as_of}
     query = apply_concept_query_filter(base_filter)
 
     cursor = (
         coll.find(query)
-        .sort("created_at", 1)  # Chronological for conversations
+        .sort(
+            [("created_at", -1), ("concept_id", -1)]
+            if newest_first
+            else [("created_at", 1)]
+        )
         .skip(skip)
         .limit(limit)
     )
