@@ -118,6 +118,82 @@ describe('chat attachment workflow input binding', () => {
         }
     );
 
+    test('concurrent sends while a conversation is being prepared admit only one prompt', async () => {
+        const { __testOnly_setActiveChatSession: select, sendMessage } = require(chatTabModulePath);
+        select(null);
+        let finishCreation;
+        const queueBodies = [];
+        const generateBodies = [];
+        global.fetch = jest.fn(async (url, options = {}) => {
+            if (url === '/von/api/session/create_chat_session') return new Promise(resolve => { finishCreation = resolve; });
+            if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
+                const body = JSON.parse(options.body);
+                queueBodies.push(body);
+                return { ok: true, json: async () => ({ success: true, item: { ...body, queue_id: `queue-${queueBodies.length}`, status: 'queued' } }) };
+            }
+            if (url === '/von/generate') {
+                generateBodies.push(JSON.parse(options.body));
+                return { ok: true, json: async () => ({ response: 'Received.', llm_debug: { model: 'test-model' } }) };
+            }
+            if (String(url).startsWith('/von/history/length')) return { ok: true, json: async () => ({ history_length: 0, authenticated: true }) };
+            if (String(url).startsWith('/von/api/render_markdown')) return { ok: true, json: async () => ({ html: JSON.parse(options.body).text || '' }) };
+            return { ok: true, json: async () => ({ items: [], history: [] }) };
+        });
+        document.getElementById('promptInput').value = 'First message';
+        const first = sendMessage();
+        const repeated = sendMessage();
+        for (let i = 0; i < 50 && !finishCreation; i++) await new Promise(resolve => setTimeout(resolve, 5));
+        expect(finishCreation).toBeDefined();
+        expect(global.fetch.mock.calls.filter(([url]) => url === '/von/api/session/create_chat_session')).toHaveLength(1);
+        finishCreation({ ok: true, json: async () => ({ success: true, session_id: 'created-session', history: [] }) });
+        await Promise.all([first, repeated]);
+        expect(queueBodies).toHaveLength(1);
+        expect(generateBodies).toHaveLength(1);
+    });
+
+    test.each(['unchanged', 'edited', 'retyped'])('rapid repeat does not enqueue an in-flight attachment draft: %s', async mode => {
+        const { __testOnly_uploadFilesToVon, sendMessage } = require(chatTabModulePath);
+        let finish;
+        const queueBodies = [];
+        const generateBodies = [];
+        global.fetch = jest.fn(async (url, options = {}) => {
+            if (url === '/von/api/images/upload') return { ok: true, json: async () => ({ image_attachment: { concept_id: '#V#repeat-image', filename: 'repeat.png' } }) };
+            if (url === '/von/api/chat_prompt_queue' && options.method === 'POST') {
+                const body = JSON.parse(options.body);
+                queueBodies.push(body);
+                return { ok: true, json: async () => ({ success: true, item: { ...body, queue_id: `queue-${queueBodies.length}`, status: 'queued' } }) };
+            }
+            if (url === '/von/generate') {
+                generateBodies.push(JSON.parse(options.body));
+                return new Promise(resolve => { finish = resolve; });
+            }
+            if (String(url).startsWith('/von/history/length')) return { ok: true, json: async () => ({ history_length: 0, authenticated: true }) };
+            if (String(url).startsWith('/von/api/render_markdown')) return { ok: true, json: async () => ({ html: JSON.parse(options.body).text || '' }) };
+            return { ok: true, json: async () => ({ items: [] }) };
+        });
+        await __testOnly_uploadFilesToVon([new File(['png'], 'repeat.png', { type: 'image/png' })]);
+        const input = document.getElementById('promptInput');
+        input.value = 'Describe this image';
+        const pending = sendMessage();
+        await sendMessage();
+        for (let i = 0; i < 50 && !finish; i++) await new Promise(resolve => setTimeout(resolve, 5));
+        expect(finish).toBeDefined();
+        await sendMessage();
+        expect(generateBodies).toHaveLength(1);
+        expect(queueBodies).toHaveLength(1);
+        expect(input.value).toBe('Describe this image');
+        if (mode !== 'unchanged') {
+            input.value = 'A different follow-up';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            if (mode === 'retyped') input.value = 'Describe this image';
+            await sendMessage();
+            expect(queueBodies).toHaveLength(2);
+            expect(queueBodies[1].prompt_raw).toBe(mode === 'retyped' ? 'Describe this image' : 'A different follow-up');
+        }
+        finish({ ok: true, json: async () => ({ response: 'Received.', llm_debug: { model: 'test-model' } }) });
+        await pending;
+    });
+
     test('successful text-only submission stays cleared after switching away and back', async () => {
         const { __testOnly_setActiveChatSession: select, sendMessage } = require(chatTabModulePath);
         global.fetch = jest.fn(async (url, options = {}) => ({ ok: true, json: async () => {

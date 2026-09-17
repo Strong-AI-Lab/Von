@@ -34342,6 +34342,7 @@ export function initializeChatTab() {
 
     // Add event listeners
     const submitComposer = (event) => {
+        if (isComposerDraftSubmissionInFlight()) return;
         updateSendButtonForCurrentChatState();
         if (!chatSteeringControls?.activate(event)) void handleSendPrompt();
     };
@@ -37208,7 +37209,46 @@ function getQueuedChatPromptHeadsBySession() {
     return heads;
 }
 
+const composerSubmissionsInFlight = new Set();
+
+function isComposerDraftSubmissionInFlight(input = getPromptInputElement()) {
+    return input && [...composerSubmissionsInFlight].some(claim => (
+        claim.sessionId === activeChatSessionId
+        && claim.generation === chatOrganisationGeneration
+        && claim.text === input.value
+    ));
+}
+
 async function handleSendPrompt(options = {}) {
+    const input = getPromptInputElement();
+    const direct = input && !options.fromQueue && !options.observeServerDispatch
+        && typeof options.promptOverride !== 'string'
+        && !getSelectedChatPromptQueueEntryForSend();
+    if (!direct) return performSendPrompt(options);
+
+    // Claim the draft before session creation or dictation can yield. A live
+    // request alone is insufficient: a repeated activation would queue the
+    // same draft (including text retained for attachment recovery).
+    const sessionId = activeChatSessionId;
+    const generation = chatOrganisationGeneration;
+    if (isComposerDraftSubmissionInFlight(input)) return;
+    const claim = { sessionId, generation, text: input.value };
+    composerSubmissionsInFlight.add(claim);
+    const releaseEditedDraft = () => {
+        if (activeChatSessionId === claim.sessionId && input.value !== claim.text) {
+            composerSubmissionsInFlight.delete(claim);
+        }
+    };
+    input.addEventListener('input', releaseEditedDraft);
+    try {
+        return await performSendPrompt(options, claim);
+    } finally {
+        input.removeEventListener('input', releaseEditedDraft);
+        composerSubmissionsInFlight.delete(claim);
+    }
+}
+
+async function performSendPrompt(options = {}, composerClaim = null) {
     if (!options?.fromQueue && !options?.observeServerDispatch && chatSteeringControls?.isSending()) return;
     if (pendingChatOrganisationSwitchId !== null) {
         return;
@@ -37355,6 +37395,12 @@ async function handleSendPrompt(options = {}) {
         && liveChatRequestsBySession.has(getChatRequestSessionKey(targetSessionId))
     ) {
         return;
+    }
+
+    if (composerClaim) {
+        composerClaim.sessionId = targetSessionId;
+        composerClaim.text = promptRaw;
+        composerSubmissionsInFlight.add(composerClaim);
     }
 
     if (
@@ -42087,6 +42133,7 @@ export function __testOnly_resetChatRequestState() {
     chatPromptQueuePollInFlight = false;
     queuedChatPromptClaimsInFlight.clear();
     queuedChatPromptSubmissionsInFlight.clear();
+    composerSubmissionsInFlight.clear();
     serverDispatchedRetryObserversInFlight.clear();
     voicePromptQueueIds.clear();
     chatPromptQueueAdmissionServerInstanceId = null;
