@@ -79,6 +79,20 @@ def _build_normalise_inputs_handler():
             request.inputs.get("presentation_concept_id"),
             request.data.get("presentation_concept_id"),
         )
+        # This action materialises exactly one presentation. A programme-level
+        # list cannot identify that record, even when a workshop title is present.
+        if not presentation_concept_id and _resolve_context_list(
+            request, "existing_presentation_concept_ids"
+        ):
+            return WorkflowActionResult(
+                status="failed",
+                error=(
+                    "talk_representation_requires_single_presentation:"
+                    "provide presentation_concept_id and the fields for that talk; "
+                    "existing_presentation_concept_ids is a programme-level list, "
+                    "not a single presentation input"
+                ),
+            )
         if not title and not presentation_concept_id:
             return WorkflowActionResult(
                 status="failed",
