@@ -691,6 +691,14 @@ class MCPStdIOClient:
     ) -> tuple[Any, Optional[str]]:
         """Parse result and return (parsed_data, parse_method) for telemetry."""
         if result and getattr(result, "content", None):
+            # Preserve the ordered MCP envelope when it carries media. Returning
+            # the first text block discarded successfully produced images.
+            if any(isinstance(item, mcp_types.ImageContent) or (
+                isinstance(item, mcp_types.EmbeddedResource)
+                and str(getattr(item.resource, "mimeType", "") or "").startswith("image/")
+            ) for item in result.content):
+                return {"content": [item.model_dump(exclude_none=True) for item in result.content],
+                        "isError": bool(getattr(result, "isError", False))}, "media_content"
             for item in result.content:
                 if isinstance(item, mcp_types.TextContent):
                     text_data = item.text

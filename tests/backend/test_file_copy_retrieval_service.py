@@ -203,3 +203,83 @@ def test_fetch_file_copy_bytes_allows_org_scoped_actor_from_namespace(monkeypatc
 
     assert result["success"] is True
     assert result["data"] == b"team hello!!"
+
+
+def test_legacy_jira_attributes_recover_without_widening_access(monkeypatch):
+    from src.backend.services import computer_file_copy_service as svc
+
+    attrs = {
+        "source_system": "jira_attachment",
+        "blob_key": "imports/legacy/file.pdf",
+        "blob_backend": "s3",
+        "sha256": "a" * 64,
+        "size_bytes": 3,
+        "content_type": "application/pdf",
+        "original_filename": "file.pdf",
+        "user_concept_id": "#V#owner",
+    }
+    doc = {
+        "concept_id": "#V#legacy_file",
+        "attributes": attrs,
+        "relationships": {"#V#specific_to_user": ["#V#owner"]},
+    }
+    monkeypatch.setattr(svc, "_load_file_copy_concept_doc", lambda **kw: doc)
+    monkeypatch.setattr(svc, "_first_text_value", lambda *a: None)
+    reads = []
+
+    class Store:
+        def get_bytes(self, key):
+            reads.append(key)
+            return b"pdf"
+
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env", lambda: Store()
+    )
+    denied = svc.fetch_file_copy_bytes(
+        file_copy_concept_id=doc["concept_id"], user_concept_id="#V#other"
+    )
+    assert denied["success"] is False
+    assert reads == []
+    result = svc.fetch_file_copy_bytes(
+        file_copy_concept_id=doc["concept_id"], user_concept_id="#V#owner"
+    )
+    assert result["success"] and result["data"] == b"pdf"
+    assert reads == ["imports/legacy/file.pdf"]
+    assert result["info"].original_filename == "file.pdf"
+
+
+def test_legacy_jira_recovery_preserves_text_precedence_and_other_formats(monkeypatch):
+    from src.backend.services import computer_file_copy_service as svc
+
+    doc = {
+        "attributes": {
+            "source_system": "jira_attachment",
+            "blob_key": "old-key",
+            "blob_backend": "s3",
+            "sha256": "a" * 64,
+            "size_bytes": 3,
+        }
+    }
+    monkeypatch.setattr(
+        svc,
+        "_first_text_value",
+        lambda cid, pred: "canonical-key" if pred == "#V#has_blob_key" else None,
+    )
+    assert (
+        svc.resolve_file_copy_blob_info(
+            file_copy_concept_id="#V#file", concept_doc=doc
+        ).blob_key
+        == "canonical-key"
+    )
+    monkeypatch.setattr(svc, "_first_text_value", lambda *a: None)
+    doc["attributes"]["source_system"] = "unrelated"
+    assert (
+        svc.resolve_file_copy_blob_info(file_copy_concept_id="#V#file", concept_doc=doc)
+        is None
+    )
+    doc["attributes"]["source_system"] = "jira_attachment"
+    del doc["attributes"]["blob_key"]
+    assert (
+        svc.resolve_file_copy_blob_info(file_copy_concept_id="#V#file", concept_doc=doc)
+        is None
+    )

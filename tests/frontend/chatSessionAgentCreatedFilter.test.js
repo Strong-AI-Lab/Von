@@ -7,6 +7,7 @@ jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => 
     getUserContext: jest.fn(() => ({ user_id: '#V#agent_filter_user', org_id: '#V#test_org' })),
     postJson: jest.fn(async () => ({ status: 'updated', namespace: '#V#agent_filter_user@test_org' })),
     getWindowSessionId: jest.fn(() => 'test-window-session-id'),
+    ensureUniqueWindowSessionId: jest.fn(async () => 'test-window-session-id'),
     WINDOW_SESSION_HEADER: 'X-Von-Window-Session'
 }));
 
@@ -223,6 +224,29 @@ describe('chat session agent-created filtering', () => {
         }));
     });
 
+    test.each(['ctrlclick', 'F10', 'ContextMenu'])('%s opens normal conversation options with focus recovery', async gesture => {
+        require(chatTabModulePath);
+        await window.refreshChatSessionTabsForOrgSwitch();
+        const row = document.querySelector('[data-session-id="human-1"]');
+        row.focus();
+        const before = global.fetch.mock.calls.length;
+        row.dispatchEvent(gesture === 'ctrlclick'
+            ? new MouseEvent('click', { ctrlKey: true, bubbles: true, cancelable: true })
+            : new KeyboardEvent('keydown', { key: gesture, shiftKey: gesture === 'F10', bubbles: true, cancelable: true }));
+        expect(global.fetch.mock.calls).toHaveLength(before);
+        const menu = document.querySelector('.chat-session-menu.open');
+        expect(menu).not.toBeNull();
+        expect(document.activeElement.textContent).toBe('Rename');
+        expect(row.getAttribute('aria-expanded')).toBe('true');
+        document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+        expect(document.activeElement.textContent).toBe('Move to Organisation…');
+        document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+        expect(document.activeElement.textContent).toBe('Rename');
+        document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        expect(document.activeElement).toBe(row);
+        expect(row.getAttribute('aria-expanded')).toBe('false');
+    });
+
     test('modifier-click opens layout options without creating a chat and persists the left list', async () => {
         const chatTab = require(chatTabModulePath);
         await window.refreshChatSessionTabsForOrgSwitch();
@@ -324,40 +348,24 @@ describe('chat session agent-created filtering', () => {
         expect(document.activeElement).toBe(newChatButton);
     });
 
-    test('describes a left-rail preference truthfully when the narrow layout stays horizontal', async () => {
+    test('mobile uses the tray without offering a desktop layout command', async () => {
         window.matchMedia = jest.fn(() => ({
             matches: true,
             addEventListener: jest.fn(),
             removeEventListener: jest.fn()
         }));
-        require(chatTabModulePath);
+        const chatTab = require(chatTabModulePath);
+        chatTab.__testOnly_loadChatSessionTabsLayoutPreference();
         await window.refreshChatSessionTabsForOrgSwitch();
-
-        const newChatButton = document.querySelector('#chatSessionTabs .chat-session-tab-new');
-        newChatButton.dispatchEvent(new MouseEvent('contextmenu', {
-            bubbles: true,
-            clientX: 18,
-            clientY: 18
-        }));
-
-        const chooseLeftButton = Array.from(document.querySelectorAll('.chat-session-menu button'))
-            .find((button) => button.textContent === 'Use conversation tabs on left on wider screens');
-        expect(chooseLeftButton).toBeTruthy();
-        chooseLeftButton.click();
-
+        document.querySelector('#chatSessionTabs .chat-session-tab-new')
+            .dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 18, clientY: 18 }));
+        const menu = document.querySelector('.chat-session-menu');
+        expect(menu.classList.contains('open')).toBe(true);
+        expect(menu.textContent).toContain('New conversation');
+        expect(menu.textContent).not.toMatch(/wider screens|Move conversation tabs/);
         const workspace = document.getElementById('conversationWorkspace');
-        expect(workspace.dataset.tabsLayout).toBe('vertical');
-        expect(workspace.dataset.effectiveTabsLayout).toBe('horizontal');
-        expect(document.querySelector('.toast')?.textContent)
-            .toBe('Left conversation tabs saved for wider screens.');
-
-        newChatButton.dispatchEvent(new MouseEvent('contextmenu', {
-            bubbles: true,
-            clientX: 22,
-            clientY: 22
-        }));
-        expect(Array.from(document.querySelectorAll('.chat-session-menu button'))
-            .some((button) => button.textContent === 'Use conversation tabs across top on wider screens'))
-            .toBe(true);
+        expect(workspace.dataset.tabsLayout).toBe('horizontal');
+        expect(workspace.dataset.effectiveTabsLayout).toBe('vertical');
+        expect(localStorage.getItem('von:chatSessionTabsLayout')).toBe('horizontal');
     });
 });

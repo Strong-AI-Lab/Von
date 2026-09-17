@@ -683,3 +683,34 @@ def test_exchange_reference_denial_is_not_success(monkeypatch, app_client):
     )
     assert response.status_code == 403
     assert "concept_id" not in response.json
+
+
+def test_exchange_unread_seek_and_forward_cursor_use_authenticated_actor(monkeypatch, app_client):
+    from src.backend.services import message_catalogue_service
+
+    _, client = app_client
+    _authorise_test_direct_message(monkeypatch)
+    calls = []
+
+    def exchange(actor, participants, **kwargs):
+        calls.append((actor, participants, kwargs))
+        return {'messages': [], 'current_user_id': actor, 'before': None, 'after': None}
+
+    monkeypatch.setattr(message_catalogue_service, 'get_exchange', exchange)
+    participants = ['#V#user_alice', '#V#user_bob']
+    cursor = {'created_at': '2026-09-01T12:00:00Z', 'concept_id': '#V#message'}
+    for navigation in [{'first_unread': True}, {'after': cursor}]:
+        response = client.post('/api/messages/exchange', json={
+            'actor': '#V#spoofed', 'participant_ids': participants, **navigation,
+        })
+        assert response.status_code == 200
+        actor, actual_participants, kwargs = calls[-1]
+        assert actor == '#V#user_alice'
+        assert actual_participants == participants
+        assert kwargs['organisation'] == '#V#org_test'
+        assert kwargs['limit'] == 50
+        for key, value in navigation.items():
+            assert kwargs[key] == value
+    monkeypatch.setattr(message_routes, '_get_current_user_concept_id', lambda: None)
+    assert client.post('/api/messages/exchange', json={'first_unread': True}).status_code == 401
+    assert len(calls) == 2

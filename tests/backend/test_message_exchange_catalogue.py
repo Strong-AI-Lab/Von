@@ -166,3 +166,53 @@ def test_reference_denies_other_actor_group_and_organisation(
                 actor, participants, organisation=org
             )
     assert not reference_store[1]
+
+
+def test_unread_seek_skips_read_history_and_pages_both_directions(collection):
+    rows = [message(i) for i in range(160)]
+    for row in rows:
+        row['concept_data']['read_by'] = ['#V#alice']
+    # Read gaps and a stale catalogue count must not change the first target.
+    for i in [70, 140]:
+        rows[i]['concept_data']['read_by'] = []
+    collection.insert_many(rows)
+    args = ('#V#alice', ['#V#alice', '#V#bob'])
+    window = catalogue.get_exchange(*args, organisation='#V#lab', first_unread=True)
+    assert [m['concept_id'] for m in window['messages']] == [
+        f'#V#message_{i:03}' for i in range(70, 120)
+    ]
+    later = catalogue.get_exchange(*args, organisation='#V#lab', after=window['after'])
+    assert [m['concept_id'] for m in later['messages']] == [
+        f'#V#message_{i:03}' for i in range(120, 160)
+    ]
+    assert later['after'] is None
+    earlier = catalogue.get_exchange(*args, organisation='#V#lab', before=window['before'])
+    assert [m['concept_id'] for m in earlier['messages']] == [
+        f'#V#message_{i:03}' for i in range(20, 70)
+    ]
+
+
+def test_unread_seek_preserves_scope_recipients_deletion_and_equal_time(collection, monkeypatch):
+    rows = [message(i) for i in range(8)]
+    rows[0]['concept_data']['read_by'] = ['#V#alice']
+    rows[1]['relationships']['#V#has_recipient'].append('#V#carol')
+    rows[2]['concept_data']['organisation_concept_id'] = '#V#other'
+    rows[3]['concept_data']['deleted'] = True
+    rows[4]['relationships']['#V#has_sender'] = ['#V#alice']
+    rows[4]['relationships']['#V#has_recipient'] = ['#V#bob']
+    rows[5]['hidden'] = True
+    rows[7]['created_at'] = rows[6]['created_at']
+    monkeypatch.setattr(catalogue, 'apply_concept_query_filter',
+                        lambda query: {**query, 'hidden': {'$ne': True}})
+    collection.insert_many(rows)
+    args = ('#V#alice', ['#V#alice', '#V#bob'])
+    window = catalogue.get_exchange(*args, organisation='#V#lab', first_unread=True, limit=1)
+    assert window['messages'][0]['concept_id'] == '#V#message_006'
+    later = catalogue.get_exchange(*args, organisation='#V#lab', after=window['after'])
+    assert [m['concept_id'] for m in later['messages']] == ['#V#message_007']
+    collection.update_many({}, {'$set': {'concept_data.read_by': ['#V#alice']}})
+    assert catalogue.get_exchange(*args, organisation='#V#lab', first_unread=True)['messages'] == []
+    with pytest.raises(PermissionError):
+        catalogue.get_exchange('#V#eve', args[1], first_unread=True)
+    with pytest.raises(ValueError):
+        catalogue.get_exchange(*args, first_unread=True, after=window['after'])

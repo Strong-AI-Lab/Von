@@ -30,6 +30,7 @@ from ...services.rag_text_relation_change_hook_service import (
 from ...services.ontology_mutation_command_service import (
     OntologyMutationCommandError,
     delete_legacy_name,
+    execute_governed_concept_description_update,
 )
 from ...services.paper_recommendation_profile_vontology_service import (
     load_paper_recommendation_profile,
@@ -226,10 +227,9 @@ def _get_current_user_concept_id() -> str | None:
 
 
 def _get_current_org_concept_id() -> str | None:
-    effective = _get_effective_request_context()
-    return _normalise_concept_id(
-        effective.get("organisation_id")
-    ) or _normalise_concept_id(session.get("organisation_concept_id"))
+    from ...security.access_control import get_effective_organisation_concept_id
+
+    return get_effective_organisation_concept_id()
 
 
 def _is_admin_or_owner_session() -> bool:
@@ -630,7 +630,9 @@ def create_concept_route():
                 created_by_concept_id=trusted_actor,
                 organisation_concept_id=trusted_org,
                 event_namespace=_get_request_namespace(),
-                visibility_scope_mode=create_arguments.get("scope_mode"),
+                visibility_scope_mode=(
+                    create_arguments.get("scope_mode") or "user_only_default"
+                ),
                 maintain_relationship_inverses=False,
                 resolve_visibility_from_event_namespace=False,
             ),
@@ -794,20 +796,8 @@ def single_concept_route(concept_id: str) -> ResponseReturnValue:
                 else:
                     return jsonify(error="Failed to update notes"), 500
             elif "description" in data and len(data) == 1:
-                governed = _execute_governed_http_mutation(
-                    method_name="upsert_singleton_text_relation",
-                    arguments={
-                        "concept_id": concept_id,
-                        "predicate": "hasDescription",
-                        "text": data["description"],
-                    },
-                    mutate=lambda: {
-                        "success": bool(
-                            concept_service.update_concept_description(
-                                concept_id, data["description"]
-                            )
-                        )
-                    },
+                governed = execute_governed_concept_description_update(
+                    concept_id, data["description"]
                 )
                 if governed.get("success") is False:
                     return _governed_mutation_response(governed)
@@ -1510,20 +1500,8 @@ def update_concept_description_route(concept_id: str):
             400,
         )
     try:
-        governed = _execute_governed_http_mutation(
-            method_name="upsert_singleton_text_relation",
-            arguments={
-                "concept_id": concept_id,
-                "predicate": "hasDescription",
-                "text": data["description"],
-            },
-            mutate=lambda: {
-                "success": bool(
-                    concept_service.update_concept_description(
-                        concept_id, data["description"]
-                    )
-                )
-            },
+        governed = execute_governed_concept_description_update(
+            concept_id, data["description"]
         )
         if governed.get("success") is False:
             return _governed_mutation_response(governed)

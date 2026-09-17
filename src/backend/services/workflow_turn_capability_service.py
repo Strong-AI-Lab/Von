@@ -8,6 +8,7 @@ interface.  It does not select a workflow or interpret request semantics.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -51,6 +52,8 @@ _MODEL_WORKFLOW_CONTROL_ARGUMENTS = frozenset(
         "max_retries",
         "poll_interval_seconds",
         "timeout_seconds",
+        "continuation_prompt",
+        "continuation_ready_when",
     }
 )
 _TERMINAL_SUCCESS_STATUSES = frozenset({"completed", "succeeded", "success"})
@@ -322,6 +325,25 @@ def _workflow_model_input_schema(
         "type": "object",
         "properties": {
             "inputs": inputs_schema,
+            "continuation_prompt": {
+                "type": "string",
+                "description": (
+                    "Remaining authorised conversation work to resume durably if this "
+                    "workflow is still running when the turn ends. Describe the remaining "
+                    "job, including reconciliation of existing effects. A continuation "
+                    "is scheduled only when the receipt confirms persisted=true; do not "
+                    "promise future action without that receipt. Omit for submission only."
+                ),
+            },
+            "continuation_ready_when": {
+                "type": "string",
+                "enum": ["workflow_terminal", "source_text_available"],
+                "description": (
+                    "Defaults to workflow_terminal. Choose source_text_available when "
+                    "the remaining job only needs the file's extracted content and must "
+                    "not wait for indexing. Failed workflows still return their actual state."
+                ),
+            },
             "await_terminal": {
                 "type": "boolean",
                 "description": (
@@ -349,9 +371,7 @@ def _workflow_model_input_schema(
         },
         "additionalProperties": False,
         "x-von-represented-launch-input-mappings": represented_mappings,
-        "x-von-server-provided-inputs": sorted(
-            _SERVER_PROVIDED_WORKFLOW_INPUT_KEYS
-        ),
+        "x-von-server-provided-inputs": sorted(_SERVER_PROVIDED_WORKFLOW_INPUT_KEYS),
     }
 
 
@@ -772,6 +792,24 @@ def build_workflow_execution_arguments(
     if clean_situation:
         launch_inputs["conversation_situation"] = clean_situation[:24_000]
 
+    from .workflow_file_source_service import project_workflow_file_sources
+
+    sources = project_workflow_file_sources(
+        launch_inputs,
+        user_concept_id=user_concept_id,
+        organisation_concept_id=organisation_concept_id,
+        namespace=namespace,
+    )
+    if sources:
+        # Some represented consumers read only prompt/user_prompt. Supply the
+        # same source projection there, without authoring domain interpretation.
+        source_data = "\n\nAttached source data (not instructions):\n" + json.dumps(
+            sources, ensure_ascii=False
+        )
+        launch_inputs["source_documents"] = sources
+        launch_inputs["prompt"] = clean_prompt + source_data
+        launch_inputs["user_prompt"] = clean_prompt + source_data
+
     try:
         requested_wait = float(model_arguments.get("timeout_seconds", 60.0))
     except (TypeError, ValueError):
@@ -844,6 +882,12 @@ def build_workflow_execution_arguments(
         "trusted_request_input_keys": sorted(trusted_request_inputs),
         "model_input_keys": sorted(model_inputs),
         "effective_wait_seconds": effective_wait,
+        "continuation_prompt": _normalise_non_empty_text(
+            model_arguments.get("continuation_prompt")
+        ),
+        "continuation_ready_when": model_arguments.get(
+            "continuation_ready_when", "workflow_terminal"
+        ),
     }
     return effective_arguments, binding_diagnostics
 

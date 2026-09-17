@@ -107,7 +107,10 @@ def _identity(slot, actor, organisation):
     from .organisation_membership_service import resolve_user_organisation_membership
 
     agent_id = slot["agent_id"]
-    concept = concept_service.get_concept_by_concept_id(agent_id)
+    try:
+        concept = concept_service.get_concept_by_concept_id(agent_id)
+    except concept_service.ConceptNotFoundError:
+        concept = None
     if concept is None:
         if not slot.get("allow_identity_creation", False):
             raise PermissionError(

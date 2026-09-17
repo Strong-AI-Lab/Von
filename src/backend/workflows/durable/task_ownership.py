@@ -116,7 +116,7 @@ def ownership_checked_handler(
     return invoke
 
 
-def claim_admission_validator(worker_pattern: str = "^worker_") -> dict[str, Any]:
+def claim_admission_validator(worker_pattern: str = "^worker_", *, required_capability: str = TASK_OWNERSHIP_CAPABILITY) -> dict[str, Any]:
     """Database-enforced compatibility fence for legacy claim implementations.
 
     This rejects the observed old code which replaces claimed_by_build on each
@@ -128,7 +128,7 @@ def claim_admission_validator(worker_pattern: str = "^worker_") -> dict[str, Any
             {
                 "status": "running",
                 "locked_by": {"$regex": worker_pattern},
-                "claimed_by_build.capabilities": {"$ne": TASK_OWNERSHIP_CAPABILITY},
+                "claimed_by_build.capabilities": {"$ne": required_capability},
             }
         ]
     }

@@ -4,7 +4,7 @@
 - **Lifecycle:** Active
 - **Scope:** Ordinary adaptive chat turns; text steering and existing prompt queue
 - **Owner:** Von maintainers
-- **Last reviewed:** 11 September 2026
+- **Last reviewed:** 13 September 2026
 - **Review trigger:** Changes to turn admission, model continuation or composer submission
 
 “Q” means queueing here. The existing chat code provides a durable FIFO prompt
@@ -19,17 +19,32 @@ authority. No represented workflow or new prompt policy is needed.
 
 ## Interaction
 
-During a running turn, **Steer** sends composer text to that exact attempt.
-**Queue Prompt** (including the ordinary Enter/send action) continues to submit
-an independent FIFO request. Steering neither consumes nor reorders the queue.
-When idle, the ordinary Send Prompt action starts a turn.
+The icon-only submit arrow uses a saved **Queue / Steering** default while Von
+is working. Queue remains the initial default. The setting is in **More actions**
+and explicitly applies to this browser and signed-in user, with an in-memory
+fallback when storage is unavailable. The current user-preferences endpoint
+supports language settings, so this slice does not claim cross-device sync.
+Only an explicit settings choice changes the preference; Shift-click selects the
+opposite action once. Idle submit remains ordinary Send. Desktop Enter follows
+the default, Shift+Enter inserts a newline, and compact/touch Enter remains a
+newline with IME protection. More actions exposes named one-shot steering and
+queue buttons for keyboard and touch access.
 
-The composer shows pending steering and allows **Cancel steer** until the active
-turn has taken it. After delivery, withdrawal is rejected: another steer can
-correct it, or the existing Stop action can request turn cancellation. Neither
-steering nor Stop claims to undo completed tool effects. Steering waits for the
-next model boundary, including completion of a running tool batch; it does not
-interrupt an in-flight provider request or tool execution.
+The arrow has a curved variant for steering and a queue mark for queueing, with
+an accessible action name and explanatory tooltip/help. Unavailable steering
+retains the draft and explains the explicit Queue alternative. Steering never
+silently becomes queued work. Activation captures the exact current attempt;
+background queue dispatch keeps its existing path.
+
+Short, polite overlay notices announce steering transitions without consuming
+draft width. **More actions → Steering activity** retains receipt text and
+**Cancel steer** for pending guidance. A dot on More actions indicates pending
+work or an error. Unchanged polling does not repeat notices or replace focused
+receipt controls. Errors remain in Activity after the notice expires. After
+delivery, withdrawal is rejected: another steer can correct it, or the existing
+Stop action can request cancellation. Neither action undoes completed tools.
+Steering waits for the next model boundary, including completion of a running
+tool batch; it does not interrupt an in-flight provider request or tool execution.
 
 Text-only steering is disabled while attachments or unfinished dictation are
 present. The established queue/send path handles those inputs. Imported
@@ -42,6 +57,37 @@ receipts for visited sessions remain in browser memory and pending active-turn
 receipts can be fetched again from the server.
 
 ## State and persistence
+
+### Background workflow continuation
+
+Ordinary represented-workflow calls may supply `continuation_prompt` to describe
+remaining authorised work. If the workflow is still pending, the adapter
+registers one held successor in the existing prompt queue before returning a
+`conversation_continuation.persisted` receipt. That receipt, including a failed
+registration, survives the model's evidence projection. A workflow terminal
+observation alone does not promise another turn.
+
+The dispatcher polls persisted dependencies after the original turn completes,
+reads its recorded effects, and releases the same successor once. Normal queue
+cancellation, reservation fencing, organisation membership and conversation
+authorisation still apply. Failed source turns are not automatically replayed.
+TaskExecution-backed work retains the separate task continuation path.
+
+`continuation_ready_when` defaults to `workflow_terminal`. A consumer that only
+needs extracted file content can select `source_text_available`; canonical
+`hasContent` or the bounded byte projection then permits continuation while
+indexing remains pending, including interpretations that do not persist text.
+Cached attachment text uses the same owner/archive binding checks as bytes.
+Workflow launches also project explicit file-copy inputs into source data for consumers
+that read `prompt`/`user_prompt`. Existing extracted text is preferred; otherwise
+the bounded, effect-free byte reader is used. Source references, truncation and
+scoped failures are retained, and document text is not instruction authority.
+
+Local queue/adapter fixtures cover these paths. They do not establish live
+activation, stochastic event representation, or recovery of a historical turn
+that never registered a continuation. Historical recovery requires current
+actor-scoped conversation, workflow and event read-back before a controller
+submits any remaining work.
 
 `/von/api/chat_prompt_queue/<queue_id>/steering` supports POST, GET and DELETE.
 It reuses the queue's authenticated actor/organisation scope. A POST also names
@@ -95,3 +141,27 @@ The real Flask generation route is exercised with a test model and mock storage;
 no live model is required. A Chromium fixture uses the repository composer
 markup and styles at 375px to exercise submit, pending feedback and cancellation.
 This is fixture-backed acceptance, not authenticated public-server validation.
+
+Conversation headers use a native **Conversation actions** disclosure with
+ordinary Tab navigation, Escape dismissal and focus return. Chat context remains
+its existing disclosure; secondary situation, task, invitation, export and
+profile actions have named entries. Imports remain in conversation navigation's
+new-conversation menu. The message-exchange menu preserves Refresh, referenced
+tasks and the distinct participant/own profile destinations.
+
+`tests/browser/conversationActions.cjs` exercises production template/styles and
+chat steering, compact composer and message-panel modules at desktop, phone and
+landscape sizes with deterministic API fixtures. It checks long-receipt draft
+width, action reachability, preferences, one-shot alternatives, cancellation,
+keyboard dismissal and exchange menu bounds. This is local fixture-backed UI
+evidence, not public authentication, physical-device or deployment acceptance.
+
+Conversation rows have no ellipsis button. Right-click, Control-click,
+Shift+F10 or the Context Menu key open the existing options without selecting
+another conversation. The list's **Selected conversation options** button gives
+touch and keyboard users the same menu for the selected row. Row descriptions
+and tooltips explain these routes. The menu supports arrow keys, Home/End,
+Escape and focus return; it retains the original source-specific actions,
+including message-exchange reference copying and participant profiles.
+`tests/browser/messageConversationMenu.cjs` checks these routes, menu bounds and
+list collapse/reopening using production markup/modules with isolated transport.

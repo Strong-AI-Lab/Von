@@ -1,5 +1,25 @@
+import { createDictationController } from '../dictation.js';
+import { createMessageDraftControls, SEND_ICON as SEND_MESSAGE_ICON } from './conversationDraftControls.js';
+import { initialiseConversationActions } from './conversationActions.js';
 import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './conversationNavigation.js';
-import { resizeCompactDraft, shouldSubmitComposerKey } from './compactComposer.js';
+import { bindAttachmentComposer, imageItems, imagesBlocked, renderImageAttachments, removeSentAttachments } from '../utils/conversationImages.js';
+import { getWindowSessionId, WINDOW_SESSION_HEADER } from '../apiService.js';
+const messageDictation = new Map();
+const messageHistoryCursors = new Map();
+let refreshReplyAttachments = () => {};
+let refreshNewAttachments = () => {};
+const attachmentSignatures = new Map();
+function attachmentDraftChanged(scope) {
+    const key = attachmentScope(scope);
+    const signature = JSON.stringify(imageItems(key).map(item => item.descriptor?.concept_id || item.name));
+    if (attachmentSignatures.has(key) && attachmentSignatures.get(key) !== signature) setDeliveryAttempt(scope, null);
+    attachmentSignatures.set(key, signature);
+    renderComposePendingUi(scope);
+}
+function attachmentScope(scope) {
+    return `messages:${scope}:${scope === 'reply' ? (exchangeScope() || _currentConversationUserId) : readSessionActorConceptId()}`;
+}
+import { initialiseConversationDraft, navigateConversationDraftHistory, resizeConversationDraft as resizeCompactDraft, setConversationDraft, normaliseVontologyIdsForBackend } from './conversationDraft.js';
 import { initializeConceptAutocomplete } from './conceptAutocomplete.js';
 import { simpleMarkdownToHtml } from '../markdownUtils.js';
 import { profileButton, participantAvatar } from './participantProfile.js';
@@ -15,7 +35,6 @@ import { getSessionScopedOrgId } from '../utils/sessionScopedStorage.js';
 import { hydrateConceptCartouchesInRoot } from '../utils/selectConceptByIdHandler.js';
 import { createCartoucheFragment } from '../utils/textDecorator.js';
 import { showToast } from '../utils/toast.js';
-import { buildMessageStreamReference } from '../utils/messageStreamReference.js';
 import { copyTextWithClipboardFallback } from '../utils/copyJsonButtonState.js';
 import {
     clearRecommendationReviewResults,
@@ -35,6 +54,7 @@ let _replySendFailureState = null;
 let _newMessageSendFailureState = null;
 let _replySendPending = false;
 let _newMessageSendPending = false;
+let _replyContextPrefix = null;
 let _replyDeliveryAttempt = null;
 let _newMessageDeliveryAttempt = null;
 let _deliveryKeySequence = 0;
@@ -42,16 +62,38 @@ let _deliveryKeySequence = 0;
 let _exchange = null;
 let _exchangeGeneration = 0;
 let _olderCursor = null;
+let _newerCursor = null;
 let _unreadJumpGeneration = null;
 let _readObserver = null;
 const _exchangeDrafts = new Map();
 const _pendingReads = new Set();
+let _readRevision = 0;
+
+// Bind catalogue read-back to the selection and acknowledgements at request
+// time, so a response started before a read cannot restore its old count.
+export function captureMessageExchangeUnreadRefresh() {
+    const exchange = _exchange;
+    const revision = _readRevision;
+    const readPending = _pendingReads.size > 0;
+    return rows => {
+        if (!exchange || exchange !== _exchange || revision !== _readRevision
+            || readPending || _pendingReads.size > 0) return;
+        const row = rows.find(item => item.source_kind === 'message_exchange'
+            && item.session_id === exchange.session_id && item.viewer_id === exchange.viewer_id);
+        if (!Number.isFinite(row?.shared_unread_count)) return;
+        exchange.shared_unread_count = Math.max(0, row.shared_unread_count);
+        updateMessageNavigation();
+    };
+}
 
 function exchangeScope(row = _exchange) {
     return row ? `${row.browser_scope ?? getSessionScopedOrgId() ?? ''}:${row.viewer_id}:${row.session_id}` : '';
 }
 
 export function resetMessagePanelContext() {
+    for (const controller of messageDictation.values()) controller.cancel();
+    messageHistoryCursors.clear();
+    clearReplyContext();
     const input = _messagesContainer?.querySelector('#messageInput');
     if (_exchange && input) _exchangeDrafts.set(exchangeScope(), input.value);
     _exchangeGeneration += 1;
@@ -72,6 +114,7 @@ export async function openMessageExchange(row) {
     _exchange = { ...row, browser_scope: getSessionScopedOrgId() };
     resetMessagesViewportPosition();
     _olderCursor = null;
+    _newerCursor = null;
     if (!_messagesContainer) initializeMessagePanel();
     if (!_messagesContainer?.querySelector('#messageViewContent')) renderMessagesTabContent();
     _currentUserId = row.viewer_id;
@@ -84,14 +127,15 @@ export async function openMessageExchange(row) {
     header?.querySelectorAll('.exchange-profile-button').forEach(el => el.remove());
     for (const id of row.participant_ids) {
         const b = profileButton(id, id === row.viewer_id ? 'Your profile' : 'Participant profile');
-        b.className = 'exchange-profile-button'; header?.append(b);
+        b.className = 'exchange-profile-button'; header?.querySelector('.conversation-actions-panel')?.append(b);
     }
     const input = _messagesContainer?.querySelector('#messageInput');
     if (input) {
-        input.value = _exchangeDrafts.get(exchangeScope()) || '';
+        setConversationDraft(input, _exchangeDrafts.get(exchangeScope()) || '');
         resizeCompactDraft(input);
         input.placeholder = `Reply to ${row.session_name}`;
     }
+    refreshReplyAttachments();
     const compose = _messagesContainer?.querySelector('#messageComposeArea');
     let destination = compose?.querySelector('.message-reply-destination');
     if (compose && !destination) { destination = document.createElement('p'); destination.className = 'message-reply-destination'; compose.prepend(destination); }
@@ -120,7 +164,7 @@ export async function showMessageComposer() {
 }
 
 export async function refreshOpenMessageExchange() {
-    if (!_exchange || document.hidden || !document.getElementById('conversationWorkspace')?.classList.contains('show-message-exchange')) return;
+    if (!_exchange || _newerCursor || _unreadJumpGeneration !== null || document.hidden || !document.getElementById('conversationWorkspace')?.classList.contains('show-message-exchange')) return;
     await loadConversation(_currentConversationUserId, { silent: true });
 }
 
@@ -145,7 +189,7 @@ function updateUnreadMarkers() {
     updateMessageNavigation();
 }
 
-async function jumpToMostRecentUnread() {
+async function jumpToFirstUnread() {
     const generation = _exchangeGeneration;
     const org = getSessionScopedOrgId();
     if (_unreadJumpGeneration === generation || _isLoading) return;
@@ -157,28 +201,21 @@ async function jumpToMostRecentUnread() {
     const stillCurrent = () => generation === _exchangeGeneration && org === getSessionScopedOrgId();
     updateMessageNavigation();
     try {
-        while (stillCurrent()) {
-            const targets = content?.querySelectorAll('.is-unread[data-contribution-id]');
-            const target = targets?.[targets.length - 1];
-            if (target) {
-                target.scrollIntoView({ block: 'start' });
-                focusConversationTarget(target);
-                return;
-            }
-            if (!_olderCursor) {
-                showUnreadNavigationStatus('No unread messages remain in this conversation.');
-                return;
-            }
-            const cursor = _olderCursor;
+        if (_olderCursor || _newerCursor) {
             const loaded = await loadConversation(_currentConversationUserId, {
-                silent: true, before: cursor, observeReads: false
+                silent: true, firstUnread: true, observeReads: false
             });
             if (!stillCurrent()) return;
-            if (!loaded || _olderCursor === cursor) {
+            if (!loaded) {
                 showUnreadNavigationStatus('Could not load earlier unread messages. Try jumping again.');
                 return;
             }
         }
+        const target = content?.querySelector('.is-unread[data-contribution-id]');
+        if (target) {
+            target.scrollIntoView({ block: 'start' });
+            focusConversationTarget(target);
+        } else showUnreadNavigationStatus('No unread messages remain in this conversation.');
     } finally {
         if (_unreadJumpGeneration === generation) _unreadJumpGeneration = null;
         if (stillCurrent()) {
@@ -207,24 +244,34 @@ function updateMessageNavigation() {
         const unread = document.createElement('button');
         unread.type = 'button';
         unread.className = 'message-jump-unread';
-        unread.onclick = () => void jumpToMostRecentUnread();
-        const latest = createLatestMessageButton(() => {
+        unread.onclick = () => void jumpToFirstUnread();
+        const latest = createLatestMessageButton(async () => {
+            if (_isLoading) return;
+            const generation = _exchangeGeneration;
+            const org = getSessionScopedOrgId();
+            const loaded = !_newerCursor || await loadConversation(_currentConversationUserId, { latest: true });
+            if (generation !== _exchangeGeneration || org !== getSessionScopedOrgId()) return;
+            if (!loaded) {
+                showUnreadNavigationStatus('Could not load the latest messages. Try again.');
+                return;
+            }
             content.scrollTop = content.scrollHeight;
             focusConversationTarget(content.querySelector('.message-list')?.lastElementChild || content);
             updateMessageNavigation();
         });
+        latest.textContent = 'Latest message';
         navigation.append(unread, latest);
         compose.prepend(navigation);
         content.addEventListener('scroll', updateMessageNavigation, { passive: true });
     }
     const unread = navigation.querySelector('.message-jump-unread');
     const jumping = _unreadJumpGeneration === _exchangeGeneration;
-    unread.textContent = jumping ? 'Loading unread messages…' : 'Jump to most recent unread';
+    unread.textContent = jumping ? 'Loading unread messages…' : 'Jump to first unread';
     unread.disabled = jumping || _isLoading;
     unread.hidden = !jumping && !content.querySelector('.is-unread')
-        && !(_olderCursor && _exchange?.shared_unread_count > 0);
+        && !((_olderCursor || _newerCursor) && _exchange?.shared_unread_count > 0);
     setNavigationVisible(navigation.querySelector('.chat-scroll-to-end-btn'),
-        content.scrollHeight - content.scrollTop - content.clientHeight > 60);
+        Boolean(_newerCursor) || content.scrollHeight - content.scrollTop - content.clientHeight > 60);
 }
 
 function observeDisplayedMessages() {
@@ -253,9 +300,14 @@ function observeDisplayedMessages() {
         void postJson('/api/messages/read/bulk', { message_ids: ids }).then(async response => {
             if (generation !== _exchangeGeneration || org !== getSessionScopedOrgId()) return;
             if (response?.success !== true) throw new Error('Read state was not saved');
+            _readRevision += 1;
             // A full update receipt confirms every submitted ID, including loaded
             // older pages. Partial receipts require read-back; never clear all IDs.
             if (response.updated_count === ids.length) {
+                const newlyRead = _currentMessages.filter(message => ids.includes(message.concept_id)
+                    && isUnreadMessage(message)).length;
+                if (_exchange) _exchange.shared_unread_count = Math.max(0,
+                    (_exchange.shared_unread_count || 0) - newlyRead);
                 _currentMessages.forEach(message => {
                     if (!ids.includes(message.concept_id)) return;
                     message.concept_data ||= {};
@@ -267,6 +319,9 @@ function observeDisplayedMessages() {
             if (_currentMessages.some(m => ids.includes(m.concept_id) && isUnreadMessage(m))) showReadFailure();
             else {
                 root.querySelector('.message-read-status')?.remove();
+                // The ensuing catalogue request must capture a settled read;
+                // otherwise its authoritative count is rejected as in-flight.
+                ids.forEach(id => _pendingReads.delete(`${generation}:${id}`));
                 document.dispatchEvent(new CustomEvent('von:conversation-contribution'));
             }
         }).catch(() => {
@@ -301,6 +356,7 @@ const NEW_MESSAGE_DELIVERY_ATTEMPT_SCHEMA_VERSION = 'direct_message_new_delivery
 const MESSAGE_THREAD_PREDICATE_ID = '#V#is_part_of_thread';
 
 const MESSAGE_PANEL_ICONS = Object.freeze({
+    copy: '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2"/></svg>',
     chat: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 12a8 8 0 0 1-8 8H7l-4 3v-6.2A7.8 7.8 0 0 1 5 4.8 8 8 0 0 1 13 4a8 8 0 0 1 8 8Z"/><path d="M8 10h8"/><path d="M8 14h5"/></svg>',
     compose: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
     mail: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m4 7 8 6 8-6"/></svg>',
@@ -370,6 +426,8 @@ function resetMessagesViewportPosition() {
  * Render the messages tab content structure.
  */
 function renderMessagesTabContent() {
+    for (const controller of messageDictation.values()) controller.dispose();
+    messageDictation.clear();
     if (!_messagesContainer) return;
 
     syncVisibleReplyDeliveryAttempt();
@@ -397,10 +455,15 @@ function renderMessagesTabContent() {
             <div class="messages-main">
                 <div id="messageViewHeader" class="message-view-header hidden">
                     <span id="conversationTitle" class="conversation-title" tabindex="0">Select a conversation</span>
-                    <button id="messageTaskPanelBtn" class="chat-export-btn" type="button" title="Open tasks panel" aria-label="Tasks">📋</button>
+                    <details class="conversation-actions">
+                      <summary>Conversation actions</summary>
+                      <div class="conversation-actions-panel">
+                    <button id="messageTaskPanelBtn" class="chat-export-btn" type="button" title="Open tasks panel" aria-label="Tasks referenced in messages">Tasks referenced in messages</button>
                     <button id="refreshMessagesBtn" class="message-refresh-btn" type="button" title="Refresh" aria-label="Refresh messages">
-                        ${renderMessagePanelIcon('refresh')}
+                        Refresh messages
                     </button>
+                      </div>
+                    </details>
                 </div>
                 <div id="messageViewContent" class="message-view-content">
                     <div class="message-empty-state" role="status" aria-live="polite">
@@ -418,7 +481,7 @@ function renderMessagesTabContent() {
                     </div>
                     <div class="message-compose-row">
                         <textarea id="messageInput" aria-label="Reply" class="message-input" placeholder="Type your message..." rows="3"></textarea>
-                        <button id="sendMessageBtn" class="send-message-btn" type="button" aria-busy="false">Send</button>
+                        <button id="sendMessageBtn" class="send-message-btn composer-icon-button" type="button" aria-busy="false" aria-label="Send message" title="Send message">${SEND_MESSAGE_ICON}</button>
                     </div>
                 </div>
             </div>
@@ -453,11 +516,38 @@ function renderMessagesTabContent() {
         </div>
     `;
 
+    refreshReplyAttachments = bindAttachmentComposer(
+        _messagesContainer.querySelector('#messageComposeArea'), _messagesContainer.querySelector('#messageInput'),
+        () => attachmentScope(COMPOSE_SCOPE_REPLY), () => ({[WINDOW_SESSION_HEADER]: getWindowSessionId()}),
+        () => attachmentDraftChanged(COMPOSE_SCOPE_REPLY));
+    refreshNewAttachments = bindAttachmentComposer(
+        _messagesContainer.querySelector('.message-modal-body'), _messagesContainer.querySelector('#newMessageContent'),
+        () => attachmentScope(COMPOSE_SCOPE_NEW_MESSAGE), () => ({[WINDOW_SESSION_HEADER]: getWindowSessionId()}),
+        () => attachmentDraftChanged(COMPOSE_SCOPE_NEW_MESSAGE));
     _replySendFailureState = null;
     _newMessageSendFailureState = null;
 
+    for (const [scope, root, input, sendButton] of [
+        [COMPOSE_SCOPE_REPLY, _messagesContainer.querySelector('#messageComposeArea'), _messagesContainer.querySelector('#messageInput'), _messagesContainer.querySelector('#sendMessageBtn')],
+        [COMPOSE_SCOPE_NEW_MESSAGE, _messagesContainer.querySelector('.message-modal-body'), _messagesContainer.querySelector('#newMessageContent'), _messagesContainer.querySelector('#sendNewMessage')]
+    ]) {
+        const controls = createMessageDraftControls(root, input, sendButton);
+        messageDictation.set(scope, createDictationController({
+            input, ...controls,
+            getContext: () => ({ key: JSON.stringify([attachmentScope(scope), readSessionActorConceptId(), getSessionScopedOrgId(),
+                scope === COMPOSE_SCOPE_NEW_MESSAGE ? _messagesContainer.querySelector('#newMessageRecipient')?.value : _currentConversationUserId]),
+                text: normaliseVontologyIdsForBackend(input.value), language: navigator.language }),
+            setValue: value => {
+                setConversationDraft(input, value);
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            },
+            fetchImpl: (url, options = {}) => fetch(url, { ...options, headers: { ...options.headers, [WINDOW_SESSION_HEADER]: getWindowSessionId() } })
+        }));
+    }
+
     // Attach event listeners
     attachMessagesEventListeners();
+    initialiseConversationActions(_messagesContainer);
     initializeConceptAutocomplete(_messagesContainer.querySelector('#newMessageRecipient'));
     restoreNewMessageDeliveryAttemptForCurrentScope();
     renderComposePendingUi(COMPOSE_SCOPE_REPLY);
@@ -486,26 +576,30 @@ function attachMessagesEventListeners() {
         });
     }
 
-    // Send message button
-    const sendBtn = _messagesContainer.querySelector('#sendMessageBtn');
-    if (sendBtn) {
-        sendBtn.addEventListener('click', handleSendReply);
-    }
-
-    // Message input - send on Enter (Shift+Enter for newline)
-    const msgInput = _messagesContainer.querySelector('#messageInput');
-    if (msgInput) {
-        msgInput.addEventListener('keydown', (e) => {
-            if (shouldSubmitComposerKey(e)) {
-                e.preventDefault();
-                handleSendReply();
-            }
-        });
-        msgInput.addEventListener('input', syncVisibleReplyDeliveryAttempt);
-        resizeCompactDraft(msgInput);
-        window.addEventListener('resize', resizeVisibleReplyComposer);
-        window.visualViewport?.addEventListener('resize', resizeVisibleReplyComposer);
-    }
+    initialiseConversationDraft({
+        input: _messagesContainer.querySelector('#messageInput'),
+        sendButton: _messagesContainer.querySelector('#sendMessageBtn'),
+        onSubmit: handleSendReply,
+        onInput: syncVisibleReplyDeliveryAttempt,
+        onHistory: event => {
+            const history = _currentMessages.filter(message => message.relationships?.['#V#has_sender']?.[0] === _currentUserId)
+                .map(message => message.concept_data?.content_fallback || '').filter(Boolean);
+            const key = attachmentScope(COMPOSE_SCOPE_REPLY);
+            const next = navigateConversationDraftHistory(event, event.currentTarget, history,
+                messageHistoryCursors.get(key) ?? history.length);
+            if (!next) return;
+            messageHistoryCursors.set(key, next.cursor);
+            setConversationDraft(event.currentTarget, next.value);
+            event.currentTarget.setSelectionRange(next.value.length, next.value.length);
+            syncVisibleReplyDeliveryAttempt();
+        }
+    });
+    initialiseConversationDraft({
+        input: _messagesContainer.querySelector('#newMessageContent'),
+        sendButton: _messagesContainer.querySelector('#sendNewMessage'),
+        onSubmit: handleSendNewMessage,
+        onInput: syncVisibleNewMessageDeliveryAttempt
+    });
 
     const replyRecoverySelect = _messagesContainer.querySelector('#messageComposeRecoverySelect');
     if (replyRecoverySelect) {
@@ -526,11 +620,6 @@ function attachMessagesEventListeners() {
         cancelBtn.addEventListener('click', () => hideNewMessageModal());
     }
 
-    const sendNewBtn = _messagesContainer.querySelector('#sendNewMessage');
-    if (sendNewBtn) {
-        sendNewBtn.addEventListener('click', handleSendNewMessage);
-    }
-
     const newMessageRecoverySelect = _messagesContainer.querySelector('#newMessageRecoverySelect');
     if (newMessageRecoverySelect) {
         newMessageRecoverySelect.addEventListener('change', (event) => {
@@ -547,10 +636,6 @@ function attachMessagesEventListeners() {
         });
     }
 
-    const newMessageContent = _messagesContainer.querySelector('#newMessageContent');
-    if (newMessageContent) {
-        newMessageContent.addEventListener('input', syncVisibleNewMessageDeliveryAttempt);
-    }
 }
 
 /**
@@ -692,15 +777,17 @@ function renderThreadList() {
  * Select a conversation to view.
  */
 async function selectConversation(userId) {
+    clearReplyContext();
     const renderedSelection = _messagesContainer?.querySelector(
         '.message-thread-item.selected',
     );
     if (renderedSelection) {
         syncVisibleReplyDeliveryAttempt();
     }
+    messageDictation.get(COMPOSE_SCOPE_REPLY)?.cancel();
     const replyInput = _messagesContainer?.querySelector('#messageInput');
     if (replyInput) {
-        replyInput.value = '';
+        setConversationDraft(replyInput, '');
         resizeCompactDraft(replyInput);
     }
     // Detach the in-memory attempt while changing scope without deleting the
@@ -752,9 +839,6 @@ function bindMessageStreamMenu(element, getOtherUserId) {
         const otherUserId = getOtherUserId();
         const userId = _currentUserId;
         if (!otherUserId || !userId) return;
-        const thread = _threads.find(row => getThreadUserId(row) === otherUserId);
-        const messages = otherUserId === _currentConversationUserId ? _currentMessages : [thread?.last_message].filter(Boolean);
-        const payload = buildMessageStreamReference({ currentUserId: userId, otherUserId, messages, displayName: _exchange?.session_name || `Conversation with ${formatUserName(otherUserId)}`, participantIds: _exchange?.participant_ids, organisationConceptId: _exchange?.organisation_concept_id });
         const { openChatSessionMenu } = await import('../chatTab.js');
         if (!element.isConnected || _currentUserId !== userId) return;
         const rect = element.getBoundingClientRect();
@@ -762,8 +846,16 @@ function bindMessageStreamMenu(element, getOtherUserId) {
             label: 'Copy conversation reference',
             onClick: async () => {
                 if (_currentUserId !== userId) return;
-                const copied = await copyTextWithClipboardFallback(JSON.stringify(payload, null, 2));
-                showToast(copied ? 'Copied message conversation reference.' : 'Failed to copy conversation reference.', copied ? 'success' : 'error');
+                try {
+                    const result = await postJson('/api/messages/exchange/reference', {
+                        participant_ids: _exchange?.participant_ids || [userId, otherUserId],
+                        organisation_concept_id: _exchange?.organisation_concept_id || null,
+                    });
+                    if (!result?.success || !result.concept_id?.startsWith('#V#')) throw new Error('unavailable');
+                    if (_currentUserId !== userId) return;
+                    const copied = await copyTextWithClipboardFallback(result.concept_id);
+                    showToast(copied ? 'Copied message conversation reference.' : 'Failed to copy conversation reference.', copied ? 'success' : 'error');
+                } catch (_) { showToast('Conversation reference unavailable.', 'info'); }
             }
         }], { returnFocus: element, focusFirst: true });
     };
@@ -778,58 +870,88 @@ function bindMessageStreamMenu(element, getOtherUserId) {
 /**
  * Load messages for a conversation with a specific user.
  */
-async function loadConversation(userId, { silent = false, before = null, observeReads = true } = {}) {
+async function loadConversation(userId, { silent = false, before = null, after = null, firstUnread = false, latest = false, observeReads = true } = {}) {
     if (_isLoading) return;
     _isLoading = true;
     const generation = _exchangeGeneration;
     const org = getSessionScopedOrgId();
     const contentEl = _messagesContainer?.querySelector('#messageViewContent');
-    const oldTop = contentEl?.scrollTop || 0;
-    const oldHeight = contentEl?.scrollHeight || 0;
-    const nearBottom = !contentEl || oldHeight - oldTop - contentEl.clientHeight < 60;
-    if (contentEl && !silent) contentEl.innerHTML = '<div class="loading">Loading conversation…</div>';
+    if (contentEl && !silent && !_currentMessages.length) contentEl.innerHTML = '<div class="loading">Loading conversation…</div>';
     try {
         const response = _exchange
-            ? await postJson('/api/messages/exchange', { participant_ids: _exchange.participant_ids, organisation_concept_id: _exchange.organisation_concept_id || null, before })
+            ? await postJson('/api/messages/exchange', { participant_ids: _exchange.participant_ids, organisation_concept_id: _exchange.organisation_concept_id || null, before, ...(after ? { after } : {}), ...(firstUnread ? { first_unread: true } : {}) })
             : await getJson(`/api/messages/conversation/${encodeURIComponent(userId)}?limit=50`);
         if (generation !== _exchangeGeneration || org !== getSessionScopedOrgId() || userId !== _currentConversationUserId) return;
         const incoming = response.messages || [];
+        if (firstUnread && !incoming.length) {
+            // A successful scoped lookup supersedes stale catalogue/read markers.
+            _exchange.shared_unread_count = 0;
+            _currentMessages.forEach(message => {
+                const data = message.concept_data ||= {};
+                data.read_by = [...new Set([...(data.read_by || []), _currentUserId])];
+            });
+            updateUnreadMarkers();
+            return true;
+        }
         const compare = (a, b) => new Date(a.created_at) - new Date(b.created_at) || String(a.concept_id).localeCompare(String(b.concept_id));
         let nextMessages = incoming;
-        if (before) nextMessages = [...new Map([..._currentMessages, ...incoming].map(m => [m.concept_id, m])).values()].sort(compare);
-        else if (silent && incoming.length) {
+        if (before || after) nextMessages = [...new Map([..._currentMessages, ...incoming].map(m => [m.concept_id, m])).values()].sort(compare);
+        else if (silent && !firstUnread && !latest && incoming.length) {
             // Reconcile the returned range, including deletions and edits, while
             // retaining already loaded earlier pages. A reconnect gap remains pageable.
             const overlap = incoming.some(m => _currentMessages.some(old => old.concept_id === m.concept_id));
             if (!overlap && response.before) _olderCursor = response.before;
             nextMessages = [..._currentMessages.filter(m => compare(m, incoming[0]) < 0), ...incoming];
         }
-        const sameContent = JSON.stringify(nextMessages.map(m => [m.concept_id, m.concept_data?.content_fallback])) === JSON.stringify(_currentMessages.map(m => [m.concept_id, m.concept_data?.content_fallback]));
+        const sameContent = JSON.stringify(nextMessages.map(messageRenderKey)) === JSON.stringify(_currentMessages.map(messageRenderKey));
         _currentMessages = nextMessages;
-        if (silent && !before && sameContent) {
+        if (silent && !before && !after && !firstUnread && !latest && sameContent) {
             updateUnreadMarkers();
             if (observeReads) observeDisplayedMessages();
             return;
         }
-        if (before || !silent) _olderCursor = response.before || null;
+        if (firstUnread || latest || !silent) {
+            _olderCursor = response.before || null;
+            _newerCursor = response.after || null;
+        } else if (before) _olderCursor = response.before || null;
+        else if (after) _newerCursor = response.after || null;
         _currentUserId = response.current_user_id || null;
         _readObserver?.disconnect();
         _readObserver = null;
-        await renderMessages();
+        // Capture at render time: the reader may have scrolled during the request.
+        // Keep a visible contribution at the same offset, including when earlier
+        // pages or edits change the height above it. Never implicitly follow unread.
+        const oldTop = contentEl?.scrollTop || 0;
+        const viewportTop = contentEl?.getBoundingClientRect().top || 0;
+        const retainedIds = new Set(_currentMessages.map(message => message.concept_id));
+        const anchor = [...(contentEl?.querySelectorAll('[data-contribution-id]') || [])]
+            .find(element => retainedIds.has(element.dataset.contributionId)
+                && element.getBoundingClientRect().bottom > viewportTop);
+        const anchorId = anchor?.dataset.contributionId;
+        const anchorOffset = anchor ? anchor.getBoundingClientRect().top - viewportTop : 0;
+        await renderMessages(() => {
+            if (_olderCursor && contentEl) {
+                const earlier = document.createElement('button'); earlier.type = 'button'; earlier.textContent = 'Load earlier messages';
+                earlier.onclick = () => void loadConversation(userId, { silent: true, before: _olderCursor });
+                contentEl.prepend(earlier);
+            }
+            if (_newerCursor && contentEl) {
+                const later = document.createElement('button'); later.type = 'button'; later.textContent = 'Load later messages';
+                later.onclick = () => void loadConversation(userId, { silent: true, after: _newerCursor });
+                contentEl.append(later);
+            }
+            updateUnreadMarkers();
+            if (contentEl) {
+                const restoredAnchor = [...contentEl.querySelectorAll('[data-contribution-id]')]
+                    .find(element => element.dataset.contributionId === anchorId);
+                contentEl.scrollTop = restoredAnchor
+                    ? contentEl.scrollTop + restoredAnchor.getBoundingClientRect().top
+                        - contentEl.getBoundingClientRect().top - anchorOffset
+                    : oldTop;
+            }
+        });
         if (generation !== _exchangeGeneration || org !== getSessionScopedOrgId()) return;
         restoreReplyDeliveryAttemptForCurrentScope();
-        if (_olderCursor && contentEl) {
-            const earlier = document.createElement('button'); earlier.type = 'button'; earlier.textContent = 'Load earlier messages';
-            earlier.onclick = () => void loadConversation(userId, { silent: true, before: _olderCursor });
-            contentEl.prepend(earlier);
-        }
-        if (contentEl && before) contentEl.scrollTop = oldTop + contentEl.scrollHeight - oldHeight;
-        else if (contentEl && silent && !nearBottom) contentEl.scrollTop = oldTop;
-        else if (contentEl) contentEl.scrollTop = contentEl.scrollHeight;
-        updateUnreadMarkers();
-        // Opening starts at the first loaded unread contribution, without
-        // acknowledging earlier/unloaded or skipped contributions.
-        if (contentEl && !silent) contentEl.querySelector('.is-unread')?.scrollIntoView?.({ block: 'start' });
         updateMessageNavigation();
         if (observeReads) observeDisplayedMessages();
         return true;
@@ -1062,12 +1184,73 @@ async function loadMessageRecommendationReview(messageId, { forceReload = false 
     }
 }
 
-/**
- * Render messages in the conversation view.
- */
-async function renderMessages() {
-    const contentEl = _messagesContainer?.querySelector('#messageViewContent');
-    if (!contentEl) return;
+// Keep the quote in the ordinary draft/body so existing persistence and retry
+// retain it, including when the original message is later unavailable.
+function clearReplyContext({ removeQuote = false } = {}) {
+    const input = _messagesContainer?.querySelector('#messageInput');
+    if (removeQuote && input && _replyContextPrefix) {
+        if (!input.value.startsWith(_replyContextPrefix)) {
+            showToast('The quote was edited. Remove it directly from your draft.', 'info');
+            return false;
+        }
+        setConversationDraft(input, input.value.slice(_replyContextPrefix.length));
+        resizeCompactDraft(input);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    _replyContextPrefix = null;
+    _messagesContainer?.querySelector('.message-reply-context-controls')?.remove();
+    return true;
+}
+
+function selectReplyContext(messageId) {
+    if (_replySendPending || _exchange?.other_participant_ids?.length > 1) return;
+    const input = _messagesContainer?.querySelector('#messageInput');
+    const message = _currentMessages.find(item => item.concept_id === messageId);
+    if (!input || !message) {
+        showToast('This message is no longer available. Your draft has been kept.', 'warning');
+        return;
+    }
+    if (!clearReplyContext({ removeQuote: true })) return;
+    const sender = message.relationships?.['#V#has_sender']?.[0] || '';
+    const content = message.concept_data?.content_fallback || '[Message text unavailable]';
+    _replyContextPrefix = `Replying to ${formatUserName(sender)} (${messageId}):\n${content.split(/\r?\n/u).map(line => `> ${line}`).join('\n')}\n\n`;
+    setConversationDraft(input, _replyContextPrefix + input.value);
+    const controls = document.createElement('div');
+    controls.className = 'message-reply-context-controls';
+    const note = document.createElement('span');
+    note.textContent = 'Quoted message included in your reply. ';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel reply context';
+    cancel.onclick = () => {
+        if (!_replySendPending) clearReplyContext({ removeQuote: true });
+    };
+    controls.append(note, cancel);
+    input.closest('#messageComposeArea').prepend(controls);
+    resizeCompactDraft(input);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+}
+
+const messageRenderKeys = new WeakMap();
+
+function messageRenderKey(message) {
+    const { read_by: _readBy, ...data } = message.concept_data || {};
+    return JSON.stringify([message.concept_id, message.created_at, message.relationships, data,
+        _currentUserId, _currentConversationUserId, _exchangeGeneration, _exchange?.participant_profiles]);
+}
+
+/** Render messages without resetting unchanged contribution state. */
+async function renderMessages(onRendered = () => {}) {
+    const liveContent = _messagesContainer?.querySelector('#messageViewContent');
+    if (!liveContent) return;
+    // Prepare changed contributions off-screen; retain hydrated cartouches and
+    // local interaction state for unchanged contributions in the live list.
+    const contentEl = document.createElement('div');
+    const existingList = liveContent.querySelector('.message-list');
+    const existing = new Map(Array.from(existingList?.children || [])
+        .map(bubble => [bubble.dataset.contributionId, bubble]));
 
     if (_currentMessages.length === 0) {
         contentEl.innerHTML = `
@@ -1077,6 +1260,8 @@ async function renderMessages() {
                 <p class="message-empty-hint">Send the first message!</p>
             </div>
         `;
+        liveContent.replaceChildren(...contentEl.childNodes);
+        onRendered();
         return;
     }
 
@@ -1122,8 +1307,9 @@ async function renderMessages() {
                 ` : ''}
                 <div class="message-meta">
                     <span class="message-time">${timestamp ? formatTime(timestamp) : ''}</span>
-                    <button type="button" class="message-copy-markdown" data-message-id="${escapeHtml(msg.concept_id || '')}" aria-label="Copy message as Markdown">Copy</button>
-                    ${msg.concept_id ? `<button type="button" class="message-discuss-btn"
+                    <button type="button" class="message-copy-markdown" data-message-id="${escapeHtml(msg.concept_id || '')}" aria-label="Copy message as Markdown" title="Copy message as Markdown">${renderMessagePanelIcon('copy')}<span class="message-copy-label">Copy</span></button>
+                    <span class="message-copy-status" role="status"></span>
+                    ${msg.concept_id ? `<button type="button" class="message-reply-context-btn" data-message-id="${escapeHtml(msg.concept_id)}" title="Quote this message in the current reply">Reply with context</button><button type="button" class="message-discuss-btn"
                         data-concept-id="${escapeHtml(msg.concept_id)}"
                         title="Discuss this message with Von">Discuss with Von</button>` : ''}
                 </div>
@@ -1133,6 +1319,16 @@ async function renderMessages() {
 
     html += '</div>';
     contentEl.innerHTML = html;
+    const orderedBubbles = Array.from(contentEl.querySelectorAll('.message-bubble')).map((bubble, index) => {
+        const key = messageRenderKey(_currentMessages[index]);
+        const retained = existing.get(bubble.dataset.contributionId);
+        if (retained && messageRenderKeys.get(retained) === key) {
+            bubble.remove();
+            return retained;
+        }
+        messageRenderKeys.set(bubble, key);
+        return bubble;
+    });
     contentEl.querySelectorAll('.message-author[data-participant-id]').forEach(author => {
         const id = author.dataset.participantId;
         const profile = _exchange?.participant_profiles?.find(profile => profile.concept_id === id) || { display_name: formatUserName(id) };
@@ -1140,6 +1336,11 @@ async function renderMessages() {
         author.prepend(participantAvatar(profile));
     });
 
+    contentEl.querySelectorAll('.message-bubble').forEach(bubble => {
+        const msg = _currentMessages.find(m => m.concept_id === bubble.dataset.contributionId);
+        const attachments = msg?.concept_data?.metadata?.attachments || [];
+        renderImageAttachments(bubble.querySelector('.message-content'), attachments.map(a => ({...a, message_id:msg.concept_id})));
+    });
     const messageContentEls = Array.from(contentEl.querySelectorAll('.message-list .message-content'));
     messageContentEls.forEach((messageContentEl) => {
         // Preserve Markdown structure while decorating text nodes.
@@ -1157,7 +1358,20 @@ async function renderMessages() {
             }
         });
     });
-    contentEl.querySelectorAll('.message-copy-markdown').forEach(button => { button.onclick = async () => { const message = _currentMessages.find(m => m.concept_id === button.dataset.messageId); if (message) { const copied = await copyTextWithClipboardFallback(message.concept_data?.content_fallback || ''); button.textContent = copied ? 'Copied' : 'Copy failed'; } }; });
+    contentEl.querySelectorAll('.message-copy-markdown').forEach(button => {
+        button.onclick = async () => {
+            const message = _currentMessages.find(m => m.concept_id === button.dataset.messageId);
+            if (!message) return;
+            const status = button.parentElement.querySelector('.message-copy-status');
+            status.textContent = '';
+            const copied = await copyTextWithClipboardFallback(message.concept_data?.content_fallback || '');
+            status.textContent = copied ? 'Copied' : 'Copy failed';
+        };
+    });
+    contentEl.querySelectorAll('.message-reply-context-btn').forEach(button => {
+        button.disabled = Boolean(_exchange?.other_participant_ids?.length > 1);
+        button.onclick = () => selectReplyContext(button.dataset.messageId);
+    });
     contentEl.querySelectorAll('.message-discuss-btn').forEach((button) => {
         button.addEventListener('click', (event) => {
             event.preventDefault();
@@ -1173,7 +1387,18 @@ async function renderMessages() {
             }));
         });
     });
-    await hydrateConceptCartouchesInRoot(contentEl);
+    const list = existingList || document.createElement('div');
+    list.className = 'message-list';
+    const retained = new Set(orderedBubbles);
+    for (const bubble of Array.from(list.children)) if (!retained.has(bubble)) bubble.remove();
+    orderedBubbles.forEach((bubble, index) => {
+        if (list.children[index] !== bubble) list.insertBefore(bubble, list.children[index] || null);
+    });
+    if (!existingList) liveContent.replaceChildren(list);
+    else for (const child of Array.from(liveContent.children)) if (child !== list) child.remove();
+    // Restore before asynchronous hydration yields a frame with the new DOM.
+    onRendered();
+    await hydrateConceptCartouchesInRoot(liveContent);
 
     // The loader restores the viewport before attaching read observers.
 }
@@ -1197,8 +1422,14 @@ function renderComposePendingUi(scope) {
     if (!button) return;
 
     const pending = isComposePending(scope);
-    button.disabled = pending || (scope === COMPOSE_SCOPE_REPLY && _exchange?.other_participant_ids?.length > 1);
-    button.textContent = pending ? 'Sending…' : 'Send';
+    if (scope === COMPOSE_SCOPE_REPLY) {
+        const composer = _messagesContainer.querySelector('#messageComposeArea');
+        if (composer) composer.dataset.hasAttachments = String(imageItems(attachmentScope(scope)).length > 0);
+    }
+    button.disabled = pending || imagesBlocked(attachmentScope(scope)) || (scope === COMPOSE_SCOPE_REPLY && _exchange?.other_participant_ids?.length > 1);
+    button.innerHTML = pending ? '<span aria-hidden="true">…</span>' : SEND_MESSAGE_ICON;
+    button.setAttribute('aria-label', pending ? 'Sending message' : 'Send message');
+    button.title = pending ? 'Sending message' : 'Send message';
     button.setAttribute('aria-busy', pending ? 'true' : 'false');
 
     if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {
@@ -1626,10 +1857,6 @@ function replaceVisibleDeliveryAttempt(scope, {
     });
 }
 
-function resizeVisibleReplyComposer() {
-    resizeCompactDraft(_messagesContainer?.querySelector('#messageInput'));
-}
-
 function syncVisibleReplyDeliveryAttempt() {
     const replyInput = _messagesContainer?.querySelector('#messageInput');
     if (!replyInput) return;
@@ -1646,7 +1873,7 @@ function syncVisibleReplyDeliveryAttempt() {
         return;
     }
 
-    if (!draft.trim()) {
+    if (!draft.trim() && !imageItems(attachmentScope(COMPOSE_SCOPE_REPLY)).length) {
         setDeliveryAttempt(COMPOSE_SCOPE_REPLY, null);
         return;
     }
@@ -1765,7 +1992,7 @@ function restoreNewMessageDeliveryAttemptForCurrentScope() {
 
     _newMessageDeliveryAttempt = persistedAttempt;
     recipientInput.value = persistedAttempt.recipient;
-    contentInput.value = persistedAttempt.draft;
+    setConversationDraft(contentInput, persistedAttempt.draft);
     modal.classList.remove('hidden');
     setComposeFailureState(COMPOSE_SCOPE_NEW_MESSAGE, persistedAttempt.recoveryState);
     return true;
@@ -1796,7 +2023,7 @@ function restoreReplyDeliveryAttemptForCurrentScope() {
     }
 
     _replyDeliveryAttempt = persistedAttempt;
-    replyInput.value = persistedAttempt.draft;
+    setConversationDraft(replyInput, persistedAttempt.draft);
     resizeCompactDraft(replyInput);
     setComposeFailureState(COMPOSE_SCOPE_REPLY, persistedAttempt.recoveryState);
     return true;
@@ -2130,7 +2357,7 @@ function buildSendPayload({
         ? failureState.organisationOptions
         : [];
     const selectedOrganisationConceptId = String(
-        failureState?.selectedOrganisationConceptId || (scope === COMPOSE_SCOPE_REPLY ? _exchange?.organisation_concept_id : '') || '',
+        failureState?.selectedOrganisationConceptId || (scope === COMPOSE_SCOPE_REPLY ? _exchange?.organisation_concept_id : '') || getSessionScopedOrgId() || '',
     ).trim();
 
     if (organisationOptions.length > 0 && !selectedOrganisationConceptId) {
@@ -2142,6 +2369,8 @@ function buildSendPayload({
         return null;
     }
 
+    const attachmentIds = imageItems(attachmentScope(scope)).map(item => item.descriptor?.concept_id).filter(Boolean);
+    if (imagesBlocked(attachmentScope(scope))) return null;
     const deliveryIdempotencyKey = getOrCreateDeliveryIdempotencyKey({
         scope,
         recipientIds,
@@ -2155,6 +2384,7 @@ function buildSendPayload({
     return {
         recipient_ids: recipientIds,
         content,
+        ...(attachmentIds.length ? {attachment_ids: attachmentIds} : {}),
         delivery_idempotency_key: deliveryIdempotencyKey,
         ...(selectedOrganisationConceptId
             ? { organisation_concept_id: selectedOrganisationConceptId }
@@ -2165,7 +2395,19 @@ function buildSendPayload({
 /**
  * Handle sending a reply in the current conversation.
  */
+const finishingDictation = new Set();
+async function finishMessageDictation(scope) {
+    if (finishingDictation.has(scope)) return false;
+    const controller = messageDictation.get(scope);
+    if (!controller?.hasPendingInput()) return true;
+    finishingDictation.add(scope);
+    try { return await controller.finish(); }
+    finally { finishingDictation.delete(scope); }
+}
+
 async function handleSendReply() {
+    if (messageDictation.get(COMPOSE_SCOPE_REPLY)?.hasPendingInput()
+        && !await finishMessageDictation(COMPOSE_SCOPE_REPLY)) return;
     if (isComposePending(COMPOSE_SCOPE_REPLY)) {
         return;
     }
@@ -2180,8 +2422,8 @@ async function handleSendReply() {
     if (!msgInput) return;
 
     const visibleDraft = msgInput.value;
-    const content = visibleDraft.trim();
-    if (!content) {
+    const content = normaliseVontologyIdsForBackend(visibleDraft).trim();
+    if (!content && !imageItems(attachmentScope(COMPOSE_SCOPE_REPLY)).length) {
         showToast('Please enter a message', 'warning');
         return;
     }
@@ -2199,9 +2441,13 @@ async function handleSendReply() {
 
     const submittedConversationUserId = _currentConversationUserId;
     const submittedGeneration = _exchangeGeneration;
+    const submittedAttachmentScope = attachmentScope(COMPOSE_SCOPE_REPLY);
+    messageHistoryCursors.delete(submittedAttachmentScope);
     setComposePending(COMPOSE_SCOPE_REPLY, true);
     try {
         const result = await postJsonDetailed('/api/messages/', payload);
+        removeSentAttachments(submittedAttachmentScope, payload.attachment_ids || []);
+        refreshReplyAttachments(); refreshNewAttachments();
         if (submittedGeneration !== _exchangeGeneration) { document.dispatchEvent(new CustomEvent('von:conversation-contribution')); return; }
 
         resetComposeFailureUi(COMPOSE_SCOPE_REPLY);
@@ -2209,9 +2455,10 @@ async function handleSendReply() {
         const activeReplyInput = _messagesContainer?.querySelector('#messageInput');
         if (
             _currentConversationUserId === submittedConversationUserId
-            && activeReplyInput?.value.trim() === content
+            && activeReplyInput?.value === visibleDraft
         ) {
-            activeReplyInput.value = '';
+            clearReplyContext();
+            setConversationDraft(activeReplyInput, '');
             resizeCompactDraft(activeReplyInput);
         }
         _exchangeDrafts.delete(exchangeScope());
@@ -2270,7 +2517,8 @@ function hideNewMessageModal({ force = false } = {}) {
         const recipientInput = modal.querySelector('#newMessageRecipient');
         const contentInput = modal.querySelector('#newMessageContent');
         if (recipientInput) recipientInput.value = '';
-        if (contentInput) contentInput.value = '';
+        messageDictation.get(COMPOSE_SCOPE_NEW_MESSAGE)?.cancel();
+        if (contentInput) setConversationDraft(contentInput, '');
         if (_newMessageDeliveryAttempt) {
             setDeliveryAttempt(COMPOSE_SCOPE_NEW_MESSAGE, null);
         }
@@ -2281,6 +2529,8 @@ function hideNewMessageModal({ force = false } = {}) {
  * Handle sending a new message from the modal.
  */
 async function handleSendNewMessage() {
+    if (messageDictation.get(COMPOSE_SCOPE_NEW_MESSAGE)?.hasPendingInput()
+        && !await finishMessageDictation(COMPOSE_SCOPE_NEW_MESSAGE)) return;
     if (isComposePending(COMPOSE_SCOPE_NEW_MESSAGE)) {
         return;
     }
@@ -2292,8 +2542,8 @@ async function handleSendNewMessage() {
 
     const visibleRecipient = recipientInput.value;
     const visibleDraft = contentInput.value;
-    const recipient = visibleRecipient.trim();
-    const content = visibleDraft.trim();
+    const recipient = normaliseVontologyIdsForBackend(visibleRecipient).trim();
+    const content = normaliseVontologyIdsForBackend(visibleDraft).trim();
 
     if (!recipient) {
         showToast('Please enter a recipient', 'warning');
@@ -2301,7 +2551,7 @@ async function handleSendNewMessage() {
         return;
     }
 
-    if (!content) {
+    if (!content && !imageItems(attachmentScope(COMPOSE_SCOPE_NEW_MESSAGE)).length) {
         showToast('Please enter a message', 'warning');
         contentInput.focus();
         return;
@@ -2321,9 +2571,12 @@ async function handleSendNewMessage() {
     }
 
     const submittedGeneration = _exchangeGeneration;
+    const submittedAttachmentScope = attachmentScope(COMPOSE_SCOPE_NEW_MESSAGE);
     setComposePending(COMPOSE_SCOPE_NEW_MESSAGE, true);
     try {
         const result = await postJsonDetailed('/api/messages/', payload);
+        removeSentAttachments(submittedAttachmentScope, payload.attachment_ids || []);
+        refreshReplyAttachments(); refreshNewAttachments();
         if (submittedGeneration !== _exchangeGeneration) { document.dispatchEvent(new CustomEvent('von:conversation-contribution')); return; }
 
         resetComposeFailureUi(COMPOSE_SCOPE_NEW_MESSAGE);

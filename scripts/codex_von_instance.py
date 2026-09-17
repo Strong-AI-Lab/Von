@@ -170,6 +170,7 @@ def lifecycle(spec, request):
         if action == "reconcile":
             config = dict(spec["worker_config"])
             config["agent_name"] = spec["agent_name"]
+            config["display_name"] = spec["agent_name"]
             config["instance_state_path"] = str(state_path)
             settings = {**state.get("execution_overrides", {}), **settings}
             for key, dest in (

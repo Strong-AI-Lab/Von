@@ -2451,6 +2451,19 @@ def _ensure_relationship_extent_index_indexes(coll: Collection) -> None:
 
 def _ensure_chat_prompt_queue_indexes(coll: Collection) -> None:
     existing_indexes = {idx["name"] for idx in coll.list_indexes()}
+    if "workflow_continuation_due" not in existing_indexes:
+        coll.create_index(
+            [
+                ("workflow_continuation.next_check_at", ASCENDING),
+                ("queue_id", ASCENDING),
+            ],
+            name="workflow_continuation_due",
+            partialFilterExpression={
+                "workflow_continuation.status": "waiting",
+                "status": "queued",
+                "dispatch_ready": False,
+            },
+        )
     if "status_cancellation_requested_id" not in existing_indexes:
         # Recovery polls even when no cancellation is pending. Keep that empty
         # lookup off the full queue while preserving oldest-request ordering.

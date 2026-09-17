@@ -49,6 +49,24 @@ def verify(target, commit):
     ):
         if not (target / name).is_file():
             raise runtime.DeploymentError("Incomplete worker release: " + name)
+    # Older coherent releases predate the shared retry module. They remain valid
+    # rollback targets; newer workers must carry their actual imported dependency.
+    if (
+        "codex_von_retry" in (target / "scripts/codex_von_worker.py").read_text()
+        and not (target / "scripts/codex_von_retry.py").is_file()
+    ):
+        raise runtime.DeploymentError(
+            "Incomplete worker release: scripts/codex_von_retry.py"
+        )
+    if "codex_von_supervision" in (target / "scripts/codex_von_worker.py").read_text():
+        for dependency in (
+            "scripts/codex_von_supervision.py",
+            "src/backend/services/task_reporting_service.py",
+        ):
+            if not (target / dependency).is_file():
+                raise runtime.DeploymentError(
+                    "Incomplete worker release: " + dependency
+                )
     return {
         "commit": commit,
         "backend_root": str(target),

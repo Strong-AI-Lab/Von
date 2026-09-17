@@ -336,12 +336,10 @@ def _resolve_creation_actor_context(
 
     if actor_org_id is None:
         try:
-            from flask import has_request_context, session as flask_session
+            from ..security.access_control import get_effective_organisation_concept_id
 
-            if has_request_context():
-                org_raw = flask_session.get("organisation_concept_id")
-                if isinstance(org_raw, str) and org_raw.strip():
-                    actor_org_id = org_raw.strip()
+            # A window's Personal selection is authoritative, including None.
+            actor_org_id = get_effective_organisation_concept_id()
         except Exception:
             actor_org_id = None
 
@@ -1982,9 +1980,15 @@ def resolve_concept_display_names(
             return 1
         return 2 if candidate else 3
 
+    from .conversation_concept_service import resolve_conversation_names
+
+    conversation_names = resolve_conversation_names(docs_by_id.values())
     type_rank = {"NL": 0, "ABBR": 1}
     resolved: Dict[str, str] = {}
     for concept_id, concept_doc in docs_by_id.items():
+        if concept_id in conversation_names:
+            resolved[concept_id] = conversation_names[concept_id]
+            continue
         candidates: list[tuple[tuple[int, int, str, str], str]] = []
         for row in rows_by_concept.get(concept_id, []):
             if not isinstance(row, dict):
@@ -4578,7 +4582,115 @@ def update_concept_notes(
         return False
 
 
-def update_concept_description(concept_id: str, new_description: str) -> bool:
+def prepare_concept_description_update(
+    concept_id: str, new_description: str
+) -> Dict[str, Any]:
+    """Resolve the exact stored description and metadata before governed execution.
+
+    This reads canonical metadata but performs no write. The caller must pass the
+    same plan to the writer and the verifier, including the one edit timestamp.
+    """
+    existing_context: Dict[str, Any] = {}
+    existing_provenance: Dict[str, Any] = {}
+    cleaned_description, extracted_inline_metadata = (
+        extract_inline_description_metadata(new_description)
+    )
+    description_to_store = (
+        cleaned_description if cleaned_description.strip() else new_description
+    )
+
+    try:
+        existing_descriptions = get_texts_for_concept(
+            subject_concept_id=concept_id, predicate="hasDescription", limit=1
+        )
+        if existing_descriptions:
+            first = existing_descriptions[0]
+            if isinstance(first.get("context"), dict):
+                existing_context = dict(first["context"])
+            if isinstance(first.get("provenance"), dict):
+                existing_provenance = dict(first["provenance"])
+    except Exception as e:
+        logger.warning(
+            "update_concept_description: failed to read existing metadata for %s: %s",
+            concept_id,
+            e,
+        )
+        # Missing metadata is different from a failed read. Do not replace it
+        # with empty metadata when its canonical state could not be observed.
+        raise
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    provenance_payload: Dict[str, Any] = dict(existing_provenance)
+    context_payload: Dict[str, Any] = dict(existing_context)
+    if not provenance_payload:
+        provenance_payload["source"] = "update_concept_description"
+    provenance_payload["last_edited_at"] = now_iso
+    provenance_payload.setdefault("last_edited_by", "update_concept_description")
+    context_payload.setdefault("write_strategy", "relations_only_v2")
+
+    if extracted_inline_metadata:
+        if isinstance(extracted_inline_metadata.get("source"), str):
+            provenance_payload.setdefault(
+                "source_label", extracted_inline_metadata["source"]
+            )
+        if isinstance(extracted_inline_metadata.get("attribution"), str):
+            provenance_payload.setdefault(
+                "attribution", extracted_inline_metadata["attribution"]
+            )
+        if isinstance(extracted_inline_metadata.get("timestamp"), str):
+            provenance_payload.setdefault(
+                "upstream_timestamp", extracted_inline_metadata["timestamp"]
+            )
+        if isinstance(extracted_inline_metadata.get("parent"), str):
+            context_payload.setdefault(
+                "parent_concept_id", extracted_inline_metadata["parent"]
+            )
+        confidence_score = extracted_inline_metadata.get("confidence_score")
+        if isinstance(confidence_score, (int, float)):
+            context_payload.setdefault("confidence_score", float(confidence_score))
+        context_payload["inline_metadata_migrated"] = True
+
+    from .text_value_service import _compute_fingerprint, _prepare_persisted_text
+    from ..db.repositories.text_value_repository import TextValuesRepository
+
+    stored_text = _prepare_persisted_text(description_to_store)
+    # Reuse legacy values when the bytes match. A normalised fingerprint can
+    # otherwise alias a deliberate case/spacing edit to different stored text;
+    # use the existing exact-identity mode only for that collision.
+    identity_mode = "normalised"
+    existing_value = TextValuesRepository.find_one_by_fingerprint(
+        _compute_fingerprint(stored_text, "en"), "en"
+    )
+    if existing_value and existing_value.get("text") != stored_text:
+        identity_mode = "exact"
+        existing_value = TextValuesRepository.find_one_by_fingerprint(
+            _compute_fingerprint(stored_text, "en", identity_mode="exact"), "en"
+        )
+        if existing_value and existing_value.get("text") != stored_text:
+            raise ValueError(
+                "Exact description fingerprint resolved to different bytes"
+            )
+    if existing_value:
+        # Shared TextValues retain their original provenance on reuse. Bind
+        # verification to that observed value, without overwriting attribution.
+        provenance_payload = dict(existing_value.get("provenance") or {})
+    return {
+        "subject_concept_id": concept_id,
+        "predicate": "hasDescription",
+        "text": stored_text,
+        "lang": "en",
+        "provenance": provenance_payload,
+        "context": context_payload,
+        "identity_mode": identity_mode,
+    }
+
+
+def update_concept_description(
+    concept_id: str,
+    new_description: str,
+    *,
+    prepared_update: Optional[Dict[str, Any]] = None,
+) -> bool:
     """Update concept description using text_relations only (Phase 1 preserved_fields deprecation).
 
     Behaviour:
@@ -4612,76 +4724,11 @@ def update_concept_description(concept_id: str, new_description: str) -> bool:
             )
             return False
 
-        existing_context: Dict[str, Any] = {}
-        existing_provenance: Dict[str, Any] = {}
-        cleaned_description, extracted_inline_metadata = (
-            extract_inline_description_metadata(new_description)
+        prepared = prepared_update or prepare_concept_description_update(
+            concept_id, new_description
         )
-        description_to_store = (
-            cleaned_description if cleaned_description.strip() else new_description
-        )
-
         try:
-            existing_descriptions = get_texts_for_concept(
-                subject_concept_id=concept_id, predicate="hasDescription", limit=1
-            )
-            if existing_descriptions:
-                first = existing_descriptions[0]
-                if isinstance(first.get("context"), dict):
-                    existing_context = dict(first["context"])
-                if isinstance(first.get("provenance"), dict):
-                    existing_provenance = dict(first["provenance"])
-        except Exception as e:  # pragma: no cover
-            logger.warning(
-                "update_concept_description: failed to read existing metadata for %s: %s",
-                concept_id,
-                e,
-            )
-
-        try:
-            now_iso = datetime.now(timezone.utc).isoformat()
-            provenance_payload: Dict[str, Any] = dict(existing_provenance)
-            context_payload: Dict[str, Any] = dict(existing_context)
-            if not provenance_payload:
-                provenance_payload["source"] = "update_concept_description"
-            provenance_payload["last_edited_at"] = now_iso
-            provenance_payload.setdefault(
-                "last_edited_by", "update_concept_description"
-            )
-            context_payload.setdefault("write_strategy", "relations_only_v2")
-
-            if extracted_inline_metadata:
-                if isinstance(extracted_inline_metadata.get("source"), str):
-                    provenance_payload.setdefault(
-                        "source_label", extracted_inline_metadata["source"]
-                    )
-                if isinstance(extracted_inline_metadata.get("attribution"), str):
-                    provenance_payload.setdefault(
-                        "attribution", extracted_inline_metadata["attribution"]
-                    )
-                if isinstance(extracted_inline_metadata.get("timestamp"), str):
-                    provenance_payload.setdefault(
-                        "upstream_timestamp", extracted_inline_metadata["timestamp"]
-                    )
-                if isinstance(extracted_inline_metadata.get("parent"), str):
-                    context_payload.setdefault(
-                        "parent_concept_id", extracted_inline_metadata["parent"]
-                    )
-                confidence_score = extracted_inline_metadata.get("confidence_score")
-                if isinstance(confidence_score, (int, float)):
-                    context_payload.setdefault(
-                        "confidence_score", float(confidence_score)
-                    )
-                context_payload["inline_metadata_migrated"] = True
-
-            tv_payload = upsert_text_for_concept(
-                subject_concept_id=concept_id,
-                predicate="hasDescription",
-                text=description_to_store,
-                lang="en",
-                provenance=provenance_payload,
-                context=context_payload,
-            )
+            tv_payload = upsert_text_for_concept(**prepared)
             new_text_value_id = tv_payload.get("text_value_id")
             relation_id = tv_payload.get("relation_id")
             logger.info(

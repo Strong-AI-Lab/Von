@@ -627,7 +627,8 @@ export function initializeConceptAutocomplete(textareaElement) {
         const state = getOrCreateState(textareaElement);
         // Delay to allow click on dropdown items
         setTimeout(() => {
-            if (!state.dropdownPointerDown) {
+            if (activeTextarea === textareaElement && document.activeElement !== textareaElement
+                && !state.dropdownPointerDown) {
                 closeAutocomplete();
             }
         }, 150);

@@ -52,7 +52,6 @@ from ...services.concept_service import (
     get_concept_by_id,
     ConceptNotFoundError,
     resolve_concept_display_names,
-    update_concept_description,
 )
 from ...services.text_value_service import get_texts_for_concept, get_texts_for_concepts
 from ...services.concept_relation_service import build_concept_relations_payload
@@ -1435,21 +1434,11 @@ def update_description_route():
             )
 
         from ...services.ontology_mutation_command_service import (
-            execute_governed_ontology_method,
+            execute_governed_concept_description_update,
         )
 
-        governed = execute_governed_ontology_method(
-            method_name="update_concept",
-            arguments={
-                "concept_id": resolved_concept_id,
-                "update_data": {"description": description},
-                "request_id": data.get("request_id"),
-            },
-            mutate=lambda: {
-                "success": bool(
-                    update_concept_description(resolved_concept_id, description)
-                )
-            },
+        governed = execute_governed_concept_description_update(
+            resolved_concept_id, description
         )
         if governed.get("success") is False:
             return _governed_mutation_response(governed)
