@@ -206,7 +206,13 @@ def test_exact_worker_launch_uses_owned_transport_and_recovers_structured_result
         "organisation_id": "#V#org",
     }
     state = {"task_id": "#V#task", "checkout_prepared": True, "worktree": str(tmp_path)}
-    monkeypatch.setattr(worker, "Von", lambda config: SimpleNamespace())
+    starts = []
+    def start_execution(state):
+        assert state["prepared_at"] <= state["execution_started_at"]
+        assert state["started_at"] == state["execution_started_at"]
+        assert not state.get("active_turn")
+        starts.append(state["execution_started_at"])
+    monkeypatch.setattr(worker, "Von", lambda config: SimpleNamespace(start_execution=start_execution))
     monkeypatch.setattr(worker, "referenced_tasks", lambda *a: {"results": []})
     monkeypatch.setattr(worker, "stage_file_copy_evidence", lambda *a: {"results": []})
     observed = []
@@ -224,6 +230,8 @@ def test_exact_worker_launch_uses_owned_transport_and_recovers_structured_result
             lock.fileno(),
         )
     assert state["phase"] == "reporting"
+    assert len(starts) == 1
+    assert state["finished_at"] >= starts[0]
     assert state["result"]["status"] == "completed"
     assert state["active_turn"] is None
     active = next(binding for binding in observed if binding)

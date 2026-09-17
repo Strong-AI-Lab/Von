@@ -439,6 +439,7 @@ def test_git_preparation_failure_is_reported_without_losing_checkpoint(
 def test_interrupted_clone_recovers_with_independent_metadata_and_no_service_secrets(
     config, tmp_path, monkeypatch
 ):
+    monkeypatch.setattr(worker.Von, "start_execution", lambda *a, **kw: None)
     source = tmp_path / "source"
     run = worker.command
     run(["git", "init", "-b", "main", str(source)])

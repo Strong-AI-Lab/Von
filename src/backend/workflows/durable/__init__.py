@@ -13,7 +13,7 @@ Primary use cases:
 - Scheduled report generation
 - Multi-step research workflows
 
-See docs/engineering/durable_workflow_system_design.md for full specification.
+Historical design: https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/durable_workflow_system_design.md
 """
 
 from .models import (

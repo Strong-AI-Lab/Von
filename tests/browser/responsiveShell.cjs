@@ -57,6 +57,7 @@ async function noOverflow(page) {
             { name: 'desktop', width: 1440, height: 900 }
         ].filter(profile => !baseline || profile.name === 'desktop')) {
             const page = await browser.newPage({ viewport: profile, hasTouch: !!profile.touch, isMobile: !!profile.touch });
+            page.setDefaultTimeout(20000);
             await page.goto(`http://127.0.0.1:${server.address().port}`);
             await noOverflow(page);
             await expect(page.locator('#vonGoogleLoginButton')).toBeVisible();
@@ -81,7 +82,8 @@ async function noOverflow(page) {
                 const { CONVERSATION_NARROW_QUERY, loadConversationLayoutPreferences } = await import('/static/js/utils/conversationLayoutPreferences.js');
                 const tray = createConversationTray(workspace);
                 const refresh = () => {
-                    workspace.dataset.effectiveTabsLayout = matchMedia(CONVERSATION_NARROW_QUERY).matches ? 'horizontal' : 'vertical';
+                    workspace.dataset.effectiveTabsLayout = matchMedia(CONVERSATION_NARROW_QUERY).matches
+                        ? 'vertical' : loadConversationLayoutPreferences().layout;
                     tray.refresh(loadConversationLayoutPreferences());
                 };
                 refresh();
@@ -92,6 +94,10 @@ async function noOverflow(page) {
             await preparePage();
             await page.waitForTimeout(100);
             await noOverflow(page);
+            if (profile.touch) {
+                await expect(page.locator('#conversationWorkspace')).toHaveAttribute('data-effective-tabs-layout', 'vertical');
+                await expect(page.locator('#conversationTrayToggle')).toHaveAttribute('aria-expanded', 'true');
+            }
             const input = page.locator('#promptInput');
             await input.fill('Draft survives resizing and folding.');
             await page.locator('#sendButton').click({ trial: true });
@@ -143,10 +149,13 @@ async function noOverflow(page) {
                 const context = page.locator('#conversationTrayContext');
                 const selected = page.locator('#chatSessionTabs [aria-selected="true"]');
                 await expect(context).toHaveText('Current: Saved research conversation 11');
+                await toggle.click(); // Outside presses above dismiss the mobile panel.
                 await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+                await expect(page.locator('#conversationWorkspace')).toHaveAttribute('data-effective-tabs-layout', 'vertical');
+                await expect(page.locator('#conversationTrayResize')).toBeHidden();
                 const listBox = await page.locator('#chatSessionTabs').boundingBox();
                 const activeBox = await selected.boundingBox();
-                assert(activeBox.x >= listBox.x - 1 && activeBox.x + activeBox.width <= listBox.x + listBox.width + 1, 'active conversation revealed without reordering');
+                assert(activeBox.y >= listBox.y - 1 && activeBox.y + activeBox.height <= listBox.y + listBox.height + 1, 'active conversation revealed without reordering');
                 const longTitle = 'Research conversation with a deliberately long title about observations, provenance and the next collaborative steps';
                 await selected.locator('.chat-session-tab-label').evaluate((el, title) => { el.textContent = title; }, longTitle);
                 await expect(context).toHaveText(`Current: ${longTitle}`);
@@ -172,16 +181,37 @@ async function noOverflow(page) {
                 await expect(input).toHaveValue('Draft survives resizing and folding.');
                 await noOverflow(page);
                 if (evidence) await page.screenshot({ path: path.join(evidence, `${profile.name}-tray-collapsed.png`) });
+                await page.evaluate(() => localStorage.setItem('von:chatSessionTabsLayout', 'horizontal'));
                 await page.reload();
                 await preparePage();
                 await expect(toggle).toHaveAttribute('aria-expanded', 'false');
                 await expect(context).toHaveText('Current: Saved research conversation 11');
                 await toggle.click();
                 await expect(selected).toBeVisible();
-                await input.fill('Draft survives resizing and folding.');
+                assert.equal(await page.evaluate(() => localStorage.getItem('von:chatSessionTabsLayout')), 'horizontal');
                 if (evidence) await page.screenshot({ path: path.join(evidence, `${profile.name}-tray-reopened.png`) });
+                await selected.click();
+                await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+                await input.fill('Draft survives resizing and folding.');
+                for (const viewport of [{ width: 915, height: 412 }, { width: profile.width, height: profile.height }]) {
+                    await page.setViewportSize(viewport);
+                    await expect(input).toHaveValue('Draft survives resizing and folding.');
+                    await expect(selected).toHaveAttribute('aria-selected', 'true');
+                    await expect(page.locator('#conversationWorkspace')).toHaveAttribute('data-effective-tabs-layout', 'vertical');
+                    await toggle.click();
+                    await expect(selected).toBeVisible();
+                    await toggle.click();
+                    await expect(page.locator('#chatSessionTabs')).toBeHidden();
+                    await noOverflow(page);
+                }
             }
             if (trayOnly) {
+                await page.goto(`http://127.0.0.1:${server.address().port}/settings`);
+                for (const id of ['settingsConversationLayoutSelect', 'settingsConversationTrayHoverToggle']) {
+                    if (profile.touch) await expect(page.locator(`#${id}`)).toBeHidden();
+                    else await expect(page.locator(`#${id}`)).toBeVisible();
+                }
+                if (evidence) await page.screenshot({ path: path.join(evidence, `${profile.name}-settings.png`) });
                 console.log(JSON.stringify({ profile: profile.name, passed: true, scope: 'conversation tray', source: 'synthetic production-template fixture' }));
                 await page.close();
                 continue;
@@ -215,6 +245,10 @@ async function noOverflow(page) {
             await page.goto(`http://127.0.0.1:${server.address().port}/settings`);
             await noOverflow(page);
             await expect(page.locator('#preferredLanguageSelect')).toBeVisible();
+            for (const id of ['settingsConversationLayoutSelect', 'settingsConversationTrayHoverToggle']) {
+                if (profile.touch) await expect(page.locator(`#${id}`)).toBeHidden();
+                else await expect(page.locator(`#${id}`)).toBeVisible();
+            }
             if (evidence) await page.screenshot({ animations: 'disabled', path: path.join(evidence, `${profile.name}-settings.png`) });
             console.log(JSON.stringify({ profile: profile.name, passed: true, source: 'synthetic production-template fixture' }));
             await page.close();

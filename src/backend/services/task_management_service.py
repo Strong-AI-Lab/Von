@@ -2189,7 +2189,10 @@ def _build_task_response(
             except Exception:
                 pass
 
+    from .task_execution_timing_service import project as project_execution_timing
+
     return {
+        "execution_timing": project_execution_timing(metadata, status),
         "task_concept_id": task_concept_id,
         "title": title or doc.get("name", "Untitled Task"),
         "description": description,

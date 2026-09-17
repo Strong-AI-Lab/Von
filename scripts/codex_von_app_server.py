@@ -34,6 +34,7 @@ def run_turn(
     errors,
     permission_profile=None,
     checkpoint=lambda: None,
+    on_started=lambda: None,
     on_active=lambda thread, turn: None,
     steering=lambda: (),
     on_delivery=lambda message, status: None,
@@ -113,6 +114,7 @@ def run_turn(
             events.flush()
 
         try:
+            on_started()
             request(
                 "initialize",
                 {

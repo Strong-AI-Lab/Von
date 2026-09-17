@@ -314,6 +314,6 @@ This guide does not require:
   namespace, and private-data authority.
 - [Agent memory and enduring knowledge](agent_memory_and_enduring_knowledge.md)
   governs promotion into durable memory.
-- [Testing workflows and ephemeral theories](testing_workflows_ephemeral_theories_design.md)
-  and [Vontology tooling from KA/KR literature](vontology_tooling_from_ka_kcap_kr_literature.md)
+- [Testing workflows and ephemeral theories](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/testing_workflows_ephemeral_theories_design.md)
+  and [Vontology tooling from KA/KR literature](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/vontology_tooling_from_ka_kcap_kr_literature.md)
   are research and design inputs, not current implementation authority.

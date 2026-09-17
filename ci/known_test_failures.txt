@@ -24,7 +24,7 @@
 # being red on day one. It is a ratchet in the useful direction: the
 # accompanying test asserts it never grows. Removing an entry is the only
 # permitted edit. A guardrail that certifies its own growth is the failure mode
-# in docs/engineering/reliability_ratchet_articles_and_cases.md, so raising this
+# in the historical Reliability Ratchet case record (Von commit 5b2f8b976069), so raising this
 # baseline is deliberately not an option.
 #
 # Splitting this into "broken" and "needs a database" is worth doing; it would

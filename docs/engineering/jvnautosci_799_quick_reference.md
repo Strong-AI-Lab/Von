@@ -396,9 +396,9 @@ VON_LEGACY_JSON_TEXT_PARSING                # Force legacy (default: 0)
 ## Links
 
 - [Full Guide](structured_tool_calling_guide.md)
-- [Implementation Roadmap](jvnautosci_799_implementation_roadmap.md)
-- [Phase 0 Audit](jvnautosci_799_phase0_audit.md)
-- [Phases 1-2 Summary](jvnautosci_799_phases_1-2_summary.md)
+- [Implementation Roadmap](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/jvnautosci_799_implementation_roadmap.md)
+- [Phase 0 Audit](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/jvnautosci_799_phase0_audit.md)
+- [Phases 1-2 Summary](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/jvnautosci_799_phases_1-2_summary.md)
 - JIRA: JVNAUTOSCI-799
 - Related: JVNAUTOSCI-803 (LLM Workflows)
 

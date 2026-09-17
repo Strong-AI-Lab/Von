@@ -282,7 +282,7 @@ answer → produce the useful work → observe correction/outcome → revise the
 account → use it on a later independent task. Test a changed role-holder or
 non-applicable organisation too. Transfer useful practice, not a private alias,
 source-specific fact or permission. Use the existing
-[represented-advice proposal](represented_advice_design.md) if retaining a
+[represented-advice proposal](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/represented_advice_design.md) if retaining a
 general lesson is justified; do not add an automatic advice layer here.
 
 ## 6. Continuity and execution contract

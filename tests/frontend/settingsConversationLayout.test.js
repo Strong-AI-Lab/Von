@@ -11,7 +11,7 @@ const settingsTemplate = fs.readFileSync(path.resolve(__dirname, '../../src/fron
 
 beforeEach(() => {
     localStorage.clear();
-    window.matchMedia = jest.fn(() => ({ matches: false }));
+    window.matchMedia = jest.fn(() => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
     document.body.innerHTML = `<div id="chatTab"><div id="conversationWorkspace"><div class="chat-session-tabs-row"><div id="chatSessionTabs"></div></div><textarea id="draft">Unsent text</textarea></div></div>`;
     const template = document.createElement('template');
     template.innerHTML = settingsTemplate;
@@ -43,11 +43,12 @@ test('new desktop defaults left; Settings switches immediately without remountin
 });
 
 test('narrow/coarse layout and cross-window changes keep the explicit preference truthful', () => {
-    window.matchMedia = jest.fn(() => ({ matches: true }));
-    expect(loadLayout()).toEqual({ preferred: 'vertical', effective: 'horizontal' });
+    window.matchMedia = jest.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+    expect(loadLayout()).toEqual({ preferred: 'vertical', effective: 'vertical' });
     localStorage.setItem(CONVERSATION_LAYOUT_KEY, 'horizontal');
     window.dispatchEvent(new StorageEvent('storage', { key: CONVERSATION_LAYOUT_KEY, newValue: 'horizontal' }));
     expect(document.getElementById('settingsConversationLayoutSelect').value).toBe('horizontal');
-    window.matchMedia = jest.fn(() => ({ matches: false }));
+    expect(document.getElementById('conversationWorkspace').dataset.effectiveTabsLayout).toBe('vertical');
+    window.matchMedia = jest.fn(() => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
     expect(loadLayout()).toEqual({ preferred: 'horizontal', effective: 'horizontal' });
 });

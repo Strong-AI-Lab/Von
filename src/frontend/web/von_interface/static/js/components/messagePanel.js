@@ -65,6 +65,7 @@ let _deliveryKeySequence = 0;
 let _exchange = null;
 let _exchangeGeneration = 0;
 let _olderCursor = null;
+let _newerCursor = null;
 let _unreadJumpGeneration = null;
 let _readObserver = null;
 const _exchangeDrafts = new Map();
@@ -118,6 +119,7 @@ export async function openMessageExchange(row) {
     _exchange = { ...row, browser_scope: getSessionScopedOrgId() };
     resetMessagesViewportPosition();
     _olderCursor = null;
+    _newerCursor = null;
     if (!_messagesContainer) initializeMessagePanel();
     if (!_messagesContainer?.querySelector('#messageViewContent')) renderMessagesTabContent();
     _currentUserId = row.viewer_id;
@@ -167,7 +169,7 @@ export async function showMessageComposer() {
 }
 
 export async function refreshOpenMessageExchange() {
-    if (!_exchange || document.hidden || !document.getElementById('conversationWorkspace')?.classList.contains('show-message-exchange')) return;
+    if (!_exchange || _newerCursor || _unreadJumpGeneration !== null || document.hidden || !document.getElementById('conversationWorkspace')?.classList.contains('show-message-exchange')) return;
     await loadConversation(_currentConversationUserId, { silent: true });
 }
 
@@ -204,27 +206,21 @@ async function jumpToFirstUnread() {
     const stillCurrent = () => generation === _exchangeGeneration && org === getSessionScopedOrgId();
     updateMessageNavigation();
     try {
-        while (stillCurrent()) {
-            // Read markers can have gaps, and the catalogue count can be stale.
-            // Exhaust earlier pages before choosing the chronological first unread.
-            if (!_olderCursor) {
-                const target = content?.querySelector('.is-unread[data-contribution-id]');
-                if (target) {
-                    target.scrollIntoView({ block: 'start' });
-                    focusConversationTarget(target);
-                } else showUnreadNavigationStatus('No unread messages remain in this conversation.');
-                return;
-            }
-            const cursor = _olderCursor;
+        if (_olderCursor || _newerCursor) {
             const loaded = await loadConversation(_currentConversationUserId, {
-                silent: true, before: cursor, observeReads: false
+                silent: true, firstUnread: true, observeReads: false
             });
             if (!stillCurrent()) return;
-            if (!loaded || _olderCursor === cursor) {
+            if (!loaded) {
                 showUnreadNavigationStatus('Could not load earlier unread messages. Try jumping again.');
                 return;
             }
         }
+        const target = content?.querySelector('.is-unread[data-contribution-id]');
+        if (target) {
+            target.scrollIntoView({ block: 'start' });
+            focusConversationTarget(target);
+        } else showUnreadNavigationStatus('No unread messages remain in this conversation.');
     } finally {
         if (_unreadJumpGeneration === generation) _unreadJumpGeneration = null;
         if (stillCurrent()) {
@@ -254,7 +250,16 @@ function updateMessageNavigation() {
         unread.type = 'button';
         unread.className = 'message-jump-unread';
         unread.onclick = () => void jumpToFirstUnread();
-        const latest = createLatestMessageButton(() => {
+        const latest = createLatestMessageButton(async () => {
+            if (_isLoading) return;
+            const generation = _exchangeGeneration;
+            const org = getSessionScopedOrgId();
+            const loaded = !_newerCursor || await loadConversation(_currentConversationUserId, { latest: true });
+            if (generation !== _exchangeGeneration || org !== getSessionScopedOrgId()) return;
+            if (!loaded) {
+                showUnreadNavigationStatus('Could not load the latest messages. Try again.');
+                return;
+            }
             content.scrollTop = content.scrollHeight;
             focusConversationTarget(content.querySelector('.message-list')?.lastElementChild || content);
             updateMessageNavigation();
@@ -269,9 +274,9 @@ function updateMessageNavigation() {
     unread.textContent = jumping ? 'Loading unread messages…' : 'Jump to first unread';
     unread.disabled = jumping || _isLoading;
     unread.hidden = !jumping && !content.querySelector('.is-unread')
-        && !(_olderCursor && _exchange?.shared_unread_count > 0);
+        && !((_olderCursor || _newerCursor) && _exchange?.shared_unread_count > 0);
     setNavigationVisible(navigation.querySelector('.chat-scroll-to-end-btn'),
-        content.scrollHeight - content.scrollTop - content.clientHeight > 60);
+        Boolean(_newerCursor) || content.scrollHeight - content.scrollTop - content.clientHeight > 60);
 }
 
 function observeDisplayedMessages() {
@@ -580,7 +585,9 @@ function attachMessagesEventListeners() {
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => {
             if (_currentConversationUserId) {
-                loadConversation(_currentConversationUserId, { silent: true });
+                // Refresh is explicit navigation when reading an earlier window.
+                // Replace it with the latest page and reset both cursors.
+                loadConversation(_currentConversationUserId, { silent: true, latest: Boolean(_newerCursor) });
             }
         });
     }
@@ -879,8 +886,12 @@ function bindMessageStreamMenu(element, getOtherUserId) {
 /**
  * Load messages for a conversation with a specific user.
  */
-async function loadConversation(userId, { silent = false, before = null, observeReads = true } = {}) {
+async function loadConversation(userId, { silent = false, before = null, after = null, firstUnread = false, latest = false, observeReads = true } = {}) {
     if (_isLoading) return;
+    // Automatic refreshes (including partial read-ack recovery) must not join
+    // the latest page to an earlier window or move the reader away from it.
+    // Explicit Refresh/Latest and directional pagination remain available.
+    if (silent && _newerCursor && !before && !after && !firstUnread && !latest) return false;
     _isLoading = true;
     const generation = _exchangeGeneration;
     const org = getSessionScopedOrgId();
@@ -888,28 +899,42 @@ async function loadConversation(userId, { silent = false, before = null, observe
     if (contentEl && !silent && !_currentMessages.length) contentEl.innerHTML = '<div class="loading">Loading conversation…</div>';
     try {
         const response = _exchange
-            ? await postJson('/api/messages/exchange', { participant_ids: _exchange.participant_ids, organisation_concept_id: _exchange.organisation_concept_id || null, before })
+            ? await postJson('/api/messages/exchange', { participant_ids: _exchange.participant_ids, organisation_concept_id: _exchange.organisation_concept_id || null, before, ...(after ? { after } : {}), ...(firstUnread ? { first_unread: true } : {}) })
             : await getJson(`/api/messages/conversation/${encodeURIComponent(userId)}?limit=50`);
         if (generation !== _exchangeGeneration || org !== getSessionScopedOrgId() || userId !== _currentConversationUserId) return;
         const incoming = response.messages || [];
+        if (firstUnread && !incoming.length) {
+            // A successful scoped lookup supersedes stale catalogue/read markers.
+            _exchange.shared_unread_count = 0;
+            _currentMessages.forEach(message => {
+                const data = message.concept_data ||= {};
+                data.read_by = [...new Set([...(data.read_by || []), _currentUserId])];
+            });
+            updateUnreadMarkers();
+            return true;
+        }
         const compare = (a, b) => new Date(a.created_at) - new Date(b.created_at) || String(a.concept_id).localeCompare(String(b.concept_id));
         let nextMessages = incoming;
-        if (before) nextMessages = [...new Map([..._currentMessages, ...incoming].map(m => [m.concept_id, m])).values()].sort(compare);
-        else if (silent && incoming.length) {
+        if (before || after) nextMessages = [...new Map([..._currentMessages, ...incoming].map(m => [m.concept_id, m])).values()].sort(compare);
+        else if (silent && !firstUnread && !latest && incoming.length) {
             // Reconcile the returned range, including deletions and edits, while
-            // retaining already loaded earlier pages. A reconnect gap remains pageable.
+            // retaining earlier pages only when the returned page overlaps them.
             const overlap = incoming.some(m => _currentMessages.some(old => old.concept_id === m.concept_id));
-            if (!overlap && response.before) _olderCursor = response.before;
-            nextMessages = [..._currentMessages.filter(m => compare(m, incoming[0]) < 0), ...incoming];
+            if (!overlap && response.before) latest = true;
+            else nextMessages = [..._currentMessages.filter(m => compare(m, incoming[0]) < 0), ...incoming];
         }
         const sameContent = JSON.stringify(nextMessages.map(messageRenderKey)) === JSON.stringify(_currentMessages.map(messageRenderKey));
         _currentMessages = nextMessages;
-        if (silent && !before && sameContent) {
+        if (silent && !before && !after && !firstUnread && !latest && sameContent) {
             updateUnreadMarkers();
             if (observeReads) observeDisplayedMessages();
             return;
         }
-        if (before || !silent) _olderCursor = response.before || null;
+        if (firstUnread || latest || !silent) {
+            _olderCursor = response.before || null;
+            _newerCursor = response.after || null;
+        } else if (before) _olderCursor = response.before || null;
+        else if (after) _newerCursor = response.after || null;
         _currentUserId = response.current_user_id || null;
         _readObserver?.disconnect();
         _readObserver = null;
@@ -929,6 +954,11 @@ async function loadConversation(userId, { silent = false, before = null, observe
                 const earlier = document.createElement('button'); earlier.type = 'button'; earlier.textContent = 'Load earlier messages';
                 earlier.onclick = () => void loadConversation(userId, { silent: true, before: _olderCursor });
                 contentEl.prepend(earlier);
+            }
+            if (_newerCursor && contentEl) {
+                const later = document.createElement('button'); later.type = 'button'; later.textContent = 'Load later messages';
+                later.onclick = () => void loadConversation(userId, { silent: true, after: _newerCursor });
+                contentEl.append(later);
             }
             updateUnreadMarkers();
             if (contentEl) {

@@ -127,7 +127,7 @@ IDs. The explicit `provider:model` form remains the current concrete mechanism,
 not the desired end-state for learned or capability-based model selection.
 For the actor-critic learning loop that should produce and retire those
 capability certifications from real conversation rollouts, see
-`docs/engineering/automated_policy_learning_design.md`, especially the
+[historical automated-policy-learning proposal](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/automated_policy_learning_design.md), especially the
 `JVNAUTOSCI-2090` model-use learning section.
 
 ```json
@@ -283,7 +283,7 @@ Completed:
 
 Remaining:
 - Add tests for graph resolver
-- Update Conversation Turn Workflow doc (see [docs/Conversation Turn Workdlow.md](docs/Conversation%20Turn%20Workdlow.md))
+- Update Conversation Turn Workflow doc (see [docs/Conversation Turn Workdlow.md](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/Conversation%20Turn%20Workdlow.md))
 - Once graph parity is confirmed via diagnostics, consider deprecating JSON
 
 ## Diagnostic endpoint

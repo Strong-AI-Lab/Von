@@ -1077,6 +1077,8 @@ def message_exchange():
             ),
             limit=50,
             before=payload.get("before"),
+            after=payload.get("after"),
+            first_unread=payload.get("first_unread") is True,
         )
         for message in result["messages"]:
             message["_id"] = str(message.get("_id", ""))

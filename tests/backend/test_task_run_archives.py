@@ -295,6 +295,8 @@ def test_hash_readback_detects_storage_corruption(fixture):
 def test_exact_worker_launch_publishes_before_exit_and_downloads_after(
     fixture, tmp_path, monkeypatch
 ):
+    # Task timing persistence is exercised against canonical services separately.
+    monkeypatch.setattr(worker.Von, "start_execution", lambda *a, **kw: None)
     import sys
 
     from src.backend.server.routes import task_routes as routes
