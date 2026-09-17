@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import mongomock
 
 pytest.importorskip("fcntl", reason="The DGX worker uses a Unix host lock")
 spec = importlib.util.spec_from_file_location(
@@ -56,6 +57,10 @@ def isolated_archive_boundary(monkeypatch):
     # Existing controller tests isolate publication; canonical archive capture
     # and the real launch path are exercised in test_task_run_archives.py.
     monkeypatch.setattr(worker, "archive_checkpoint", lambda *a, **kw: True)
+    db = mongomock.MongoClient().worker_tests
+    monkeypatch.setattr(
+        "src.backend.services.task_dispatch_authority_service.get_db", lambda: db
+    )
 
 
 @pytest.fixture

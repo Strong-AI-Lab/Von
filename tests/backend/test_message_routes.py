@@ -53,6 +53,50 @@ def test_send_message_requires_authentication(monkeypatch, app_client):
 
 
 @pytest.mark.parametrize(
+    "extra,status,code",
+    [
+        ({"submit_mode": "steer"}, 409, "message_steering_unavailable"),
+        ({"metadata": {"submit_mode": "steer"}}, 409, "message_steering_unavailable"),
+        ({"submit_mode": None}, 400, "invalid_submit_intent"),
+        (
+            {"submit_mode": "queue", "metadata": {"submit_mode": "steer"}},
+            400,
+            "invalid_submit_intent",
+        ),
+        ({"submit_target": {"turn_id": "other-turn"}}, 400, "invalid_submit_intent"),
+        (
+            {"metadata": {"submit_target": {"turn_id": "other-turn"}}},
+            400,
+            "invalid_submit_intent",
+        ),
+    ],
+)
+def test_unsupported_submit_intent_cannot_be_persisted_as_queue(
+    monkeypatch, app_client, extra, status, code
+):
+    _, client = app_client
+    _authorise_test_direct_message(monkeypatch)
+
+    def unexpected(**kwargs):
+        pytest.fail("Unsupported intent must not write a message or launch work")
+
+    monkeypatch.setattr(message_routes, "create_message", unexpected)
+    monkeypatch.setattr(message_routes, "create_message_idempotently", unexpected)
+    response = client.post(
+        "/api/messages/",
+        json={
+            "recipient_ids": ["#V#user_bob"],
+            "content": "Preserve this draft",
+            **extra,
+        },
+    )
+    assert response.status_code == status
+    assert response.get_json()["error_code"] == code
+    if status == 409:
+        assert response.get_json()["effect_status"] == "not_applied"
+
+
+@pytest.mark.parametrize(
     ("exception_type", "expected_status", "expected_code"),
     [
         (
@@ -523,6 +567,7 @@ def test_send_message_returns_explicit_reused_receipt_without_duplicate_episode(
         "reused": True,
         "idempotent_replay": True,
         "delivery_status": "reused",
+        "submit_mode": "queue",
         "message_id": "#V#message_existing",
         "sent_at": "2026-08-28T05:00:00+00:00",
         "attribution": "Sent by Von on behalf of #V#user_alice",

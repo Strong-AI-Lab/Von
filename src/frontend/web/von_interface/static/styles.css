@@ -18951,8 +18951,8 @@ html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-bu
     box-shadow: 0 2px 8px #0f172a33; font-size: 0.875rem;
 }
 .chat-steering-toast[hidden], .chat-steering-activity[hidden] { display: none; }
-#sendButton[data-submit-mode="steer"] svg path { d: path('M6 19v-6a6 6 0 0 1 6-6h6m-5-5 5 5-5 5'); }
-#sendButton[data-submit-mode="queue"] svg { border-bottom: 2px solid currentColor; }
+.composer-submit-arrow[data-submit-mode="steer"] svg path { d: path('M6 19v-6a6 6 0 0 1 6-6h6m-5-5 5 5-5 5'); }
+.composer-submit-arrow[data-submit-mode="queue"] svg { border-bottom: 2px solid currentColor; }
 .chat-composer[data-steering-attention="true"] .composer-more-icon::after,
 .chat-composer[data-steering-attention="true"] .composer-add-icon::after { content: '•'; }
 #chatSubmitMode { min-height: 44px; max-width: 100%; }
@@ -18967,6 +18967,15 @@ html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-bu
 
 .unified-message-content .message-view-header { flex-wrap: nowrap; }
 
+/* Shared arrow semantics for normal chat and direct messages. */
+.composer-submit-arrow { width: 44px; height: 44px; min-width: 44px; min-height: 44px; border-radius: 50%; padding: 10px; flex-shrink: 0; }
+.composer-submit-arrow svg { display: block; width: 24px; height: 24px; }
+.message-compose-row .composer-submit-arrow, .message-modal-footer .composer-submit-arrow { width: 44px; padding: 10px; border-radius: 50%; }
+.message-submit-actions { align-self: flex-end; max-width: 100%; }
+.message-submit-actions .conversation-actions-panel { top: auto; bottom: 100%; }
+.message-submit-actions select { min-height: 44px; max-width: 100%; }
+.message-submit-actions p { font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+.message-modal-content > .message-submit-actions { margin: 0 20px 12px; }
 /* Keep the concept copy glyph tiny, with a usable task-detail hit target. */
 .task-copy-link-btn {
     min-width: 32px;

@@ -207,6 +207,7 @@ describe('message panel send failure recovery', () => {
         await flushUi();
 
         expect(postJsonDetailed).toHaveBeenNthCalledWith(2, '/api/messages/', {
+            submit_mode: 'queue',
             recipient_ids: ['#V#user_bob'],
             content: 'Please review the draft.',
             delivery_idempotency_key: expect.any(String),
@@ -390,8 +391,7 @@ describe('message panel send failure recovery', () => {
 
         expect(postJsonDetailed).toHaveBeenCalledTimes(1);
         expect(sendButton.disabled).toBe(true);
-        expect(sendButton.textContent).toBe('…');
-        expect(sendButton.getAttribute('aria-label')).toBe('Sending message');
+        expect(sendButton.getAttribute('aria-label')).toBe('Submitting message');
         expect(sendButton.getAttribute('aria-busy')).toBe('true');
         expect(replyInput.value).toBe('Please review this once.');
 
@@ -408,8 +408,7 @@ describe('message panel send failure recovery', () => {
         await flushUi();
 
         expect(sendButton.disabled).toBe(false);
-        expect(sendButton.querySelector('svg path').getAttribute('d')).toBe('M12 19V5m-7 7 7-7 7 7');
-        expect(sendButton.getAttribute('aria-label')).toBe('Send message');
+        expect(sendButton.getAttribute('aria-label')).toBe('Submit separate message');
         expect(sendButton.getAttribute('aria-busy')).toBe('false');
         expect(replyInput.value).toBe('Please review this once.');
 
@@ -429,8 +428,7 @@ describe('message panel send failure recovery', () => {
 
         expect(replyInput.value).toBe('');
         expect(sendButton.disabled).toBe(false);
-        expect(sendButton.querySelector('svg path').getAttribute('d')).toBe('M12 19V5m-7 7 7-7 7 7');
-        expect(sendButton.getAttribute('aria-label')).toBe('Send message');
+        expect(sendButton.getAttribute('aria-label')).toBe('Submit separate message');
     });
 
     test('new-message retries get new delivery keys after recipient or content changes', async () => {
@@ -466,7 +464,7 @@ describe('message panel send failure recovery', () => {
 
         expect(postJsonDetailed).toHaveBeenCalledTimes(1);
         expect(sendButton.disabled).toBe(true);
-        expect(sendButton.getAttribute('aria-label')).toBe('Sending message');
+        expect(sendButton.getAttribute('aria-label')).toBe('Submitting message');
         expect(recipientInput.disabled).toBe(true);
         expect(contentInput.disabled).toBe(true);
         sendButton.click();
@@ -500,7 +498,7 @@ describe('message panel send failure recovery', () => {
         expect(recipientInput.value).toBe('user_alice');
         expect(contentInput.value).toBe('Changed draft');
         expect(sendButton.disabled).toBe(false);
-        expect(sendButton.getAttribute('aria-label')).toBe('Send message');
+        expect(sendButton.getAttribute('aria-label')).toBe('Submit separate message');
     });
 
     test('new-message retry restores its exact recipient, draft, and key across render and module reload', async () => {

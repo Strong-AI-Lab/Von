@@ -40,6 +40,9 @@ def native_store(monkeypatch):
     db.concepts.create_index("concept_id", unique=True)
     monkeypatch.setattr("src.backend.db.mongo_client.get_db", lambda: db)
     monkeypatch.setattr(
+        "src.backend.services.task_dispatch_authority_service.get_db", lambda: db
+    )
+    monkeypatch.setattr(
         "src.backend.db.mongo_client.get_concepts_collection", lambda: db.concepts
     )
     monkeypatch.setattr(ConceptsRepository, "collection", lambda: db.concepts)

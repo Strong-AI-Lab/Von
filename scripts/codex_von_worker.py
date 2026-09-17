@@ -833,6 +833,21 @@ class Von:
             raise RuntimeError("Direct message canonical read-back failed")
         return message_id
 
+    def publish_steering_target(self, binding):
+        from src.backend.services.coding_agent_steering_service import publish
+
+        return publish(binding, delegator_id=self.config["delegator_id"])
+
+    def withdraw_steering_target(self, binding):
+        from src.backend.services.coding_agent_steering_service import withdraw
+
+        withdraw(binding)
+
+    def record_steering_delivery(self, message_id, binding, status):
+        from src.backend.services.coding_agent_steering_service import record_delivery
+
+        return record_delivery(message_id, binding, status)
+
     def start_execution(self, state, *, source="codex_dgx"):
         from src.backend.services import task_execution_timing_service as timing
 
@@ -1148,6 +1163,8 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         "capture_provenance",
         "archive_pending_reported",
         "finished_at",
+        "active_turn",
+        "steering_poll_error",
         "started_at",
         "execution_started_at",
         "execution_timing",
@@ -1234,6 +1251,14 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
     environment = {
         k: os.environ[k] for k in ("HOME", "PATH", "LANG", "TERM") if k in os.environ
     }
+    transport = config.get("codex_transport", "exec")
+    if transport not in {"exec", "app-server"}:
+        raise ValueError("Unsupported Codex transport")
+    if transport == "app-server":
+        launch_app_server(
+            config, api, state, state_path, settings, prompt, environment, lock_fd
+        )
+        return
     args = [
         config["codex_command"],
         "exec",
@@ -1341,6 +1366,81 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
     )
     recover_result(state)
     write_json(state_path, state)
+
+
+def launch_app_server(
+    config, api, state, state_path, settings, prompt, environment, lock_fd
+):
+    """Opt-in owner transport; the normal exec route remains unchanged.
+
+    Public message admission is a separate capability and remains unavailable.
+    The controller alone may publish an exact target and admit canonical inputs.
+    """
+    try:
+        from .codex_von_app_server import run_turn
+        from .codex_von_steering import ActiveInbox
+    except ImportError:
+        from codex_von_app_server import run_turn
+        from codex_von_steering import ActiveInbox
+
+    run_dir = Path(state["run_dir"])
+    save = lambda: write_json(state_path, state)
+    inputs = ActiveInbox(config, api, state, save)
+
+    def checkpoint():
+        if inputs.binding:
+            inputs.active(inputs.binding["thread_id"], inputs.binding["turn_id"])
+        archive_checkpoint(config, state)
+        save()
+
+    def started():
+        # Match exec: only a successfully spawned owned child starts the clock.
+        state["started_at"] = state["execution_started_at"] = datetime.now(UTC).isoformat()
+        save()
+        api.start_execution(state)
+        save()
+
+    returncode = 1
+    with (
+        (run_dir / "events.jsonl").open("a") as events,
+        (run_dir / "stderr.log").open("w") as errors,
+    ):
+        try:
+            result = run_turn(
+                command=config["codex_command"],
+                cwd=state["worktree"],
+                model=settings["model"],
+                effort=settings["reasoning_effort"],
+                prompt=prompt,
+                schema=RESULT_SCHEMA,
+                environment=environment,
+                lock_fd=lock_fd,
+                events=events,
+                errors=errors,
+                permission_profile=config.get("permission_profile"),
+                checkpoint=checkpoint,
+                on_started=started,
+                on_active=inputs.active,
+                steering=inputs.pending,
+                on_delivery=inputs.delivered,
+                interval=ACTIVITY_CHECKPOINT_SECONDS,
+            )
+            (run_dir / "result.json").write_text(result)
+            returncode = 0
+        except Exception as exc:
+            # Keep the outcome recoverable without copying backend/transport
+            # exception strings, which can include private connection details.
+            write_json(
+                run_dir / "launch-error.json",
+                {"error_type": type(exc).__name__, "transport": "app-server"},
+            )
+    state["finished_at"] = datetime.now(UTC).isoformat()
+    write_json(
+        run_dir / "exit.json",
+        {"returncode": returncode, "finished_at": state["finished_at"]},
+    )
+    recover_result(state)
+    save()
 
 
 def recover_result(state):

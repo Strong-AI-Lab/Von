@@ -4,9 +4,20 @@ import copy
 from types import SimpleNamespace
 
 import pytest
+import mongomock
 
 from scripts import codex_von_inbox as inbox
 from scripts import codex_von_worker as worker
+
+
+@pytest.fixture(autouse=True)
+def isolated_dispatch_authority(monkeypatch):
+    # Assignment checks now read this operational store as well as task data.
+    # Keep the real check, with an empty isolated store for these native tasks.
+    db = mongomock.MongoClient().inbox_tests
+    monkeypatch.setattr(
+        "src.backend.services.task_dispatch_authority_service.get_db", lambda: db
+    )
 
 
 @pytest.fixture
@@ -569,3 +580,35 @@ def test_exact_task_in_message_resolves_without_thread_projection(fixture):
     lookup = context["task_lookup"]["results"][0]
     assert lookup["status"] == "found"
     assert lookup["assignment_context"]["evidence"] == "file-copy reference"
+
+
+@pytest.mark.parametrize("mode", ["steer", "unknown", None])
+def test_unsupported_mode_reports_without_model_task_or_duplicate_execution(
+    fixture, monkeypatch, mode
+):
+    config, api, message, task, comments, sent, transitions, _ = fixture
+    message["submit_mode"] = mode
+    monkeypatch.setattr(
+        inbox.subprocess,
+        "run",
+        lambda *a, **k: pytest.fail(
+            "Cannot execute unsupported steering as queued input"
+        ),
+    )
+    assert inbox.tick(config, api, 0)
+    assert not inbox.tick(config, api, 0)
+    assert transitions == []
+    assert len(sent) == 1
+    receipt = next(iter(sent.values()))
+    assert "not applied" in receipt["content"]
+    assert receipt["reply_to_id"] == message["message_id"]
+    assert receipt["recipient_ids"] == [config["delegator_id"]]
+    assert task["status"] == "completed"
+
+
+def test_changed_mode_is_rechecked_before_reply_effect(fixture):
+    config, api, message, *_ = fixture
+    original = dict(message, submit_mode="steer")
+    message["submit_mode"] = "queue"
+    with pytest.raises(PermissionError, match="changed"):
+        inbox.authorise_source(config, api, original)

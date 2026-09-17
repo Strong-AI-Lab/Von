@@ -422,6 +422,37 @@ instruction does not authorise deployment of newly requested work.
 Several follow-ups queued before a coding run retain all their instructions
 and source-message identities, rather than replacing one another.
 
+The optional `codex_transport: "app-server"` replaces the coding task's `exec`
+child with one controller-owned stdio app-server under the same inherited lock.
+The default remains `exec`. The owner records the exact task/attempt/thread/turn
+in `active_turn`, preserves the configured model, effort and permission profile,
+and checks for explicitly bound steering during existing activity checkpoints.
+Queue messages stay with ordinary inbox processing. Steering is reserved before
+dispatch; an acknowledgement is recorded as accepted, never as model consumption.
+Lost acknowledgements remain uncertain and are not retried or converted to Queue.
+
+The existing owner publishes a short-lived operational observation of that exact
+binding and its task delegator. The message API resolves it only for the
+authenticated delegator in the shared organisation and rechecks the canonical
+assignment and current execution attempt before accepting Steer. A browser cannot
+publish a target. The owner refreshes its observation at existing checkpoints;
+withdrawal removes only its own binding. An unavailable owner leaves the draft
+intact and offers Queue explicitly.
+
+Admission stores the intended binding with the original message. Retries retain
+that binding and delivery key, including an ambiguous HTTP result. The owner
+records accepted, not-applied or uncertain receipts on the canonical message;
+retained receipt recovery never replays guidance. The message pane distinguishes
+stored/pending guidance from controller acceptance and does not claim model
+consumption from an acknowledgement.
+
+Production activation and real consumption evidence are separate from these
+code paths. The default `exec` owner and the current Mac stdio-only owner publish
+no target, so those routes continue to offer Queue. A Mac owner adapter/runtime
+choice remains outstanding in [PR #692](https://github.com/Strong-AI-Lab/Von/pull/692).
+Local protocol and browser fixtures do not establish provider identity,
+production activation or live consumption.
+
 The reply prompt permits relevant read-only host/repository inspection. Missing
 supplied facts do not establish that inspection is unavailable. Conditional
 coding requests are interpreted after that inspection; the inbox has no

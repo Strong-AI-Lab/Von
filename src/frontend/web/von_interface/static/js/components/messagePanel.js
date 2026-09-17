@@ -1,3 +1,4 @@
+import { createMessageSubmitControls } from './messageSubmitControls.js';
 import { createDictationController } from '../dictation.js';
 import { createMessageDraftControls, SEND_ICON as SEND_MESSAGE_ICON } from './conversationDraftControls.js';
 import { initialiseConversationActions } from './conversationActions.js';
@@ -52,6 +53,8 @@ let _isLoading = false;
 let _unreadCount = 0;
 let _replySendFailureState = null;
 let _newMessageSendFailureState = null;
+let _replySubmitControls;
+let _newSubmitControls;
 let _replySendPending = false;
 let _newMessageSendPending = false;
 let _replyContextPrefix = null;
@@ -91,6 +94,8 @@ function exchangeScope(row = _exchange) {
 }
 
 export function resetMessagePanelContext() {
+    _replySubmitControls?.dispose();
+    _newSubmitControls?.dispose();
     for (const controller of messageDictation.values()) controller.cancel();
     messageHistoryCursors.clear();
     clearReplyContext();
@@ -544,6 +549,15 @@ function renderMessagesTabContent() {
             fetchImpl: (url, options = {}) => fetch(url, { ...options, headers: { ...options.headers, [WINDOW_SESSION_HEADER]: getWindowSessionId() } })
         }));
     }
+    _replySubmitControls?.dispose();
+    _newSubmitControls?.dispose();
+    const submitControls = (button, onSubmit) => createMessageSubmitControls({
+        button, optionsPanel: button.closest('.message-draft-shell')?.querySelector('.composer-options-panel'),
+        getActor: readSessionActorConceptId, onSubmit, onSteer: () => onSubmit('steer'),
+        onUnavailable: text => showToast(text, 'error')
+    });
+    _replySubmitControls = submitControls(_messagesContainer.querySelector('#sendMessageBtn'), handleSendReply);
+    _newSubmitControls = submitControls(_messagesContainer.querySelector('#sendNewMessage'), handleSendNewMessage);
 
     // Attach event listeners
     attachMessagesEventListeners();
@@ -581,7 +595,7 @@ function attachMessagesEventListeners() {
     initialiseConversationDraft({
         input: _messagesContainer.querySelector('#messageInput'),
         sendButton: _messagesContainer.querySelector('#sendMessageBtn'),
-        onSubmit: handleSendReply,
+        onSubmit: event => _replySubmitControls.activate(event),
         onInput: syncVisibleReplyDeliveryAttempt,
         onHistory: event => {
             const history = _currentMessages.filter(message => message.relationships?.['#V#has_sender']?.[0] === _currentUserId)
@@ -599,7 +613,7 @@ function attachMessagesEventListeners() {
     initialiseConversationDraft({
         input: _messagesContainer.querySelector('#newMessageContent'),
         sendButton: _messagesContainer.querySelector('#sendNewMessage'),
-        onSubmit: handleSendNewMessage,
+        onSubmit: event => _newSubmitControls.activate(event),
         onInput: syncVisibleNewMessageDeliveryAttempt
     });
 
@@ -1291,6 +1305,7 @@ async function renderMessages(onRendered = () => {}) {
                 <div class="message-author" data-participant-id="${escapeHtml(senderId)}">${escapeHtml(formatUserName(senderId))}</div>
                 ${subject ? `<div class="message-subject">${escapeHtml(subject)}</div>` : ''}
                 <div class="message-content">${simpleMarkdownToHtml(content)}</div>
+                ${steeringReceiptLabel(msg) ? `<div class="message-steering-status" role="status">${escapeHtml(steeringReceiptLabel(msg))}</div>` : ''}
                 ${isRecommendationMessage ? `
                 <div class="message-recommendation-panel" data-message-recommendation-panel="1" data-message-id="${escapeHtml(msg.concept_id || '')}">
                     <div class="message-recommendation-header">
@@ -1433,9 +1448,7 @@ function renderComposePendingUi(scope) {
         if (composer) composer.dataset.hasAttachments = String(imageItems(attachmentScope(scope)).length > 0);
     }
     button.disabled = pending || imagesBlocked(attachmentScope(scope)) || (scope === COMPOSE_SCOPE_REPLY && _exchange?.other_participant_ids?.length > 1);
-    button.innerHTML = pending ? '<span aria-hidden="true">…</span>' : SEND_MESSAGE_ICON;
-    button.setAttribute('aria-label', pending ? 'Sending message' : 'Send message');
-    button.title = pending ? 'Sending message' : 'Send message';
+    (scope === COMPOSE_SCOPE_REPLY ? _replySubmitControls : _newSubmitControls)?.update(pending);
     button.setAttribute('aria-busy', pending ? 'true' : 'false');
 
     if (scope === COMPOSE_SCOPE_NEW_MESSAGE) {
@@ -1638,6 +1651,8 @@ function persistReplyDeliveryAttempt(attempt) {
             scope: attempt.scope,
             session_scope: attempt.sessionScope,
             recovery_state: attempt.recoveryState || null,
+            submit_mode: attempt.submitMode || 'queue',
+            submit_target: attempt.submitTarget || null,
         }));
     } catch (_) {
         // The in-memory attempt still protects the current rendered tab.
@@ -1712,6 +1727,8 @@ function readPersistedReplyDeliveryAttempt() {
         scope: normalisedScope,
         sessionScope,
         recoveryState,
+        submitMode: stored.submit_mode || 'queue',
+        submitTarget: stored.submit_target || null,
     };
 }
 
@@ -1749,6 +1766,8 @@ function persistNewMessageDeliveryAttempt(attempt) {
             scope: sessionScope,
             delivery_scope: attempt.scope,
             recovery_state: attempt.recoveryState || null,
+            submit_mode: attempt.submitMode || 'queue',
+            submit_target: attempt.submitTarget || null,
         }));
     } catch (_) {
         // The in-memory attempt still protects the current rendered tab.
@@ -1829,6 +1848,8 @@ function readPersistedNewMessageDeliveryAttempt() {
         scope: deliveryScope,
         sessionScope,
         recoveryState,
+        submitMode: stored.submit_mode || 'queue',
+        submitTarget: stored.submit_target || null,
     };
 }
 
@@ -2064,6 +2085,7 @@ function getOrCreateDeliveryIdempotencyKey({
     organisationConceptId,
     actorUserId,
     threadId,
+    submitMode = 'queue',
 }) {
     const deliveryScope = buildDeliveryScope({
         recipientIds,
@@ -2083,6 +2105,7 @@ function getOrCreateDeliveryIdempotencyKey({
     );
     if (
         currentAttempt?.fingerprint === fingerprint
+        && (currentAttempt.submitMode || 'queue') === submitMode
         && currentAttempt?.key
         && sameSessionScope
     ) {
@@ -2100,6 +2123,7 @@ function getOrCreateDeliveryIdempotencyKey({
     const key = createDeliveryIdempotencyKey();
     setDeliveryAttempt(scope, {
         fingerprint,
+        submitMode,
         key,
         draft,
         sessionScope,
@@ -2357,6 +2381,7 @@ function buildSendPayload({
     visibleDraft = content,
     visibleRecipient,
     threadId = '',
+    submitMode = 'queue',
 }) {
     const failureState = getComposeFailureState(scope);
     const organisationOptions = Array.isArray(failureState?.organisationOptions)
@@ -2385,10 +2410,12 @@ function buildSendPayload({
         visibleRecipient,
         organisationConceptId: selectedOrganisationConceptId,
         threadId,
+        submitMode,
     });
 
     return {
         recipient_ids: recipientIds,
+        submit_mode: submitMode,
         content,
         ...(attachmentIds.length ? {attachment_ids: attachmentIds} : {}),
         delivery_idempotency_key: deliveryIdempotencyKey,
@@ -2396,6 +2423,36 @@ function buildSendPayload({
             ? { organisation_concept_id: selectedOrganisationConceptId }
             : {}),
     };
+}
+
+async function prepareSteeringPayload(payload, scope) {
+    if (payload.submit_mode !== 'steer') return true;
+    const attempt = getDeliveryAttempt(scope);
+    if (attempt?.submitTarget) {
+        payload.submit_target = attempt.submitTarget;
+        return true; // Retry the exact original target; never silently retarget.
+    }
+    const generation = _exchangeGeneration;
+    const params = new URLSearchParams({ recipient_id: payload.recipient_ids[0], organisation_concept_id: payload.organisation_concept_id || '' });
+    const result = await getJson(`/api/messages/steering-target?${params}`);
+    if (getDeliveryAttempt(scope)?.key !== attempt?.key
+        || (scope === COMPOSE_SCOPE_REPLY && generation !== _exchangeGeneration)) return false;
+    if (!result.available || !result.submit_target) {
+        showToast(result.reason || 'Steering unavailable. Draft retained; choose Queue for separate work.', 'warning');
+        return false;
+    }
+    payload.submit_target = result.submit_target;
+    setDeliveryAttempt(scope, { ...attempt, submitTarget: result.submit_target });
+    return true;
+}
+
+function steeringReceiptLabel(message) {
+    if (message.concept_data?.metadata?.submit_mode !== 'steer') return '';
+    const status = message.concept_data?.steering_delivery?.status;
+    return ({ accepted: 'Guidance accepted by the intended turn; consumption not verified.',
+        not_applied: 'Guidance was not applied to the intended turn.',
+        uncertain: 'Guidance delivery is uncertain; it has not been retried or queued.' })[status]
+        || 'Guidance stored for the intended turn; delivery pending.';
 }
 
 /**
@@ -2411,7 +2468,7 @@ async function finishMessageDictation(scope) {
     finally { finishingDictation.delete(scope); }
 }
 
-async function handleSendReply() {
+async function handleSendReply(submitMode = 'queue') {
     if (messageDictation.get(COMPOSE_SCOPE_REPLY)?.hasPendingInput()
         && !await finishMessageDictation(COMPOSE_SCOPE_REPLY)) return;
     if (isComposePending(COMPOSE_SCOPE_REPLY)) {
@@ -2440,6 +2497,7 @@ async function handleSendReply() {
         content,
         visibleDraft,
         threadId: resolveCurrentReplyThreadId(),
+        submitMode,
     });
     if (!payload) {
         return;
@@ -2451,6 +2509,7 @@ async function handleSendReply() {
     messageHistoryCursors.delete(submittedAttachmentScope);
     setComposePending(COMPOSE_SCOPE_REPLY, true);
     try {
+        if (payload.submit_mode === 'steer' && !await prepareSteeringPayload(payload, COMPOSE_SCOPE_REPLY)) return;
         const result = await postJsonDetailed('/api/messages/', payload);
         removeSentAttachments(submittedAttachmentScope, payload.attachment_ids || []);
         refreshReplyAttachments(); refreshNewAttachments();
@@ -2469,7 +2528,7 @@ async function handleSendReply() {
         }
         _exchangeDrafts.delete(exchangeScope());
         document.dispatchEvent(new CustomEvent('von:conversation-contribution'));
-        showToast('Message sent', 'success');
+        showToast(payload.submit_mode === 'steer' ? 'Guidance stored; active-turn delivery pending.' : 'Message sent', 'success');
 
         if (_exchange && result.data?.conversation && result.data.conversation.session_id !== _exchange.session_id) {
             // An explicit organisation recovery starts its own exchange; it
@@ -2534,7 +2593,7 @@ function hideNewMessageModal({ force = false } = {}) {
 /**
  * Handle sending a new message from the modal.
  */
-async function handleSendNewMessage() {
+async function handleSendNewMessage(submitMode = 'queue') {
     if (messageDictation.get(COMPOSE_SCOPE_NEW_MESSAGE)?.hasPendingInput()
         && !await finishMessageDictation(COMPOSE_SCOPE_NEW_MESSAGE)) return;
     if (isComposePending(COMPOSE_SCOPE_NEW_MESSAGE)) {
@@ -2571,6 +2630,7 @@ async function handleSendNewMessage() {
         content,
         visibleDraft,
         visibleRecipient,
+        submitMode,
     });
     if (!payload) {
         return;
@@ -2580,6 +2640,7 @@ async function handleSendNewMessage() {
     const submittedAttachmentScope = attachmentScope(COMPOSE_SCOPE_NEW_MESSAGE);
     setComposePending(COMPOSE_SCOPE_NEW_MESSAGE, true);
     try {
+        if (payload.submit_mode === 'steer' && !await prepareSteeringPayload(payload, COMPOSE_SCOPE_NEW_MESSAGE)) return;
         const result = await postJsonDetailed('/api/messages/', payload);
         removeSentAttachments(submittedAttachmentScope, payload.attachment_ids || []);
         refreshReplyAttachments(); refreshNewAttachments();
@@ -2588,7 +2649,7 @@ async function handleSendNewMessage() {
         resetComposeFailureUi(COMPOSE_SCOPE_NEW_MESSAGE);
         setDeliveryAttempt(COMPOSE_SCOPE_NEW_MESSAGE, null);
         document.dispatchEvent(new CustomEvent('von:conversation-contribution'));
-        showToast('Message sent', 'success');
+        showToast(payload.submit_mode === 'steer' ? 'Guidance stored; active-turn delivery pending.' : 'Message sent', 'success');
         hideNewMessageModal({ force: true });
 
         if (result.data?.conversation) {

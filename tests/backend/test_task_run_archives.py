@@ -20,6 +20,9 @@ def fixture(tmp_path, monkeypatch):
     from src.backend.services.blob_store import LocalBlobStore
 
     db = mongomock.MongoClient().db
+    monkeypatch.setattr(
+        "src.backend.services.task_dispatch_authority_service.get_db", lambda: db
+    )
     monkeypatch.setattr(archives, "get_db", lambda: db)
     actor = {"id": "#V#worker", "org": "#V#org", "source": "trusted_local_operator"}
     monkeypatch.setattr(
