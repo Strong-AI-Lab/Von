@@ -72,6 +72,12 @@ The controlling design rule is:
 
 ## 2. Grounding and reading
 
+If `AGENTS_Private.md` exists at this repository's root, read it for supplementary
+local context and research routes. It is gitignored and optional; if absent,
+continue with the public guidance. Use relevant accessible research as background
+without treating it as governing authority or copying private material into
+public artefacts.
+
 Every agent must read this file before acting. Then use progressive disclosure:
 
 1. Inspect the current repo/worktree and the live authority or evidence surface

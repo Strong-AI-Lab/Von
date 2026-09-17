@@ -153,12 +153,34 @@ const server = http.createServer(async (req, res) => {
             await expect(target).toBeInViewport();
             assert.deepEqual(cursors, ['first_unread']);
             await page.screenshot({ path: path.join(evidence, `unread-${width}.png`) });
+            // Exercise the visible Refresh action, not the background helper.
+            await page.locator('#messageViewHeader summary').click();
+            await page.getByRole('button', { name: 'Refresh messages', exact: true }).click();
+            await expect(page.locator('[data-contribution-id="latest-00"]')).toBeVisible();
+            await expect(target).toHaveCount(0);
+            await expect(page.getByRole('button', { name: 'Load later messages', exact: true })).toHaveCount(0);
+            await expect(input).toHaveValue('A reply from the up-arrow control.');
+            assert.equal(sent.length, 0, 'refresh must preserve the unsent draft');
+            await page.screenshot({ path: path.join(evidence, `refreshed-${width}.png`) });
+            // Polling resumes once Refresh reaches latest, and the older cursor
+            // belongs to the latest window rather than the abandoned unread one.
+            const requestsBeforePoll = cursors.length;
+            await page.evaluate(async () => {
+                const panel = await import('/static/js/components/messagePanel.js');
+                await panel.refreshOpenMessageExchange();
+            });
+            assert.equal(cursors.length, requestsBeforePoll + 1);
+            await page.getByRole('button', { name: 'Load earlier messages', exact: true }).click();
+            await expect.poll(() => Boolean(pendingPage)).toBe(true);
+            assert.equal(cursors.at(-1), 'middle');
+            pendingPage(); pendingPage = null;
+            await expect(page.locator('[data-contribution-id="middle-0"]')).toBeVisible();
             await send.click();
             await expect(input).toHaveValue('');
             assert.equal(sent.length, 1);
             assert.equal(sent[0].content, 'A reply from the up-arrow control.');
             assert.deepEqual(errors, []);
-            results.push({ width, cursors: [...cursors], sendArrow: true, sendTarget: box, sends: sent.length, labelledLatestNavigation: true, defaultTopPreserved: true, backgroundPosition: bottomPosition, pendingAnchorOffset: anchor.offset, firstUnreadFocused: true, targetInViewport: true });
+            results.push({ width, cursors: [...cursors], manualRefreshReplacesWindow: true, manualRefreshPreservesDraft: true, pollingResumes: true, refreshedHistoryCursor: 'middle', sendArrow: true, sendTarget: box, sends: sent.length, labelledLatestNavigation: true, defaultTopPreserved: true, backgroundPosition: bottomPosition, pendingAnchorOffset: anchor.offset, firstUnreadFocused: true, targetInViewport: true });
             await page.close();
 
             // Real IntersectionObserver and confirmed HTTP receipt: the last

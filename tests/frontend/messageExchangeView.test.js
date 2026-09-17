@@ -463,3 +463,65 @@ test.each([0, 1])('post-read catalogue refresh reconciles stale counts after a r
     staleRefresh([exchange]);
     expect(document.querySelector('.message-jump-unread').hidden).toBe(true);
 });
+
+
+test('manager regression: manual refresh does not join disconnected unread and latest windows', async () => {
+    HTMLElement.prototype.scrollIntoView = jest.fn();
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValueOnce(page(['latest'], 'previous', [], 15))
+        .mockResolvedValueOnce({ ...page(['unread'], 'earlier', ['unread'], 1), after: 'later' });
+    await require(base + 'components/messagePanel.js').openMessageExchange({ ...row('#V#bob'), shared_unread_count: 1 });
+    document.querySelector('.message-jump-unread').click(); await flush();
+    expect(document.querySelector('[data-contribution-id="unread"]')).not.toBeNull();
+    api.postJson.mockResolvedValueOnce(page(['latest'], 'previous', [], 15));
+    document.getElementById('refreshMessagesBtn').click(); await flush();
+    const oldWindow = document.querySelector('[data-contribution-id="unread"]');
+    const newWindow = document.querySelector('[data-contribution-id="latest"]');
+    expect(Boolean(oldWindow && newWindow)).toBe(false);
+    expect(oldWindow).toBeNull();
+    expect(newWindow).not.toBeNull();
+    expect([...document.querySelectorAll('button')].some(el => el.textContent === 'Load later messages')).toBe(false);
+    // Normal refresh resumes, and history uses the new page's cursor.
+    const panel = require(base + 'components/messagePanel.js');
+    await panel.refreshOpenMessageExchange();
+    expect(api.postJson).toHaveBeenCalledTimes(4);
+    [...document.querySelectorAll('button')].find(el => el.textContent === 'Load earlier messages').click(); await flush();
+    expect(api.postJson.mock.calls.at(-1)[1].before).toBe('previous');
+});
+
+test('partial read receipt in an earlier window retains unread state and offers retry without joining latest', async () => {
+    HTMLElement.prototype.scrollIntoView = jest.fn();
+    const observers = mockReadObserver();
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValueOnce(page(['latest'], 'previous', [], 15))
+        .mockResolvedValueOnce({ ...page(['unread'], 'earlier', ['unread']), after: 'later' });
+    await require(base + 'components/messagePanel.js').openMessageExchange({ ...row('#V#bob'), shared_unread_count: 1 });
+    document.getElementById('messageInput').value = 'Keep this draft';
+    document.querySelector('.message-jump-unread').click(); await flush();
+    api.postJson.mockResolvedValueOnce({ success: true, updated_count: 0 });
+    observers.at(-1).callback([visibleEntry()]); await flush();
+    expect(api.postJson).toHaveBeenCalledTimes(3);
+    expect(document.querySelector('[data-contribution-id="latest"]')).toBeNull();
+    expect(document.querySelector('[data-contribution-id="unread"]').classList.contains('is-unread')).toBe(true);
+    const retry = document.querySelector('.message-read-status button');
+    expect(retry.textContent).toBe('Retry');
+    retry.click();
+    api.postJson.mockResolvedValueOnce({ success: true, updated_count: 1 });
+    observers.at(-1).callback([visibleEntry()]); await flush();
+    expect(document.querySelector('.is-unread')).toBeNull();
+    expect(document.getElementById('messageInput').value).toBe('Keep this draft');
+    expect([...document.querySelectorAll('button')].some(el => el.textContent === 'Load later messages')).toBe(true);
+});
+
+test('a refresh after a disconnected new arrival replaces the window and keeps history pageable', async () => {
+    const api = require(base + 'apiService.js');
+    api.postJson.mockResolvedValueOnce(page(['old'], 'old-history'));
+    const panel = require(base + 'components/messagePanel.js');
+    await panel.openMessageExchange(row('#V#bob'));
+    api.postJson.mockResolvedValueOnce(page(['new'], 'new-history', [], 15));
+    await panel.refreshOpenMessageExchange();
+    expect(document.querySelector('[data-contribution-id="old"]')).toBeNull();
+    expect(document.querySelector('[data-contribution-id="new"]')).not.toBeNull();
+    [...document.querySelectorAll('button')].find(el => el.textContent === 'Load earlier messages').click(); await flush();
+    expect(api.postJson.mock.calls.at(-1)[1].before).toBe('new-history');
+});

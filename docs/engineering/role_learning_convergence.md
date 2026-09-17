@@ -12,7 +12,7 @@
 - **Review trigger:** A pilot cycle finishes, a material premise changes,
   transfer is attempted, or programme work stops producing role evidence
 - **Supersedes:** The planning recommendations of the
-  [April role-learning review](jvnautosci_2011_role_learning_review_2026-04-24.md).
+  [April role-learning review](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/jvnautosci_2011_role_learning_review_2026-04-24.md).
   Its historical evidence remains intact.
 
 ## 1. Direction and meaning of convergence
@@ -143,9 +143,10 @@ that none exists. Missing expected events can themselves warrant attention.
 
 ## 6. Learning must close through later use
 
-The [represented-advice design](represented_advice_design.md) owns candidate
-semantics, applicability and lifecycle. Use it rather than building a second
-learning store. Learn from successful practice, demonstrations, discussion,
+The historical [represented-advice proposal](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/represented_advice_design.md) records candidate
+semantics, applicability and lifecycle as advisory background. Use the existing
+candidate store and the current task decision rather than creating a second
+learning store. The private working proposal is not required public guidance. Learn from successful practice, demonstrations, discussion,
 corrections, failures and delayed outcomes. Preserve who contributed what and
 when; later clarification cannot become evidence of earlier autonomous skill.
 
