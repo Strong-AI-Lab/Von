@@ -424,7 +424,7 @@ def launch(config, state, lock_fd):
             env=env,
             stdout=events,
             stderr=errors,
-            pass_fds=(lock_fd,),
+            pass_fds=(lock_fd, *config.get("_capacity_fds", ())),
             check=False,
         )
     write_json(run / "exit.json", {"returncode": completed.returncode})
@@ -624,7 +624,7 @@ def finish(config, api, state, path):
                 state["resume_applied"] = True
                 write_json(path, state)
             content += "\n\nThe task is queued for the additional work."
-        note = f"Question from {config['delegator_id']}:\n{message['content']}\n\nCodex DGX answer:\n{content}"
+        note = f"Question from {config['delegator_id']}:\n{message['content']}\n\nCoding-agent answer:\n{content}"
         state["effect_stage"] = "task_note"
         comments = task_comments(api, task_id)
         existing = next(
@@ -665,10 +665,10 @@ def finish(config, api, state, path):
         organisation_concept_id=config["organisation_id"],
         thread_id=task_id or message.get("thread_id"),
         reply_to_id=message["message_id"],
-        subject="Codex DGX reply",
+        subject=config.get("display_name", config.get("agent_name", config["agent_id"])) + " reply",
         content=state["report_content"],
         metadata={
-            "attribution": "Sent by the Codex DGX coding worker",
+            "attribution": "Sent by " + config["agent_id"],
             "source_message_id": message["message_id"],
         },
     )
@@ -724,7 +724,7 @@ def finish_or_retain(config, api, state, path):
                 recipient_ids=[config["delegator_id"]],
                 organisation_concept_id=config["organisation_id"],
                 reply_to_id=message["message_id"],
-                subject="Codex DGX recovery pending",
+                subject=config.get("display_name", config.get("agent_name", config["agent_id"])) + " recovery pending",
                 content=state.setdefault("failure_report_content", content),
             )
             row = api.messages.get_message_for_user(

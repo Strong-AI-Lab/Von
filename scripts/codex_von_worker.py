@@ -18,6 +18,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 import uuid
 from contextlib import ExitStack
 from datetime import UTC, datetime
@@ -40,6 +41,7 @@ except ImportError:
         from scripts import codex_von_supervision as supervision
 
 ACTIVITY_CHECKPOINT_SECONDS = 15
+INSTANCE_PROTOCOL_VERSION = 1
 
 ACTIVE = {"pending", "in_progress", "blocked"}
 RESULT_SCHEMA = {
@@ -101,9 +103,18 @@ def capability_context(config, *, read_only, worktree=None):
         "delegator_id": config["delegator_id"],
         "organisation_id": config["organisation_id"],
         "source_repo": config.get("source_repo"),
+        "approved_repository_roots": config.get("approved_repository_roots", []),
         "worktree": str(worktree) if worktree else None,
         "controller_runtime": config.get("runtime_evidence", {"available": False}),
         "public_served_revision": {"available": False, "reason": "Not probed here"},
+        "android_test_host": {
+            "enrolled": bool(config.get("android_instance_id")),
+            "instance_id": config.get("android_instance_id"),
+            "controller_tool": "coding_agent_android",
+            "readiness": "Must discover through the trusted controller for the current task",
+            "coverage": "Native emulator, not physical-device evidence",
+            "limitations": "This declaration does not itself expose a tool or grant host access.",
+        },
         "read_only_host_inspection": True,
         "run_can_edit_checkout": not read_only,
         "von_mcp": "disabled; canonical reads/effects belong to the controller",
@@ -809,9 +820,9 @@ class Von:
             recipient_ids=[c["delegator_id"]],
             organisation_concept_id=c["organisation_id"],
             thread_id=task["task_concept_id"],
-            subject=f"{c.get('display_name', c['agent_id'])}: {task['title']}",
+            subject=f"{c.get('display_name', c.get('agent_name', c['agent_id']))}: {task['title']}",
             content=content,
-            metadata={"attribution": "Sent by the Codex DGX coding worker"},
+            metadata={"attribution": "Sent by " + c["agent_id"]},
         )
         message_id = receipt.message["concept_id"]
         readback = self.messages.get_message_for_user(message_id, c["agent_id"])
@@ -920,7 +931,7 @@ class Von:
         content = (
             f"{result['summary']}\n\n{result['evidence']}\n\n"
             f"{result['question']}\n\nTask: {state['task_id']}\n"
-            f"DGX worktree: {state.get('worktree', 'not started')}\n"
+            f"Coding worktree: {state.get('worktree', 'not started')}\n"
             f"Run: {state['attempt']}"
         ).strip()
         if timing_receipt:
@@ -965,7 +976,7 @@ class Von:
             evidence_addition = (
                 f"{result['evidence']}\nVon result: {message_id}\n"
                 f"Execution archive: {capture.get('archive_url', 'unavailable')}\n"
-                f"DGX worktree: {state.get('worktree', 'not started')}"
+                f"Coding worktree: {state.get('worktree', 'not started')}"
             )
             evidence = task.get("evidence") or ""
             if evidence_addition not in evidence:
@@ -1274,6 +1285,22 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         ]
     else:
         args[2:2] = ["--sandbox", "workspace-write"]
+    try:
+        from . import codex_von_android_control as android_control
+    except ImportError:
+        try:
+            import codex_von_android_control as android_control
+        except ImportError:
+            from scripts import codex_von_android_control as android_control
+    android_root = android_control.prepare(config, state, worktree)
+    if android_root:
+        context["capabilities"]["android_test_host"].update(
+            request_path=str(android_root / "request.json"),
+            response_path=str(android_root / "response.json"),
+            instruction="Atomically write an operation object with action and a fresh request_id; read the matching response. No task/actor/host fields. Do not repeat uncertain gestures.",
+        )
+        write_json(context_path, context)
+    next_archive = time.monotonic() + ACTIVITY_CHECKPOINT_SECONDS
     with (  # noqa: SIM117 - streams must outlive the process context
         (run_dir / "events.jsonl").open("a") as events,
         (run_dir / "stderr.log").open("w") as errors,
@@ -1286,7 +1313,7 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
             env=environment,
             stdout=events,
             stderr=errors,
-            pass_fds=(lock_fd,),
+            pass_fds=(lock_fd, *config.get("_capacity_fds", ())),
         ) as process:
             # The child is alive and waiting for its authorised input. Queue,
             # checkout preparation and reservation are not execution time.
@@ -1300,11 +1327,38 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
             process.stdin.close()
             while True:
                 try:
-                    process.wait(timeout=ACTIVITY_CHECKPOINT_SECONDS)
+                    process.wait(
+                        timeout=2 if android_root else ACTIVITY_CHECKPOINT_SECONDS
+                    )
                     break
                 except subprocess.TimeoutExpired:
-                    archive_checkpoint(config, state)
-                    write_json(state_path, state)
+                    if android_root:
+                        try:
+                            android_control.poll(
+                                config,
+                                state,
+                                android_root,
+                                run_dir / "android-receipts",
+                            )
+                        except (OSError, ValueError):
+                            pass  # malformed/partially-written request cannot stop coding
+                    if time.monotonic() >= next_archive:
+                        archive_checkpoint(config, state)
+                        write_json(state_path, state)
+                        next_archive = time.monotonic() + ACTIVITY_CHECKPOINT_SECONDS
+    if android_root:
+        try:
+            write_json(
+                run_dir / "android-stop.json", android_control.stop(config, state)
+            )
+        except Exception as exc:
+            write_json(
+                run_dir / "android-stop.json",
+                {
+                    "error": type(exc).__name__,
+                    "cleanup": "Unverified; test-host idle recovery remains active",
+                },
+            )
     state["finished_at"] = datetime.now(UTC).isoformat()
     write_json(
         run_dir / "exit.json",
@@ -1478,9 +1532,9 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         receipt
     )
     if success:
-        result["summary"] += (
-            f" Deployed and verified the public server at {commit[:12]}."
-        )
+        result[
+            "summary"
+        ] += f" Deployed and verified the public server at {commit[:12]}."
     else:
         result["status"] = "blocked"
         result["summary"] += (
@@ -1491,9 +1545,9 @@ def apply_deployment(config, api, state, state_path, lock_fd):
         )
     if recover_only:
         result["status"] = "blocked"
-        result["summary"] += (
-            " The task changed; only the interrupted deployment was reconciled."
-        )
+        result[
+            "summary"
+        ] += " The task changed; only the interrupted deployment was reconciled."
     write_json(state_path, state)
 
 
@@ -1758,7 +1812,7 @@ def tick(config, api, lock_fd):
                 if state.get("pending_admission")
                 else ""
             )
-            + f"I am picking up this task on the DGX: {task['title']}.\nTask: {task_id}\n"
+            + f"I am picking up this assigned coding task: {task['title']}.\nTask: {task_id}\n"
             "I will send the result or a question here. Reply in this task thread or add a task comment.",
         )
         api.tasks.update_task_status(
@@ -1822,12 +1876,33 @@ def main():
     config = json.loads(Path(options.config).read_text())
     state_root = Path(config["state_root"])
     state_root.mkdir(parents=True, exist_ok=True)
-    with (state_root / "worker.lock").open("a") as lock:
+    with (state_root / "worker.lock").open("a") as lock, ExitStack() as admission_stack:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             print('{"outcome":"already_running"}')
             return
+        if config.get("instance_state_path"):
+            instance = json.loads(Path(config["instance_state_path"]).read_text())
+            if any(
+                instance.get(key) != config[key]
+                for key in ("agent_id", "delegator_id", "organisation_id")
+            ):
+                raise PermissionError(
+                    "Instance scope differs from worker configuration"
+                )
+            if instance.get("desired_state") != "running" and not options.check_task:
+                print('{"outcome":"paused"}')
+                return
+        try:
+            from .codex_von_capacity import admission
+        except ImportError:
+            from codex_von_capacity import admission
+        capacity_fds = admission_stack.enter_context(admission(config))
+        if capacity_fds is None:
+            print(json.dumps({"outcome": "waiting_for_capacity"}), flush=True)
+            return
+        config["_capacity_fds"] = capacity_fds
         backend_root = bind_backend_root(options.backend_root)
         resolve_execution_settings(config, {})
         from src.backend.integrations.internal_mcp.gateway import (

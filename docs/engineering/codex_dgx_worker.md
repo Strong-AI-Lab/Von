@@ -159,6 +159,11 @@ operator profile; it is not a hardened boundary against a hostile host user.
 
 ## Installation
 
+For multiple prepared accounts/organisations, use the
+[instance lifecycle](coding_agent_instances.md), including shared host capacity.
+Do not duplicate an existing identity's poller. The legacy installation below
+remains valid for an existing single consumer.
+
 Use a dedicated Codex home with ChatGPT subscription login, an explicit
 non-Sol model, and a working native Linux sandbox. Keep the API-key Codex home
 separate. The launcher should unset `OPENAI_API_KEY` and `CODEX_API_KEY`, set
