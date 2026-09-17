@@ -26282,10 +26282,32 @@ def _task_generic_output_schema(action: str) -> Schema:
             "total": (int, type(None)),
             "offset": (int, type(None)),
             "limit": (int, type(None)),
+            **(
+                {
+                    "reporting_resolution": dict,
+                    "default_reporting_resolution": dict,
+                    "reporting_warnings": list,
+                }
+                if action in {"create", "get"}
+                else {}
+            ),
         },
         allow_unknown=True,
         description=(
             f"task_{action} output: task operation response with success/error fields and operation-specific payload."
+            + (
+                " reporting_resolution is the effective target; default_reporting_resolution "
+                "is the actor-visible immediate assignee supervisor even when overridden. "
+                "Both contain status, source and concept_id (nullable); lookup_failed also "
+                "contains error_type. Status is resolved, unset, ambiguous, self_reference, "
+                "assignee_inaccessible, supervisor_inaccessible or lookup_failed. "
+                "reporting_warnings is an advisory list: reporting_override_differs_from_default "
+                "includes code, supplied_concept_id, default_concept_id, supplied_source and "
+                "default_source. It is empty unless an explicit target differs from an "
+                "accessible unambiguous default. Explicit choices are preserved."
+                if action in {"create", "get"}
+                else ""
+            )
         ),
     )
 
@@ -45150,7 +45172,13 @@ def _build_default_catalogue_task_and_workflow_definitions() -> List[MethodDefin
                 "execute the recorded work, send mail, or create a calendar event. "
                 "Assignment defaults to the authenticated actor. Explicit assignee_id "
                 "or assignee_concept_id may select Von or an eligible coding agent in "
-                "the actor's organisation. report_to_concept_id may select the actor. "
+                "the actor's organisation. report_to_concept_id (alias reports_to_concept_id) "
+                "may select the actor and takes precedence. Omit it to derive the assignee's "
+                "immediate #V#has_supervisor at runtime without persisting a reporting target. "
+                "Read reporting_resolution, default_reporting_resolution and reporting_warnings "
+                "on creation, canonical read-back and retries. A differing explicit target "
+                "produces an advisory reporting_override_differs_from_default warning only "
+                "when that default is accessible and unambiguous; it does not reject the choice. "
                 "Read the returned assignee and execution preferences when reporting "
                 "responsibility. Standalone native coding-agent tasks do not require "
                 "project or collection membership for worker eligibility; eligibility "

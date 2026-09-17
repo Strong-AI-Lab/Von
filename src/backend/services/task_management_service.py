@@ -1783,9 +1783,9 @@ def create_task(
             "Task-created workflow launch skipped for %s: %s", task_concept_id, e
         )
 
-    from .task_reporting_service import resolve_task_reporting
+    from .task_reporting_service import task_reporting_projection
 
-    result["reporting_resolution"] = resolve_task_reporting(result)
+    result.update(task_reporting_projection(result))
     return result
 
 
@@ -1802,10 +1802,10 @@ def get_task(task_concept_id: str) -> Dict[str, Any]:
         TaskNotFoundError: If task not found
     """
     task_concept_id, doc = _get_task_doc(task_concept_id)
-    from .task_reporting_service import resolve_task_reporting
+    from .task_reporting_service import task_reporting_projection
 
     result = {**_build_task_response(doc), "current_work_product": resolve_task_work_product(doc)}
-    result["reporting_resolution"] = resolve_task_reporting(result)
+    result.update(task_reporting_projection(result))
     return result
 
 
@@ -1840,7 +1840,11 @@ def find_task_by_agent_creation_fingerprint(
         not in _relationship_id_list(relationships.get(PREDICATE_HAS_CREATED_BY))
     ):
         return None
-    return _build_task_response(doc)
+    from .task_reporting_service import task_reporting_projection
+
+    result = _build_task_response(doc)
+    result.update(task_reporting_projection(result))
+    return result
 
 
 def _build_task_responses(
