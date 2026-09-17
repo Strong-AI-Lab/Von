@@ -761,12 +761,64 @@ through `task_execution_timing_service.start` and `finish` (also available as
   Planned start/due dates and generic `updated_at` are not used. No historical
   timestamps are fabricated during upgrade.
 
-Cost is explicitly `unknown` with a null amount/currency. Codex `turn.completed`
-records can contain token usage, but the subscription execution route supplies
-no trustworthy per-task monetary receipt or applicable price basis. This slice
-does not sum parent/child calls or treat subscription tokens as an API invoice.
-Attributable usage/cost needs separate controller-owned backlog work; it is not
-a timing acceptance gate.
+### Coding-attempt usage and cost
+
+The DGX controller reads its retained `events.jsonl` after timing acceptance and
+uses `task_execution_timing_service.record_usage` to persist the observation on
+the existing attempt. `get_task`, task listings and HTTP task detail project it
+under `execution_timing.attempts[].usage`, with the task-local observed subtotal
+under `execution_timing.usage`. No new consumer, model call or billing credential
+is involved. The model-produced result is not a usage source.
+
+The supported source is a fresh `codex exec --json` invocation with one root
+thread, one started turn and one unambiguous completed-turn receipt. The
+[official event example](https://learn.chatgpt.com/docs/non-interactive-mode#make-output-machine-readable)
+supplies input, cached-input and output counters. Receipts retain the source,
+thread ID, provider turn ID when exposed (otherwise null with local ordinal 1),
+configured model separately from the unknown observed model/provider, and the
+SHA-256 of the retained event bytes. Raw prompts and tool contents stay outside
+task metadata. These observations are controller-captured CLI reports, not
+independently verified provider billing receipts.
+
+- Coverage is **partial**, even with valid root counters: child and external
+  tool coverage is unknown. Nested child/tool records are never added to a root
+  aggregate. Missing, malformed, multi-thread or multi-turn streams remain
+  **unknown**; resumed/cumulative thread counters are not guessed attempt deltas.
+- Repeated canonical delivery replaces nothing and adds nothing. A new attempt
+  retains its own receipt; identical aggregates from the same thread count once
+  in the task subtotal. Conflicting observations of a reused thread exclude that
+  whole thread from the subtotal and expose `conflicting_threads`. Different
+  fresh root threads count as separate work. This is a task-local subtotal, not
+  a cross-task billing ledger.
+- `observed_total_tokens` adds input and output only: cached input is a subset
+  of input. No observations yields null, not zero. Unknown attempts remain
+  visible alongside observed counters. Historical attempts are not backfilled.
+- Usage recording failure retains `usage_recording_error_type` in controller
+  state and reports the limitation without blocking timing or completion. A
+  replay of `finish_execution` can retry accounting; there is no additional
+  automatic accounting retry consumer. Unknown receipts can be enriched by a
+  later observation; an already observed receipt cannot silently change.
+
+Cost remains explicitly `unknown` with a null amount/currency. Neither inspected
+subscription route supplies a trustworthy per-task monetary receipt or an
+applicable price basis. No actual charge or estimated allocation is fabricated
+from API prices, configured model names or subscription token counts.
+
+The operator-owned bridge source inspected on 17 September 2026 (hash below)
+binds `consumer_thread` at `begin` and checks it at `resume`, but exposes no token
+receipt or task-specific turn interval. With the existing timing patch and the
+matching backend, its shared `finish_execution` records **unknown** usage with
+that thread ID and source `codex_vscode.consumer_thread`. A thread can contain
+other work, so its lifetime counters cannot be attributed to the task. No
+private conversation or Codex database is scanned for accounting.
+
+Acceptance uses the existing controller with a fixture executable emitting
+documented events, followed by canonical service/message read-back, repeated
+delivery, retry and conflicting-thread cases, and a usage-persistence failure.
+The operator patch replay below also verifies explicit unknown usage. Run
+`tests/backend/test_coding_execution_usage.py` alongside the timing tests. This
+proves repository behaviour against isolated canonical services; activation and
+live attempt observations require the operator's normal release boundary.
 
 ### Operator-owned VS Code bridge integration
 

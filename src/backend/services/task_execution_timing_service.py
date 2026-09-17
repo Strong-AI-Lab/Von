@@ -9,6 +9,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime
 
+from . import coding_execution_usage as usage
 from .task_project_home_service import guard_task_write
 
 KEY = "execution_timing"
@@ -65,6 +66,7 @@ def project(metadata, status):
         "duration_basis": "elapsed wall clock, including waits; not active coding time",
         "attempts": attempts,
         "completion_history": completions,
+        "usage": usage.project(attempts),
         "cost": {
             "status": "unknown",
             "amount": None,
@@ -113,6 +115,26 @@ def _actor(task, actor):
         or task.get("assignee_concept_id") != actor
     ):
         raise PermissionError("Execution timing must be recorded by the assigned actor")
+
+
+@guard_task_write
+def record_usage(task_concept_id, *, attempt_id, actor_concept_id, receipt):
+    """Persist controller-observed usage independently of timing acceptance."""
+    from . import task_management_service as tasks
+
+    usage.validate(receipt)
+    _actor(tasks.get_task(task_concept_id), actor_concept_id)
+
+    def apply(timing, doc):
+        attempt = _attempt(timing, attempt_id)
+        if not attempt or attempt["actor_concept_id"] != actor_concept_id:
+            raise ValueError("Usage requires the actor's existing execution attempt")
+        prior = attempt.get("usage")
+        if prior and prior != receipt and prior["coverage"] != "unknown":
+            raise ValueError("Attempt already has a different usage receipt")
+        attempt["usage"] = deepcopy(receipt)
+
+    return _change(task_concept_id, apply)
 
 
 @guard_task_write

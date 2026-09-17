@@ -325,6 +325,10 @@ def test_mac_operator_patch_supported_path(
     receipt = api.task(task_id)["execution_timing"]
     assert receipt["completed_at"]
     assert receipt["attempts"][0]["source"] == "codex_vscode"
+    assert receipt["attempts"][0]["usage"]["coverage"] == "unknown"
+    assert receipt["attempts"][0]["usage"]["thread_id"] == "fixture-thread"
+    assert receipt["attempts"][0]["usage"]["source"] == "codex_vscode.consumer_thread"
+    assert receipt["usage"]["observed_tokens"] is None
     assert (
         receipt["completed_at"]
         in messages["vscode-task:" + request["attempt"] + ":result"]
