@@ -267,7 +267,16 @@ def list_exchanges(
     }
 
 
-def get_exchange(actor, participants, *, organisation=None, limit=50, before=None):
+def get_exchange(
+    actor,
+    participants,
+    *,
+    organisation=None,
+    limit=50,
+    before=None,
+    after=None,
+    first_unread=False,
+):
     if (
         not actor
         or not isinstance(participants, list)
@@ -275,47 +284,90 @@ def get_exchange(actor, participants, *, organisation=None, limit=50, before=Non
         or len(participants) > 50
     ):
         raise PermissionError("Conversation unavailable.")
+    if sum(bool(value) for value in (before, after, first_unread)) > 1:
+        raise ValueError("Choose one message navigation direction.")
+    limit = min(50, max(1, limit))
     query = _query(actor, organisation)
     query["$expr"] = {"$setEquals": [participant_expression(), participants]}
-    if before:
+    collection = get_concepts_collection()
+    if collection is None:
+        raise RuntimeError("Messages unavailable.")
+
+    def cursor(row):
+        return {
+            "created_at": row["created_at"].isoformat(),
+            "concept_id": row["concept_id"],
+        }
+
+    anchor = before or after
+    if first_unread:
+        # Locate the earliest visible unread without transporting/rendering the
+        # entire exchange. Keep the exact same actor, organisation and group ACL.
+        unread_query = {
+            "$and": [
+                query,
+                {
+                    f"relationships.{PREDICATE_RECIPIENT}": actor,
+                    "concept_data.read_by": {"$ne": actor},
+                },
+            ]
+        }
+        unread = next(
+            iter(
+                collection.find(unread_query, {"created_at": 1, "concept_id": 1})
+                .sort([("created_at", 1), ("concept_id", 1)])
+                .limit(1)
+            ),
+            None,
+        )
+        if unread is None:
+            return {
+                "messages": [],
+                "has_more": False,
+                "before": None,
+                "after": None,
+                "current_user_id": actor,
+            }
+        anchor = cursor(unread)
+    if anchor:
         from .chat_history_service import _coerce_datetime
 
-        timestamp = _coerce_datetime(before.get("created_at"))
-        if not timestamp or not isinstance(before.get("concept_id"), str):
+        if not isinstance(anchor, dict):
             raise ValueError("Invalid message cursor.")
+        timestamp = _coerce_datetime(anchor.get("created_at"))
+        if not timestamp or not isinstance(anchor.get("concept_id"), str):
+            raise ValueError("Invalid message cursor.")
+        comparison = "$lt" if before else "$gt"
         query.setdefault("$and", []).append(
             {
                 "$or": [
-                    {"created_at": {"$lt": timestamp}},
+                    {"created_at": {comparison: timestamp}},
                     {
                         "created_at": timestamp,
-                        "concept_id": {"$lt": before["concept_id"]},
+                        "concept_id": {
+                            "$gte" if first_unread else comparison: anchor["concept_id"]
+                        },
                     },
                 ]
             }
         )
-    collection = get_concepts_collection()
-    if collection is None:
-        raise RuntimeError("Messages unavailable.")
+    forward = bool(after or first_unread)
+    direction = 1 if forward else -1
     rows = list(
         collection.find(query)
-        .sort([("created_at", -1), ("concept_id", -1)])
+        .sort([("created_at", direction), ("concept_id", direction)])
         .limit(limit + 1)
     )
     more = len(rows) > limit
     rows = rows[:limit]
-    cursor = (
-        {
-            "created_at": rows[-1]["created_at"].isoformat(),
-            "concept_id": rows[-1]["concept_id"],
-        }
-        if more and rows
-        else None
-    )
+    if not forward:
+        rows.reverse()
     return {
-        "messages": list(reversed(rows)),
+        "messages": rows,
         "has_more": more,
-        "before": cursor,
+        # A seek window may have earlier history; one empty page is harmless.
+        "before": cursor(rows[0]) if rows and (forward or more) else None,
+        "after": cursor(rows[-1]) if rows and forward and more else None,
         "current_user_id": actor,
     }
 
