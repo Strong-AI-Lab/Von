@@ -203,3 +203,133 @@ def test_technical_scientific_talk_workflow_materialises_and_verifies_representa
         for row in status_rows
         if isinstance(row, dict)
     )
+
+@pytest.mark.parametrize(
+    "workflow_id",
+    [
+        TALK_REPRESENTATION_WORKFLOW_ID,
+        TECHNICAL_SCIENTIFIC_TALK_REPRESENTATION_WORKFLOW_ID,
+        ACADEMIC_PRESENTATION_INSTANCE_WORKFLOW_ID,
+    ],
+)
+def test_sparse_existing_presentation_reuses_identity_idempotently(
+    _reset_mock_db: Any,
+    workflow_id: str,
+) -> None:
+    bootstrap_canonical_talk_representation_workflows()
+    existing_id = "#V#existing_programme_presentation"
+    concept_service.create_concept(
+        concept_id=existing_id,
+        name="Existing programme presentation",
+        parent_concept_ids=["#V#presentation"],
+        create_as_instance=True,
+    )
+    definition = load_workflow_definition_from_vontology(workflow_id)
+    executor = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=20,
+    )
+    from src.backend.db.mongo_client import get_db
+
+    before = set(get_db().concepts.distinct("concept_id"))
+    for _ in range(2):
+        result = executor.run(
+            definition,
+            environment=WorkflowEnvironment(
+                llm_client=None,
+                user_namespace="#V#test_user",
+            ),
+            data={"presentation_concept_id": existing_id},
+        )
+        assert result.completed, (result.error, result.data.get("last_action_error"))
+        assert result.data["presentation_concept_id"] == existing_id
+        assert result.data["talk_representation_verified"] is True
+        assert (
+            result.data["materialisation_report"]["created_presentation_concept"]
+            is False
+        )
+    assert set(get_db().concepts.distinct("concept_id")) == before
+
+
+def test_direct_talk_accepts_title_without_optional_meeting_fields(_reset_mock_db: Any):
+    bootstrap_canonical_talk_representation_workflows()
+    definition = load_workflow_definition_from_vontology(
+        TALK_REPRESENTATION_WORKFLOW_ID
+    )
+    result = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=20,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None, user_namespace="#V#test_user"),
+        data={"title": "Sparse new presentation"},
+    )
+    assert result.completed, (result.error, result.data.get("last_action_error"))
+    assert result.data["talk_representation_verified"] is True
+
+
+@pytest.mark.parametrize("title", [None, "Workshop programme"])
+def test_batch_ids_are_not_silently_converted_to_a_new_presentation(
+    _reset_mock_db: Any,
+    title: str | None,
+):
+    bootstrap_canonical_talk_representation_workflows()
+    from src.backend.db.mongo_client import get_db
+
+    before = set(get_db().concepts.distinct("concept_id"))
+    definition = load_workflow_definition_from_vontology(
+        TALK_REPRESENTATION_WORKFLOW_ID
+    )
+    data = {"existing_presentation_concept_ids": ["#V#talk_one", "#V#talk_two"]}
+    if title:
+        data["title"] = title
+    result = WorkflowExecutor(
+        registry=registry_factory.build_durable_action_registry(),
+        max_transitions=20,
+    ).run(
+        definition,
+        environment=WorkflowEnvironment(llm_client=None, user_namespace="#V#test_user"),
+        data=data,
+    )
+    assert not result.data.get("talk_representation_materialised")
+    assert "talk_representation_requires_single_presentation" in str(
+        result.data.get("last_action_error")
+    )
+    assert set(get_db().concepts.distinct("concept_id")) == before
+
+
+def test_reviewed_v1_migrates_optional_inputs_without_forced_publication(
+    _reset_mock_db: Any,
+    tmp_path,
+    monkeypatch,
+):
+    import json
+    from src.backend.services import (
+        talk_representation_workflow_vontology_service as service,
+    )
+
+    path = service._REPO_SEED_ASSET_PATH
+    legacy = json.loads(path.read_text())
+    legacy["seed_version"] = "1"
+    legacy.pop("known_legacy_authority_payload_sha256_by_seed_version")
+    for mapping in legacy["workflows"][0]["publication_spec"]["steps"][0][
+        "context_input_mapping_specs"
+    ]:
+        mapping["required"] = True
+    old_path = tmp_path / "legacy.json"
+    old_path.write_text(json.dumps(legacy))
+    monkeypatch.setattr(service, "_REPO_SEED_ASSET_PATH", old_path)
+    service.bootstrap_canonical_talk_representation_workflows()
+    old = load_workflow_definition_from_vontology(TALK_REPRESENTATION_WORKFLOW_ID)
+    assert (
+        "presentation_concept_id"
+        in old.states[old.initial_state].metadata["reads_context_keys"]
+    )
+    monkeypatch.setattr(service, "_REPO_SEED_ASSET_PATH", path)
+    report = service.bootstrap_canonical_talk_representation_workflows()
+    assert report["publication"]["counts"]["errors"] == 0
+    assert report["publication"]["counts"]["workflows_published"] == 1
+    current = load_workflow_definition_from_vontology(TALK_REPRESENTATION_WORKFLOW_ID)
+    assert not current.states[current.initial_state].metadata.get("reads_context_keys")
+    repeat = service.bootstrap_canonical_talk_representation_workflows()
+    assert repeat["publication"]["skipped"] is True

@@ -2,7 +2,7 @@
   "family_id": "talk_representation_workflow_seed_bundle",
   "managed_by": "talk_representation_workflow_vontology_service",
   "schema_version": "repo_seed_workflow_bundle.v1",
-  "seed_version": "1",
+  "seed_version": "2",
   "source_tag": "JVNAUTOSCI-1459",
   "supported_action_ids": [
     "talk.normalise_inputs",
@@ -12,8 +12,8 @@
   ],
   "workflows": [
     {
-      "content": "Represent a talk by normalising presentation inputs, materialising or reusing the presentation concept, linking the presenter, and verifying the requested talk representation profile.",
-      "description": "Canonical durable workflow for representing talks and presentations in Vontology from structured meeting and speaker inputs.",
+      "content": "Normalise one presentation, materialise or reuse its explicit concept ID, link its presenter when supplied, and verify the requested fields. Optional meeting and speaker fields may be omitted. A programme list of existing_presentation_concept_ids must first be resolved into separate per-presentation inputs by the caller; it is not the singular presentation_concept_id.",
+      "description": "Represent one talk or presentation from structured inputs: provide presentation_concept_id to reuse an existing concept, or title to create one. This is not a programme/batch enrichment or source-text recovery workflow.",
       "display_name": "Talk Representation Workflow",
       "publication_spec": {
         "initial_state": "normalise_inputs",
@@ -27,67 +27,67 @@
               {
                 "concept_id": "#V#workflow_mapping_talk_representation_workflow_normalise_inputs_presentation_concept_id_to_presentation_concept_id_parameter",
                 "context_key": "presentation_concept_id",
-                "required": true,
+                "required": false,
                 "tool_param": "presentation_concept_id"
               },
               {
                 "concept_id": "#V#workflow_mapping_talk_representation_workflow_normalise_inputs_title_to_title_parameter",
                 "context_key": "title",
-                "required": true,
+                "required": false,
                 "tool_param": "title"
               },
               {
                 "concept_id": "#V#workflow_mapping_talk_representation_workflow_normalise_inputs_speaker_name_to_speaker_name_parameter",
                 "context_key": "speaker_name",
-                "required": true,
+                "required": false,
                 "tool_param": "speaker_name"
               },
               {
                 "concept_id": "#V#workflow_mapping_talk_representation_workflow_normalise_inputs_summary_to_summary_parameter",
                 "context_key": "summary",
-                "required": true,
+                "required": false,
                 "tool_param": "summary"
               },
               {
                 "concept_id": "#V#workflow_mapping_talk_representation_workflow_normalise_inputs_start_time_to_start_time_parameter",
                 "context_key": "start_time",
-                "required": true,
+                "required": false,
                 "tool_param": "start_time"
               },
               {
                 "concept_id": "#V#workflow_mapping_talk_representation_workflow_normalise_inputs_meeting_link_to_meeting_link_parameter",
                 "context_key": "meeting_link",
-                "required": true,
+                "required": false,
                 "tool_param": "meeting_link"
               },
               {
                 "concept_id": "#V#workflow_mapping_talk_representation_workflow_normalise_inputs_meeting_id_to_meeting_id_parameter",
                 "context_key": "meeting_id",
-                "required": true,
+                "required": false,
                 "tool_param": "meeting_id"
               },
               {
                 "concept_id": "#V#workflow_mapping_talk_representation_workflow_normalise_inputs_meeting_passcode_to_meeting_passcode_parameter",
                 "context_key": "meeting_passcode",
-                "required": true,
+                "required": false,
                 "tool_param": "meeting_passcode"
               },
               {
                 "concept_id": "#V#workflow_mapping_talk_representation_workflow_normalise_inputs_presentation_status_to_presentation_status_parameter",
                 "context_key": "presentation_status",
-                "required": true,
+                "required": false,
                 "tool_param": "presentation_status"
               },
               {
                 "concept_id": "#V#workflow_mapping_talk_representation_workflow_normalise_inputs_presentation_type_ids_to_presentation_type_ids_parameter",
                 "context_key": "presentation_type_ids",
-                "required": true,
+                "required": false,
                 "tool_param": "presentation_type_ids"
               },
               {
                 "concept_id": "#V#workflow_mapping_talk_representation_workflow_normalise_inputs_verification_profile_to_verification_profile_parameter",
                 "context_key": "verification_profile",
-                "required": true,
+                "required": false,
                 "tool_param": "verification_profile"
               }
             ],
@@ -1168,5 +1168,22 @@
         "Capability-gap note: this workflow depends on Python durable actions because current VWL/runtime primitives cannot yet express a reusable, deterministic representation-materialisation primitive for concept creation/update plus postcondition verification. Workflow #V#academic_presentation_instance_workflow should migrate fully into VWL once the runtime can declaratively express stable concept reuse, singleton text upserts, relationship writes, and verification against required representation predicates."
       ]
     }
-  ]
+  ],
+  "known_legacy_authority_payload_sha256_by_seed_version": {
+    "#V#talk_representation_workflow": {
+      "1": [
+        "10121992e1bfe7d848eabc4dbf325dd5bd73caabfd40c7b1a15365ebb2ed9f5b"
+      ]
+    },
+    "#V#technical_scientific_talk_representation_workflow": {
+      "1": [
+        "37b003e5b07ced18137c37e4a7a45e0a5cd07afcdd94d2b100ecf1a50bb7d961"
+      ]
+    },
+    "#V#academic_presentation_instance_workflow": {
+      "1": [
+        "7ca0537839d2f03b85ee7250e1d38297f1f26d073a1f2f99ce9dd56df2a318ee"
+      ]
+    }
+  }
 }
