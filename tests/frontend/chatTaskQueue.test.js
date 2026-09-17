@@ -179,9 +179,11 @@ describe('chat task queue', () => {
             });
             expect(generateBody.model).not.toContain('gemini:');
             const { createTurnModelPicker } = require('../../src/frontend/web/von_interface/static/js/components/turnModelPicker.js');
-            document.body.insertAdjacentHTML('beforeend', '<select id="temporaryModel"><option value="">Default</option></select><p id="temporaryStatus"></p><button id="temporaryClear"></button>');
+            document.body.insertAdjacentHTML('beforeend', '<select id="temporaryModel"><option value="">Default</option></select><select id="temporaryReasoning"></select><p id="temporaryStatus"></p><button id="temporaryClear"></button>');
             const select = document.getElementById('temporaryModel');
             const picker = createTurnModelPicker({ select,
+                reasoningSelect: document.getElementById('temporaryReasoning'),
+                loadCapabilities: async () => ({ parameters: { reasoning_effort: { supported: true, allowed_values: ['low', 'high'] } } }),
                 status: document.getElementById('temporaryStatus'),
                 clearButton: document.getElementById('temporaryClear'),
                 loadModels: async provider => provider === 'openai' ? ['gpt-6-astra'] : [] });
@@ -189,17 +191,21 @@ describe('chat task queue', () => {
             require(chatTabModulePath).__testOnly_setTurnModelPicker(picker);
             select.value = JSON.stringify({ model: 'gpt-6-astra', model_provider: 'openai' });
             select.dispatchEvent(new Event('change'));
+            await Promise.resolve();
+            const reasoning = document.getElementById('temporaryReasoning');
+            reasoning.value = 'high';
+            reasoning.dispatchEvent(new Event('change'));
             document.getElementById('promptInput').value = 'Use stronger model once';
             await sendMessage();
-            expect(generateBody).toMatchObject({ model: 'gpt-6-astra', model_provider: 'openai', model_parameters: {} });
+            expect(generateBody).toMatchObject({ model: 'gpt-6-astra', model_provider: 'openai', model_parameters: { reasoning_effort: 'high' } });
             expect(picker.peek()).toBeNull();
             document.getElementById('promptInput').value = 'Use default again';
             await sendMessage();
             expect(generateBody).toMatchObject({ model: 'gemini-3.7-flash', model_provider: 'gemini', model_parameters: { reasoning_effort: 'high' } });
             // A retained queue choice must survive later default changes.
             await sendMessage({ fromQueue: true, promptOverride: 'Queued stronger turn', sessionId: 'session-1',
-                executionEnvelope: { model: 'gpt-6-astra', model_provider: 'openai', model_parameters: {} } });
-            expect(generateBody).toMatchObject({ model: 'gpt-6-astra', model_provider: 'openai', model_parameters: {} });
+                executionEnvelope: { model: 'gpt-6-astra', model_provider: 'openai', model_parameters: { reasoning_effort: 'high' } } });
+            expect(generateBody).toMatchObject({ model: 'gpt-6-astra', model_provider: 'openai', model_parameters: { reasoning_effort: 'high' } });
             require(chatTabModulePath).__testOnly_setTurnModelPicker(null);
         } finally {
             localStorage.removeItem('von:localModelPreference');
@@ -299,7 +305,7 @@ describe('chat task queue', () => {
         expect(generateBodies).toHaveLength(1);
         expect(document.getElementById('sendButton').textContent).toBe('Queue Prompt');
 
-        const temporaryChoice = { model: 'gpt-6-astra', model_provider: 'openai', model_parameters: {} };
+        const temporaryChoice = { model: 'gpt-6-astra', model_provider: 'openai', model_parameters: { reasoning_effort: 'high' } };
         const picker = { peek: () => temporaryChoice, take: jest.fn(() => temporaryChoice), clear: jest.fn() };
         require(chatTabModulePath).__testOnly_setTurnModelPicker(picker);
         promptInput.value = 'Second draft';

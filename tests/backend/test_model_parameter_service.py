@@ -159,3 +159,45 @@ def test_gemini_37_reasoning_effort_maps_to_supported_thinking_levels(
         )
         == {}
     )
+
+
+def test_registry_only_astra_capability_reaches_both_openai_transports(monkeypatch):
+    import src.backend.services.model_parameter_service as mod
+
+    policy = {'action': 'allow', 'allowed_values': ['low', 'high'], 'source': 'configured_registry'}
+    monkeypatch.setattr(mod, '_registry_parameter_policy', lambda **kw: policy)
+    capability = mod.build_model_parameter_capabilities(
+        provider='openai', model='gpt-6-astra', include_registry=True,
+    )['parameters']['reasoning_effort']
+    assert capability['supported'] is True
+    assert capability['allowed_values'] == ['low', 'high']
+    assert mod.openai_responses_kwargs_from_model_parameters(
+        {'reasoning_effort': 'high'}, model='gpt-6-astra'
+    ) == {'reasoning': {'effort': 'high'}}
+    assert mod.openai_chat_completions_kwargs_from_model_parameters(
+        {'reasoning_effort': 'high'}, model='gpt-6-astra'
+    ) == {'reasoning_effort': 'high'}
+    policy['action'] = 'omit'
+    assert mod.openai_responses_kwargs_from_model_parameters(
+        {'reasoning_effort': 'high'}, model='gpt-6-astra'
+    ) == {}
+    monkeypatch.setattr(mod, '_registry_parameter_policy', lambda **kw: None)
+    assert not mod.build_model_parameter_capabilities(
+        provider='openai', model='gpt-6-astra', include_registry=True,
+    )['parameters']['reasoning_effort']['supported']
+
+
+def test_registry_only_model_without_value_constraint_gets_provider_domain(monkeypatch):
+    import src.backend.services.model_parameter_service as mod
+
+    policy = {'action': 'allow', 'source': 'configured_registry'}
+    monkeypatch.setattr(mod, '_registry_parameter_policy', lambda **kw: policy)
+    capability = mod.build_model_parameter_capabilities(
+        provider='openai', model='gpt-6-astra', include_registry=True,
+    )['parameters']['reasoning_effort']
+    assert capability['allowed_values'] == list(mod.OPENAI_REASONING_EFFORT_VALUES)
+    assert capability['sources'] == ['configured_registry']
+    policy['fixed_value'] = 'registry-defined-effort'
+    assert mod.openai_responses_kwargs_from_model_parameters(
+        {'reasoning_effort': 'registry-defined-effort'}, model='gpt-6-astra'
+    ) == {'reasoning': {'effort': 'registry-defined-effort'}}
