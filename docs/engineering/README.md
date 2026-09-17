@@ -1,9 +1,11 @@
 # Engineering Documentation
 
-This directory deliberately contains both current engineering guidance and the
-historical design, audit, incident, and Jira records that explain how Von
-evolved. Proximity in this directory does not imply equal authority or
-freshness.
+This directory contains maintained public engineering guidance, contracts,
+runbooks and reproducible implementation protocols. Working design proposals,
+architecture reviews, dated audits and implementation/experiment notes belong
+in Von-Private's `research/design_notes/` collection. Historical public
+citations use commit-pinned links; private access is not required to follow
+public implementation guidance.
 
 Use the canonical [Von design and engineering document
 index](../design_index.md) to determine a document's kind, lifecycle, authority,

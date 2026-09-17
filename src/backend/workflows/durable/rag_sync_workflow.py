@@ -5,7 +5,7 @@ relations to the RAG store. It replaces the synchronous batch operation
 with a checkpointable, resumable background workflow.
 
 Phase 4 of JVNAUTOSCI-1075: Durable Workflow System Implementation.
-Design doc: docs/engineering/durable_workflow_system_design.md
+Historical design: https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/durable_workflow_system_design.md
 """
 
 from __future__ import annotations

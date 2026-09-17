@@ -877,10 +877,10 @@ whole ontology:
 - [Ontology publication authority](ontology_publication_authority.md) governs
   publication of the new canonical types and predicates; adding type identity
   does not widen assertion visibility or publication authority.
-- [Testing workflows and ephemeral theories](testing_workflows_ephemeral_theories_design.md)
+- [Testing workflows and ephemeral theories](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/testing_workflows_ephemeral_theories_design.md)
   supplies a current consumer and adapter target, not a second generic
   assertion ontology.
-- [Vontology tooling from KA/KCAP/KR literature](vontology_tooling_from_ka_kcap_kr_literature.md)
+- [Vontology tooling from KA/KCAP/KR literature](https://github.com/Strong-AI-Lab/Von/blob/5b2f8b976069935da73b82bca433fb3cefffcd3d/docs/engineering/vontology_tooling_from_ka_kcap_kr_literature.md)
   supplies the context-query and provenance-tool direction.
 - `JVNAUTOSCI-343` owns exact occurrence, claim/proposition, formalisation,
   alignment, lifecycle, and common retrieval.

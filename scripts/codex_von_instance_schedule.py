@@ -23,7 +23,7 @@ def _environment_path(value):
     if not Path(value).is_absolute() or any(c in value for c in ("\n", "\r", "\x00")):
         raise ValueError("Invalid systemd environment path")
     return "".join(
-        "%%" if c == "%" else "\\x%02x" % ord(c) if c in " \t\\\"'" else c
+        "%%" if c == "%" else f"\\x{ord(c):02x}" if c in " \t\\\"'" else c
         for c in value
     )
 

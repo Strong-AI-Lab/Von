@@ -571,7 +571,9 @@ function attachMessagesEventListeners() {
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => {
             if (_currentConversationUserId) {
-                loadConversation(_currentConversationUserId, { silent: true });
+                // Refresh is explicit navigation when reading an earlier window.
+                // Replace it with the latest page and reset both cursors.
+                loadConversation(_currentConversationUserId, { silent: true, latest: Boolean(_newerCursor) });
             }
         });
     }
@@ -872,6 +874,10 @@ function bindMessageStreamMenu(element, getOtherUserId) {
  */
 async function loadConversation(userId, { silent = false, before = null, after = null, firstUnread = false, latest = false, observeReads = true } = {}) {
     if (_isLoading) return;
+    // Automatic refreshes (including partial read-ack recovery) must not join
+    // the latest page to an earlier window or move the reader away from it.
+    // Explicit Refresh/Latest and directional pagination remain available.
+    if (silent && _newerCursor && !before && !after && !firstUnread && !latest) return false;
     _isLoading = true;
     const generation = _exchangeGeneration;
     const org = getSessionScopedOrgId();
@@ -898,10 +904,10 @@ async function loadConversation(userId, { silent = false, before = null, after =
         if (before || after) nextMessages = [...new Map([..._currentMessages, ...incoming].map(m => [m.concept_id, m])).values()].sort(compare);
         else if (silent && !firstUnread && !latest && incoming.length) {
             // Reconcile the returned range, including deletions and edits, while
-            // retaining already loaded earlier pages. A reconnect gap remains pageable.
+            // retaining earlier pages only when the returned page overlaps them.
             const overlap = incoming.some(m => _currentMessages.some(old => old.concept_id === m.concept_id));
-            if (!overlap && response.before) _olderCursor = response.before;
-            nextMessages = [..._currentMessages.filter(m => compare(m, incoming[0]) < 0), ...incoming];
+            if (!overlap && response.before) latest = true;
+            else nextMessages = [..._currentMessages.filter(m => compare(m, incoming[0]) < 0), ...incoming];
         }
         const sameContent = JSON.stringify(nextMessages.map(messageRenderKey)) === JSON.stringify(_currentMessages.map(messageRenderKey));
         _currentMessages = nextMessages;
