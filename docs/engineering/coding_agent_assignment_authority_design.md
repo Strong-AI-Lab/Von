@@ -5,8 +5,9 @@
 - **Authority:** Advisory; creates no grants, ownership, execution or rollout authority
 - **Owner / reviewer:** Michael Witbrock
 - **Author:** Codex DGX
-- **Evidence date:** 12 September 2026
-- **Source baseline:** `1d43a8d6d180d245f5c47353bd9ee5ddface189b`
+- **Evidence date:** 17 September 2026 (refresh of the 12 September draft)
+- **Source baseline:** `a6074640f23dd1d714b2872c6f6cb35a94815ec7`
+- **Review trigger:** Implementation authorisation or changes to assignment/admission routes
 - **Decision surface:** [JVNAUTOSCI-2755](https://naoinstitute.atlassian.net/browse/JVNAUTOSCI-2755)
 
 ## Decision and bounded outcome
@@ -19,18 +20,23 @@ verified personal coding agents would initially have Michael as their sole
 human assigner. Other owners' agents and explicitly shared team agents remain
 supported, including other repositories.
 
-The fair baseline is the existing DGX operator-bound pilot. Retain its useful
-repository confinement and recovery, replacing mutable task metadata as the
-authority evidence. Do not create a new identity system, universal workflow,
-token exchange for ordinary same-server calls, or a general multi-agent runtime.
+The fair baseline is the existing DGX operator-bound pilot, including its
+trusted-actor dispatch receipts. Retain its repository confinement, receipts
+and recovery; replace the remaining legacy metadata-based admission and add
+explicit per-agent grants. Do not create a new identity system, universal
+workflow, token exchange for ordinary same-server calls, or a general
+multi-agent runtime.
 Models still interpret requests, distinguish questions from requested work,
 select bounded actions and recover mistakes. Server code owns authentication,
 grant evaluation and exact scope checks; it does not decide coding strategy.
 
-**Handoff decision: not ready for task completion.** The repository design and
-scenario walkthrough are reviewable, but the complete live inventory and
-private Von document/task-link/recipient read-back remain unverified. Missing
-evidence below is explicit, not proof that an agent or association is absent.
+**Publication boundary:** This proposed design can be merged as documentation;
+merge does not accept or activate the policy. Its source audit and scenario
+walkthrough support review, not an enforcement claim. Complete live inventory
+and delivery of the refreshed private review copy remain controller/operator
+handoff work. The earlier private document delivery has a retained receipt;
+it must not be mistaken for read-back of this revised body. Missing evidence
+below is explicit, not proof that an agent or association is absent.
 Implementation requires a subsequent instruction. No enforcement, permission,
 worker, database, runtime or deployment change belongs to this design task.
 
@@ -45,25 +51,41 @@ assignment was sufficient to prepare the proposal without inventing dialogue.
 
 | Evidence | Observed source behaviour and limit |
 | --- | --- |
-| [Worker](../../scripts/codex_von_worker.py), `authorised_task`, `Von.inputs`, `tick`, `apply_deployment` | Pickup compares assignee, creator, report recipient and organisation with operator configuration. Inputs filter comment authors and reply senders. Finish/deployment re-read task conditions; no general per-agent grant service or continuous running-grant recheck is established. |
+| [Worker](../../scripts/codex_von_worker.py), `authorised_task`, `Von.inputs`, `tick`, `apply_deployment` | Pickup checks configured assignee/organisation and, unless supervision is enabled, report recipient. Legacy non-federated tasks with matching creator/organisation and no dispatch record still pass; other tasks need `dispatch_requested` plus a matching current dispatch receipt. Inputs filter comment authors and reply senders. Finish/deployment re-read task conditions; no general per-agent grant service or continuous running-grant recheck is established. |
 | [Inbox](../../scripts/codex_von_inbox.py), `allowed_message`, `context_for`, follow-up persistence | Sender, recipient and organisation are filtered; replies can reopen eligible tasks and retain message IDs. These are controller checks on canonical message projections, not permission for arbitrary message authors to execute work. |
 | [MCP catalogue](../../src/backend/integrations/internal_mcp/catalogue.py), `_task_create`, `_task_continuation_assignee_allowed`, `_task_update_fields` | Ordinary creation binds actor/organisation and checks coding-agent type plus same-organisation membership. Actor-bound continuation checks control of the task. Neither is an explicit personal/team assignment grant. |
-| Same catalogue, `_task_assign`; [task service](../../src/backend/services/task_management_service.py), `assign_task`, `update_task_fields` | General assignment calls the service; the field editor can change creator and assignee relations. No per-agent assignment decision is present at these service operations. Gateway/profile reachability and live ACLs need separate verification; this is not a claim that every caller can exploit them. |
+| Same catalogue, `_task_assign`; [task service](../../src/backend/services/task_management_service.py), `create_task`, `assign_task`, `update_task_fields` | Canonical deliberate assignment now records dispatch provenance; native creation does so when the trusted current actor matches the creator. Task-project home guards reject writes at an inactive/non-local home. The field editor still exposes creator/assignee metadata; neither visibility nor home ownership supplies a per-agent grant. Gateway/profile reachability and live ACLs need separate verification. |
+| [Dispatch authority](../../src/backend/services/task_dispatch_authority_service.py), `record_assignment`, `is_authorised_assignment`, `revoke_assignment` | Operational, non-exported receipts bind a trusted session/in-process actor to task, assignee, project and organisation; legacy identity headers cannot issue them. Worker comparison requires its configured delegator. Revocation retains a record, preventing fallback to legacy creator admission. Receipts do not bind the instruction body/revision, repository/action grant or team membership, and recording follows assignment persistence rather than an atomic grant decision. |
 | [Task REST routes](../../src/backend/server/routes/task_routes.py), `_get_current_user_concept_id`, `create_task_route`, `update_task_route` | Creation derives creator from trusted session context and rejects the legacy-header actor source. Assignee comes from the request. Updates forward the actor and supplied fields to the service. Route visibility is not an agent grant. |
 | [Message REST routes](../../src/backend/server/routes/message_routes.py), send route; catalogue `_message_send_direct` | Sender comes from actor context; participant/organisation checks concern communication. Preserve those checks independently from executable-instruction admission. |
 | [Access control](../../src/backend/security/access_control.py); [membership governance](../../src/backend/services/organisation_membership_governance_service.py) | Reuse effective actor, visibility and represented membership. Membership management has trusted-actor checks, operational role permissions and receipts. Membership-management or ontology-publication authority is not automatically personal-agent grant-management authority. |
 | [Task execution submission](../../src/backend/services/task_execution_submission_service.py), `_resolve_task_execution_conversation` | The UI/scheduled Von execution path requires the Von system assignee and creator-owned conversation. It is distinct from external DGX pickup; do not assume it launches VS Code or bypasses that distinction. |
 | [Identity bootstrap](../../src/backend/services/coding_agent_identity_bootstrap_service.py) | Declares `#V#coding_agent` and `#V#github_copilot_instance`. Bootstrap source is not evidence that this instance is live, independently owned, or a Codex clone. No bootstrap was run. |
-| [Worker runbook](codex_dgx_worker.md#interactive-coding-agent-messages) | Documents separate `#V#codex_dgx` and interactive/reporting `#V#codex_vscode` identities. Does not establish VS Code queue consumption or enumerate live clones. |
-| JVNAUTOSCI-2750 changes `9a7f2a735`, `d56f2a7b8`, merged in baseline via PRs 641/642 | Source contains conversational task recovery, execution-preference reads and coherent worker/backend release support. Inspected final merged source; no claim about active host module versions. Its deployment/activation work remains separate. |
+| [Worker runbook](codex_dgx_worker.md#interactive-coding-agent-messages), [Mac retry handoff](codex_dgx_worker.md#dgx-and-mac-retry-policy-handoff) | Documents separate DGX and VS Code identities and an operator-owned Mac task adapter with retained attempts, a launch boundary and lock. VS Code is no longer accurately described as necessarily reporting-only. This source does not identify the live Mac adapter's principal, active installation or clones. |
+| [Retry policy](../../scripts/codex_von_retry.py), `admission`; [supervision](../../scripts/codex_von_supervision.py), `reconcile`, `record_repair`, `repair_comments` | Explicit delegator retries and verified attempt-bound repair observations can admit continuation after current task checks. The supervisor controller can create repair tasks on the source delegator's behalf and attest a repair. Reporting routes, repair provenance and source/attempt checks are distinct from a general target-agent assignment grant. Completing a repair task alone does not resume its source. |
+| JVNAUTOSCI-2750 changes `9a7f2a735`, `d56f2a7b8`, retained through the refreshed baseline | Conversational recovery, execution-preference reads and coherent worker/backend releases remain in source. The supplied controller runtime projection identifies one release for worker and task-service modules; see the bounded runtime observation below. Activation work remains separate. |
 | [Coordination proposal](multi_agent_coordination_design.md), relevant background to JVNAUTOSCI-1965 | Reuse explicit actor handoffs and context lineage only. Its orchestration and capability-negotiation programme is not a prerequisite. Live issue wording/status could not be re-read. |
-| [Creation/recovery tests](../../tests/backend/test_coding_task_creation_recovery.py), [worker tests](../../tests/backend/test_codex_von_worker.py), [inbox tests](../../tests/backend/test_codex_von_inbox.py) | Existing isolated fixtures cover pilot paths. They do not establish normal production identity issuance, personal/team grants or current runtime installation. |
+| [Creation/recovery tests](../../tests/backend/test_coding_task_creation_recovery.py), [worker tests](../../tests/backend/test_codex_von_worker.py), [inbox tests](../../tests/backend/test_codex_von_inbox.py), [dispatch tests](../../tests/backend/test_task_dispatch_authority_service.py) | Existing isolated fixtures cover pilot paths, trusted dispatch actors, revocation and local-home admission. They do not establish normal production identity issuance, personal/team grants or current runtime installation. |
 
-The audit session had no exposed canonical Von inventory/document tools. The
-Jira connector returned reauthentication required, so current issue comments,
+The 17 September worker context explicitly disables Von MCP and reserves
+canonical reads/effects to the controller. Its supplied canonical task lookup
+reports the existing private product as `ready`; a retained operator handoff
+records successful full-content and recipient read-back of the original draft.
+Those observations resolve the old claim that no private delivery existed,
+but do not provide the document bytes or read-back of this refresh. The Jira
+connector again returned reauthentication required, so live issue comments,
 links and project-writer state could not be verified. No credentials, private
-database, operator configuration or unrelated conversations were read. DGX
-and Mac destinations must be inspected separately; a missing record in one
+database, operator configuration or unrelated conversations were read.
+
+The supplied controller projection, observed at 13:50:02 UTC on 17 September,
+binds this DGX run to Michael, the SAIL organisation and its fixed source
+repository, and identifies release `ed5c5cc60651a70ce453acc84f9964ff7aaee30c`
+for both worker and backend task-service modules. The referenced source files
+exist and were hashed; the projected PID was not visible through this sandbox's
+`/proc`. This is controller-provided runtime evidence plus file inspection, not
+an independent live process/import probe or a public served-revision check.
+Private paths, hashes and delivery receipts remain in the controller handoff.
+DGX and Mac destinations must be inspected separately; a missing record in one
 must not cause identity creation in the other.
 
 ### Initial agent / assigner / repository matrix
@@ -73,8 +95,8 @@ proposed initial policy, not a live grant inventory.
 
 | Agent or candidate | Evidence / execution surface | Association and initial assigners | Repository and action envelope |
 | --- | --- | --- | --- |
-| `#V#codex_dgx` | This assigned execution identifies as DGX; public runbook documents scheduled task/inbox consumption. Registration, current installation binding and liveness receipts remain to be read canonically. | Proposed personal association with `#V#michael_witbrock`; Michael alone initially. Confirm the trusted operator binding before issuance. SAIL membership alone supplies no additional assigner. | Reported fixed Von repository; verify its canonical identity and installation root. Assignment grants bounded coding work only; publication/deployment remain separate task/effect authority. |
-| `#V#codex_vscode` | Public runbook identifies interactive Codex VS Code reporting. No autonomous Von-assignment consumer was established by this audit. | Proposed Michael personal association, subject to registration/operator verification. Michael alone for any subsequently verified executable surface. | Each verified workspace/repository binding; interactive/reporting-only status until a real admission adapter is evidenced. Do not queue work to an imaginary consumer. |
+| `#V#codex_dgx` | This execution and supplied controller runtime projection identify an active scheduled DGX consumer and coherent worker/backend release. Canonical registration/alias and sponsor records were not independently enumerated. | Supplied operator-bound delegator is `#V#michael_witbrock`; proposed personal binding and sole initial human grant remain subject to verified issuance. SAIL membership alone supplies no additional assigner. | Supplied fixed Von repository and versioned runtime roots; verify canonical repository identity before grant issuance. Publication/deployment remain separate task/effect authority. |
+| `#V#codex_vscode` | Runbook identifies interactive/reporting identity and separately documents a Mac task adapter. Whether that installed consumer uses this exact principal, and its current liveness, require operator read-back. | Proposed Michael personal association, subject to registration/operator verification. Michael alone for verified eligible executable surfaces. | Each verified workspace/repository binding. Label verified interactive and scheduled modes separately; neither assert reporting-only status nor queue to an unverified consumer. |
 | Actual registered VS Code clones/instances, if any | No clone IDs or active instance inventory available. Names such as “VS clone” do not establish aliases or new principals. | Associate verified Michael instances only; independent owners must remain separate. A shared principal needs distinct trusted installation IDs, not invented user IDs. | Inventory each installation and repository. No inheritance from a display-name match or copied checkout. |
 | `#V#github_copilot_instance` | Source bootstrap candidate only; runtime status, owner and assignment-consumption mode unknown. | Unresolved; no takeover and no proposed Michael grant without evidence. | Unknown. Preserve existing state; verify separately if live. |
 | Another person's personal agent (scenario, no invented live ID) | Future or independently discovered registration | Its verified owner can explicitly grant themselves/others its scoped assignment authority. This conveys no access to Michael's agents. | Its separately authorised repository, including a non-Von repository. |
@@ -94,7 +116,11 @@ privately with the task; publish only approved, non-sensitive conclusions.
 
 Use existing concept identities and trusted actor services. Represent durable
 association and grants through one canonical governed service; keep execution
-receipts in the existing task/controller evidence stores. The following are
+receipts in the existing task/controller evidence stores. Extend the existing
+dispatch receipt rather than creating a competing task-admission record: add
+the accepted instruction revision and grant/scope decision it currently lacks.
+Its operational storage may remain outside Vontology while durable bindings
+and grants use the selected protected represented surface. The following are
 logical fields, not a proposed new universal schema or permission to create
 concepts now.
 
@@ -197,6 +223,7 @@ receipt plus non-executable pending state must prevent partial admission.
 | Task title, description, repository, project, model/action or work-product changes | Existing edit permissions govern communication. Only an authorised revision can change executable intent. Material expansions require a current grant/scope decision; other authors' edits remain suggestions/data. Cost/model preferences stay within separately configured execution policy. |
 | Direct messages, inbox replies and comments | Preserve authenticated authorship and ordinary communication. The model may interpret a request, but server/controller admission must check that event's actual initiator before resuming or expanding work. A comment/message, quote, invitation or task ID alone cannot reopen execution. |
 | Queued retries, requeue, schedule occurrence, crash recovery | Recheck current grant, binding, membership, instruction revision and resource ceiling at the next launch. A prior success or idempotency key cannot revive revoked authority. Reconciliation may read existing receipts without rerunning effects. |
+| Supervisor repair creation and verified-repair continuation | Preserve the existing source/attempt-bound repair checks. Before assigning the repair, check the source delegator's grant for the target agent and the controller's bounded proxy authority. A reporting/supervisor relation alone supplies neither. Before source continuation, recheck its current grant and accepted instruction; a verified repair proves recovery, not renewed assignment authority. Human supervisors receive a task/message, never a coding process. |
 | Running follow-up or redirect | Admit a separate instruction revision with its own trusted event/actor, then checkpoint before consuming it. Recheck all contributing queued instructions; concatenation must not obscure which author/grant supports each. |
 | Acting on behalf of a human | Same-turn trusted Von tool calls retain the human as initiating actor and Von as proxy; a payload naming Michael is insufficient. A separately acting/sessionless proxy needs an existing exact delegation bound to principal, agent, task/revision, scope and validity, revalidated on use. Do not let an assignment grant imply transitive delegation. |
 | Publish, merge, deploy, credential/resource access | Separate effect authority remains required. The assignment service cannot enlarge it. Recheck current instruction/grant before new material external effects; rollout is outside this design. |
@@ -287,6 +314,7 @@ assumes independent task, source, repository and effect permissions are met.
 | Membership removed during a run | Checkpoint pauses that initiator's work, reconciles already-submitted effects and retains partial output. Another member needs explicit adoption and independent context access. |
 | Repository request outside the grant, or project retargeted | Exact repository/installation intersection fails before launch/expansion. An allowed repo's name or project ID cannot disguise a different remote/root. |
 | Legitimate Von proxy versus unbound autonomous proxy | Trusted same-turn actor binding succeeds; separately acting proxy requires verifiable bounded delegation. A service identity claiming an arbitrary human fails. |
+| Supervisor route points to an ungranted coding agent | Preserve the source's blocked state and useful repair evidence. Deny executable repair assignment unless the delegator has the target grant and the controller has the required proxy authority; changing a reporting relation cannot launch another person's agent. A valid repair receipt still cannot override later grant revocation. |
 | Harmless question or private source invitation | Communication can succeed under its existing ACLs. Neither creates executable authority; assignment does not reciprocally create source access. |
 | Denial/revocation races with reassignment, queued comments or external effects | Conditional revision/admission check selects one accepted state; no partial executable assignment, stale continuation or duplicate effect. Existing receipts reconcile any already-issued effect. |
 
@@ -302,11 +330,11 @@ adversarial assignment or extra coding/model run is warranted for this draft.
 
 | Alternative | Decision |
 | --- | --- |
-| Keep DGX's configured delegator filter alone | Useful pilot baseline, insufficient general authority: it neither rejects all misleading assignments nor supports scoped team grants, and trusts mutable task provenance. |
+| Keep configured delegator plus current dispatch receipts | Useful baseline: trusted provenance and revocation improve admission for recorded/transferred assignments. Still lacks scoped team grants, instruction-revision binding and grant checks before assignment persistence; legacy unrecorded local tasks retain creator-based admission. |
 | Any member of the same organisation may assign | Reject for personal agents; shared visibility does not grant use of a person's coding resources. An explicit team grant can intentionally choose a governed membership set. |
 | Hard-code Michael and Von everywhere | Reject: satisfies one initial configuration by breaking independent owners and repositories. |
 | Per-agent bindings with direct grants and optional explicit team/role subjects | Selected: durable identity/scope is inspectable; a small shared service handles exact decisions while models retain adaptive judgement. |
-| Universal delegation tokens, workflows or distributed worker leases | Defer. Only a demonstrated separately acting/sessionless boundary needs exact delegation. Existing single-host scheduling does not justify a distributed-worker programme. |
+| Universal delegation tokens or new workflow/lease machinery for this proposal | Defer. Only a demonstrated separately acting/sessionless boundary needs exact delegation. Reuse existing task-project home and durable-workflow ownership controls where applicable; those solve placement/exclusivity, not permission to use an agent. Do not expand the separate federation programme. |
 
 Before implementation authorisation, resolve the live agent/clone inventory,
 actual VS Code consumer mode, canonical repository bindings and sponsor evidence.
@@ -324,10 +352,12 @@ After a separate instruction to implement:
    writer before selecting the tracking surface. Do not take over independent
    agents or change other projects' authority.
 2. Add the shared protected grant/binding decision and accepted-instruction
-   provenance to existing task services; wire every reachable mutation and
-   worker admission route. Keep reporting/context access separate.
+   provenance to existing task services and dispatch receipts; wire every
+   reachable mutation and worker admission route, including supervisor repairs.
+   Keep reporting/context access separate.
 3. Add actor-visible discovery/manager controls and real consumer adapters.
-   Keep VS Code reporting-only until its executable path is actually defined.
+   Reuse the verified Mac adapter where present; describe an installation as
+   reporting-only only when the inventory actually establishes that mode.
 4. Run the bounded authority acceptance above. Freeze the candidate once normal
    authorised use and relevant denial/revocation/recovery paths are supported;
    unrelated defects do not expand the release gate.
@@ -343,16 +373,19 @@ After a separate instruction to implement:
 
 ## Private review delivery contract
 
-The repository PR is a review copy. Completion additionally requires a private
-canonical Von document/plan concept containing the **complete readable design**,
+The merged repository document remains a proposed review copy. Completion
+additionally requires a private canonical Von document/plan concept containing
+the **complete readable design**,
 clearly Draft/proposed, with source commit provenance and these unresolved
 questions. It must not be an executable workflow or a prompt activation.
 
 The authorised controller/operator must inspect the exact native task's
-existing products/history, create or update the document via canonical content
+existing products/history, update the existing document via canonical content
 services, and set `current_work_product_concept_id` without destroying prior
-products. Preserve the intended private audience; organisation sharing alone
-is not a substitute for the requested visibility. Use the existing
+products. The retained original delivery is continuity, not grounds to create
+a duplicate document or to claim the revised text has been read back. Preserve
+the intended private audience; organisation sharing alone is not a substitute
+for the requested visibility. Use the existing
 [task work-product service](../../src/backend/services/task_work_product_service.py):
 Michael's actor-effective `hasContent` projection must resolve to exactly one
 non-empty readable body and the task product must resolve as `ready`. Preserve

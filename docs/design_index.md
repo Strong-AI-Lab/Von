@@ -163,7 +163,7 @@ human acceptance and promotion into a current public authority surface.
 | [Reliability Ratchet articles and case log](engineering/reliability_ratchet_articles_and_cases.md) | Active advisory source copy and evidence log | Use as a revisable diagnostic lens and dated case record; not as standing policy, repair authority, or proof of current behaviour |
 | [Ontology repair plans](engineering/ontology_repair_plan_design.md) | Design with implemented substrate | Use for the plan/approve/execute shape and its affordance argument; it adds no authority route, and agent-reachable ontology mutation remains an open decision |
 | [Multi-agent coordination](engineering/multi_agent_coordination_design.md) | Early design proposal | Use as a direction to evaluate, not implemented architecture |
-| [Coding-agent assignment authority](engineering/coding_agent_assignment_authority_design.md) | Draft / proposed; live inventory and private review handoff outstanding | Per-agent personal/team bindings and scoped grants; source audit and scenario walkthrough only, no implementation or activation authority |
+| [Coding-agent assignment authority](engineering/coding_agent_assignment_authority_design.md) | Draft / proposed; source audit refreshed 17 September 2026 | Extends existing dispatch provenance with scoped personal/team grants; complete inventory and refreshed private handoff remain separate. No implementation or activation authority |
 | [Vontology tooling from KA/KR literature](engineering/vontology_tooling_from_ka_kcap_kr_literature.md) | Research-backed advisory roadmap | Use for alternatives and research uptake, not present capability claims |
 
 ## 7. Dated snapshots, diagnostics, and proposals
