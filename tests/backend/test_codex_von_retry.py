@@ -240,6 +240,7 @@ def canonical_controller(config, tmp_path, monkeypatch):
     }
     fake.write_text(
         f"#!{sys.executable}\n" + "import json, sys\nfrom pathlib import Path\n"
+        "sys.stdin.read()\n"
         "result = Path(sys.argv[sys.argv.index('--output-last-message') + 1])\n"
         "context = json.loads((result.parent / 'context.json').read_text())\n"
         f"with open({str(counter)!r}, 'a') as stream: stream.write(json.dumps(context) + '\\n')\n"

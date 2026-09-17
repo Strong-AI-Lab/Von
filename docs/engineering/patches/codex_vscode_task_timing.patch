@@ -1,0 +1,54 @@
+--- a/task-server.py
++++ b/task-server.py
+@@ -162,4 +162,6 @@
+                 or not request.get('checkpoint', '').strip()):
+             return dict(state, may_execute=False)
++        if state.get('execution_started_at'):
++            api.start_execution(state, source='codex_vscode')
+         state.setdefault('recovery_checkpoints', []).append(dict(at=now(), evidence=request['checkpoint']))
+         save(path, state)
+@@ -196,5 +198,8 @@
+         state.pop('pending_admission', None)
+         state.update(phase='running', started_at=now(), consumer_thread=request['thread_id'])
++        state['execution_started_at'] = state['started_at']
++        state['execution_source'] = 'codex_vscode'
+         save(path, state)
++        api.start_execution(state, source='codex_vscode')
+         api.tasks.update_task_status(state['task_id'], 'in_progress', actor_concept_id=CONFIG['agent_id'])
+         assert api.task(state['task_id'])['status'] == 'in_progress'
+@@ -218,4 +223,5 @@
+         raise ValueError('Retained result differs; reconcile it first')
+     state.update(phase='reporting', result=result)
++    state.setdefault('finished_at', now())
+     blocker = retry_policy.retain_blocker(CONFIG, state)
+     if 'result_content' not in state:
+@@ -229,4 +235,22 @@
+         state['waiting_explanation'] = retry_policy.waiting_text(blocker)
+         state['result_content'] += '\n\n' + state['waiting_explanation']
++    _, timing_inputs = task_inputs(api, task)
++    if (state.get('execution_started_at') and state['target_status']
++            and worker.authorised_task(task, CONFIG) and api.native_writer(task)
++            and task['status'] in {'in_progress', state['target_status']}
++            and (task['status'] != 'completed' or any(
++                a['attempt_id'] == attempt and a.get('outcome') == 'completed'
++                for a in task.get('execution_timing', {}).get('attempts', [])))
++            and worker.fingerprint(timing_inputs) == snapshot_hash(state, worker)):
++        save(path, state)
++        if valid(api, worker, task):
++            api.record_supervisor_repair(task, result)
++        timed_task = api.finish_execution(state)
++        if timed_task['status'] != state['target_status']:
++            state['target_status'] = None
++            state['status_update_withheld'] = 'Accepted attempt belongs to an earlier lifecycle'
++        if not state.get('timing_in_result_content'):
++            state['result_content'] += '\n\n' + worker.execution_timing_text(state['execution_timing'], attempt)
++            state['timing_in_result_content'] = True
+     save(path, state)
+     # Canonical read-back precedes terminal bookkeeping; retry uses the same intent.
+@@ -248,5 +272,5 @@
+         raise RuntimeError('Task status read-back failed')
+     state.update(phase='done' if readback['status'] == 'completed' else 'waiting',
+-                 finished_at=now(), task_status_readback=readback['status'])
++                 task_status_readback=readback['status'])
+     save(path, state)
+     return state

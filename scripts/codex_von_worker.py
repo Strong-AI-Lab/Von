@@ -822,6 +822,34 @@ class Von:
             raise RuntimeError("Direct message canonical read-back failed")
         return message_id
 
+    def start_execution(self, state, *, source="codex_dgx"):
+        from src.backend.services import task_execution_timing_service as timing
+
+        state["execution_source"] = source
+        task = timing.start(
+            state["task_id"],
+            attempt_id=state["attempt"],
+            actor_concept_id=self.config["agent_id"],
+            started_at=state["execution_started_at"],
+            source=source,
+        )
+        state["execution_timing"] = task["execution_timing"]
+        return task
+
+    def finish_execution(self, state):
+        from src.backend.services import task_execution_timing_service as timing
+
+        self.start_execution(state, source=state.get("execution_source", "codex_dgx"))
+        task = timing.finish(
+            state["task_id"],
+            attempt_id=state["attempt"],
+            actor_concept_id=self.config["agent_id"],
+            outcome=state["result"]["status"],
+            ended_at=state.get("finished_at"),
+        )
+        state["execution_timing"] = task["execution_timing"]
+        return task
+
     def finish(self, state):
         try:
             task = self.task(state["task_id"])
@@ -837,12 +865,38 @@ class Von:
             and task.get("status") in ACTIVE
             and self.native_writer(task)
         )
+        timing_receipt = None
+        if state.get("execution_started_at") and (
+            scope_valid
+            or (
+                authorised_task(task, self.config)
+                and self.native_writer(task)
+                and task.get("status") == "completed"
+                and result["status"] == "completed"
+                and any(
+                    a["attempt_id"] == state["attempt"] and a.get("outcome") == "completed"
+                    for a in task.get("execution_timing", {}).get("attempts", [])
+                )
+            )
+        ):
+            # Supervisor receipts require the still-active repair assignment.
+            if scope_valid:
+                self.record_supervisor_repair(task, result)
+            # Canonical acceptance precedes its completion message. Replaying
+            # this attempt cannot complete a reopened task.
+            timing_receipt = self.finish_execution(state)["execution_timing"]
+            task = self.task(state["task_id"])
+            scope_valid = task["status"] == (
+                "completed" if result["status"] == "completed" else "blocked"
+            )
         content = (
             f"{result['summary']}\n\n{result['evidence']}\n\n"
             f"{result['question']}\n\nTask: {state['task_id']}\n"
             f"DGX worktree: {state.get('worktree', 'not started')}\n"
             f"Run: {state['attempt']}"
         ).strip()
+        if timing_receipt:
+            content += "\n\n" + execution_timing_text(timing_receipt, state["attempt"])
         if blocker:
             content += "\n\n" + retry_policy.waiting_text(blocker)
         if state.get("execution_settings"):
@@ -874,7 +928,8 @@ class Von:
             state["report_task"], state["attempt"] + ":result", state["report_content"]
         )
         if scope_valid:
-            self.record_supervisor_repair(task, result)
+            if timing_receipt is None:
+                self.record_supervisor_repair(task, result)
             evidence_addition = (
                 f"{result['evidence']}\nVon result: {message_id}\n"
                 f"Execution archive: {capture.get('archive_url', 'unavailable')}\n"
@@ -925,6 +980,17 @@ class Von:
             ),
             message_id=message_id,
         )
+
+
+def execution_timing_text(timing, attempt_id):
+    attempt = next(a for a in timing["attempts"] if a["attempt_id"] == attempt_id)
+    return (
+        f"Execution start (UTC): {attempt['started_at']}\n"
+        f"Execution end (UTC): {attempt.get('ended_at') or 'unknown'}\n"
+        f"Task completion accepted (UTC): {attempt.get('completion_accepted_at') or 'not completed'}\n"
+        f"Attempt elapsed wall-clock seconds (includes waits): {attempt.get('elapsed_wall_seconds')}\n"
+        "Task cost: unknown; subscription usage is not a per-task invoice."
+    )
 
 
 def command(args, **kwargs):
@@ -1017,7 +1083,7 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         run_dir=str(run_dir),
         input_hash=input_fingerprint(inputs),
         input_snapshot=inputs,
-        started_at=datetime.now(UTC).isoformat(),
+        prepared_at=datetime.now(UTC).isoformat(),
         worker_revision=config.get("runtime_evidence", {}).get("commit"),
     )
     for key in (
@@ -1025,6 +1091,10 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         "capture_provenance",
         "archive_pending_reported",
         "finished_at",
+        "started_at",
+        "execution_started_at",
+        "execution_timing",
+        "execution_source",
     ):
         state.pop(key, None)
     state.pop("result", None)
@@ -1146,6 +1216,14 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
             stderr=errors,
             pass_fds=(lock_fd,),
         ) as process:
+            # The child is alive and waiting for its authorised input. Queue,
+            # checkout preparation and reservation are not execution time.
+            state["started_at"] = state["execution_started_at"] = datetime.now(
+                UTC
+            ).isoformat()
+            write_json(state_path, state)
+            api.start_execution(state)
+            write_json(state_path, state)
             process.stdin.write(prompt)
             process.stdin.close()
             while True:
@@ -1168,7 +1246,10 @@ def recover_result(state):
     """Only a successful process plus valid structured output is completion."""
     run_dir = Path(state["run_dir"])
     try:
-        if json.loads((run_dir / "exit.json").read_text())["returncode"] != 0:
+        exit_receipt = json.loads((run_dir / "exit.json").read_text())
+        if exit_receipt.get("finished_at"):
+            state["finished_at"] = exit_receipt["finished_at"]
+        if exit_receipt["returncode"] != 0:
             raise ValueError("Codex exited unsuccessfully")
         result = validate_result(json.loads((run_dir / "result.json").read_text()))
     except (OSError, ValueError, KeyError) as exc:
