@@ -1361,24 +1361,15 @@ function isChatSessionTabsNarrowViewport() {
 }
 
 function getEffectiveChatSessionTabsLayout(preferredLayout = chatSessionTabsLayout) {
-    const preferred = normaliseChatSessionTabsLayout(preferredLayout);
-    if (preferred !== CHAT_SESSION_TABS_LAYOUT_VERTICAL) {
-        return CHAT_SESSION_TABS_LAYOUT_HORIZONTAL;
-    }
-    if (isChatSessionTabsNarrowViewport()) {
-        return CHAT_SESSION_TABS_LAYOUT_HORIZONTAL;
-    }
-    return CHAT_SESSION_TABS_LAYOUT_VERTICAL;
+    // Desktop layout is a preference; narrow/touch navigation always uses the tray.
+    return isChatSessionTabsNarrowViewport()
+        ? CHAT_SESSION_TABS_LAYOUT_VERTICAL
+        : normaliseChatSessionTabsLayout(preferredLayout);
 }
 
 function getChatSessionTabsLayoutMenuLabel() {
-    if (chatSessionTabsLayout === CHAT_SESSION_TABS_LAYOUT_VERTICAL) {
-        return isChatSessionTabsNarrowViewport()
-            ? 'Use conversation tabs across top on wider screens'
-            : 'Move conversation tabs to top';
-    }
-    return isChatSessionTabsNarrowViewport()
-        ? 'Use conversation tabs on left on wider screens'
+    return chatSessionTabsLayout === CHAT_SESSION_TABS_LAYOUT_VERTICAL
+        ? 'Move conversation tabs to top'
         : 'Move conversation tabs to left';
 }
 
@@ -1443,9 +1434,8 @@ function setChatSessionTabsLayout(layout, options = {}) {
     }
     if (options.announce === true) {
         let message;
-        if (result.preferred === CHAT_SESSION_TABS_LAYOUT_VERTICAL
-            && result.effective === CHAT_SESSION_TABS_LAYOUT_HORIZONTAL) {
-            message = 'Left conversation tabs saved for wider screens.';
+        if (isChatSessionTabsNarrowViewport()) {
+            message = 'Desktop conversation layout saved.';
         } else if (result.preferred === CHAT_SESSION_TABS_LAYOUT_VERTICAL) {
             message = 'Conversation tabs moved to the left.';
         } else {
@@ -27756,12 +27746,12 @@ function buildNewChatContextMenuItems() {
                 });
             }
         },
-        {
+        ...(!isChatSessionTabsNarrowViewport() ? [{
             label: getChatSessionTabsLayoutMenuLabel(),
             onClick: () => {
                 toggleChatSessionTabsLayout({ announce: true });
             }
-        }
+        }] : [])
     ];
 
     const agentTotalCount = agentCreatedSessionVisibilityState.totalCount || 0;
