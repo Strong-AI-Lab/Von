@@ -7118,6 +7118,12 @@ body[data-active-tab="settingsTab"] .tab-content-area {
     border-color: #6ee7b7;
 }
 
+.conversation-model-controls > .footer-reasoning-level {
+    margin-left: 8px;
+    padding-left: 8px;
+    border-left: 1px solid currentColor;
+}
+
 .llm-status-badge.error,
 .llm-status-badge.fatal {
     background: #fee2e2;
