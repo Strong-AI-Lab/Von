@@ -52,3 +52,55 @@ describe('temporary turn model picker', () => {
         expect(select.title).toBe('');
     });
 });
+
+describe('temporary reasoning control', () => {
+    let picker, select, reasoningSelect, resolveCapabilities;
+    beforeEach(async () => {
+        document.body.innerHTML = '<select id="model"><option value="">Default</option></select><select id="reasoning"></select><p></p><button></button>';
+        select = document.getElementById('model');
+        reasoningSelect = document.getElementById('reasoning');
+        picker = createTurnModelPicker({ select, reasoningSelect,
+            status: document.querySelector('p'), clearButton: document.querySelector('button'),
+            loadModels: async provider => provider === 'openai' ? ['gpt-6-astra', 'other'] : [],
+            loadCapabilities: () => new Promise(resolve => { resolveCapabilities = resolve; })
+        });
+        await picker.load();
+    });
+    function choose(model = 'gpt-6-astra') {
+        select.value = JSON.stringify({ model, model_provider: 'openai' });
+        select.dispatchEvent(new Event('change'));
+    }
+    async function capability(value = {}) {
+        resolveCapabilities({ parameters: { reasoning_effort: { supported: true, allowed_values: ['low', 'high'], ...value } } });
+        await Promise.resolve();
+    }
+    test('passes selected effort once and resets on send', async () => {
+        choose(); await capability();
+        reasoningSelect.value = 'high'; reasoningSelect.dispatchEvent(new Event('change'));
+        expect(picker.take().model_parameters).toEqual({ reasoning_effort: 'high' });
+        expect(picker.take()).toBeNull();
+        expect(reasoningSelect.disabled).toBe(true);
+    });
+    test('changing model discards effort and ignores stale capability reads', async () => {
+        choose(); const stale = resolveCapabilities;
+        choose('other'); await capability({ supported: false });
+        stale({ parameters: { reasoning_effort: { supported: true, allowed_values: ['high'] } } });
+        await Promise.resolve();
+        expect(reasoningSelect.disabled).toBe(true);
+        expect(picker.take().model_parameters).toEqual({});
+    });
+    test('fixed registry value is visible, read-only and propagated', async () => {
+        choose(); await capability({ fixed_value: 'high', read_only: true });
+        expect(reasoningSelect.disabled).toBe(true);
+        expect(reasoningSelect.value).toBe('high');
+        expect(picker.take().model_parameters).toEqual({ reasoning_effort: 'high' });
+    });
+    test('actor/settings invalidation clears choice and stale asynchronous metadata', async () => {
+        choose(); picker.invalidate(); await capability();
+        expect(picker.peek()).toBeNull();
+        expect(select.options.length).toBe(1);
+        expect(reasoningSelect.disabled).toBe(true);
+        await picker.load();
+        expect(select.options.length).toBe(3);
+    });
+});

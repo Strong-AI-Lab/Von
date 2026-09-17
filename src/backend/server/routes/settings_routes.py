@@ -2255,6 +2255,51 @@ def get_meta_models():
         )
 
 
+@settings_bp.route("/models/enabled/<provider>", methods=["GET"])
+def get_enabled_models(provider):
+    """Catalogue intersection for execution, scoped to the trusted request actor."""
+    from ...languagemodels.llm_interface import _normalise_model_execution_key
+
+    loaders = {
+        "openai": get_openai_models,
+        "openrouter": get_openrouter_models,
+        "gemini": get_gemini_models,
+        "meta": get_meta_models,
+        "ollama": get_ollama_models,
+    }
+    if provider not in loaders:
+        return _jsonify_no_store({"error": "Unsupported model provider."}, 400)
+    allowed = None
+    if provider != "ollama":
+        user = get_effective_user_concept_id()
+        org = get_effective_organisation_concept_id()
+        if not user and not org:
+            return _jsonify_no_store([], 200)
+        try:
+            entries = resolve_enabled_llm_settings(
+                user_concept_id=user, org_concept_id=org
+            )
+            allowed = {
+                _normalise_model_execution_key(entry.get("provider"), entry.get("model"))
+                for entry in entries if isinstance(entry, Mapping)
+            }
+        except Exception:
+            return _jsonify_no_store({"error": "Scoped model eligibility unavailable."}, 503)
+        if not any(key[0] == provider for key in allowed):
+            return _jsonify_no_store([], 200)
+    response = current_app.make_response(loaders[provider]())
+    if response.status_code != 200:
+        return response
+    models = response.get_json()
+    if not isinstance(models, list):
+        return _jsonify_no_store({"error": "Model catalogue unavailable."}, 503)
+    return _jsonify_no_store([
+        model for model in models
+        if isinstance(model, str) and model.strip()
+        and (allowed is None or _normalise_model_execution_key(provider, model) in allowed)
+    ], 200)
+
+
 @settings_bp.route("/models/inventory/<provider>", methods=["GET"])
 def get_model_inventory(provider):
     """Project discovery and transport metadata without enabling any model."""

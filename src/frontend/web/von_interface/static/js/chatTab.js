@@ -33546,6 +33546,7 @@ function detachChatWorkForOrganisationSwitch() {
 }
 
 function startOrganisationSwitchForChatTab(detail = {}) {
+    turnModelPicker?.invalidate();
     resetConversationCatalogue();
     stopDictation();
     const requestedSwitchId = normaliseOrganisationSwitchId(detail);
@@ -33742,6 +33743,7 @@ try {
 
 function handleAuthStatusChangeForChatTab(detail) {
     resetConversationCatalogue();
+    turnModelPicker?.invalidate();
     synchroniseLlmExecutionContext({ force: true, reason: 'authenticated_actor_changed' });
     loadHiddenChatSessionIds();
     loadPinnedChatSessionIds();
@@ -33828,8 +33830,16 @@ export function initializeChatTab() {
             select: turnModelSelect,
             status: document.getElementById('turnModelStatus'),
             clearButton: document.getElementById('clearTurnModelButton'),
+            reasoningSelect: document.getElementById('turnReasoningSelect'),
+            loadCapabilities: async (provider, model) => {
+                const api_surface = { gemini: 'interactions', openrouter: 'chat_completions' }[provider] || 'responses';
+                const query = new URLSearchParams({ provider, model, api_surface });
+                const response = await fetch(`/api/settings/model_parameters/capabilities?${query}`, { headers: buildChatFetchHeaders() });
+                if (!response.ok) throw new Error('Reasoning options unavailable');
+                return response.json();
+            },
             loadModels: async provider => {
-                const response = await fetch(`/api/settings/models/${provider}`, { headers: buildChatFetchHeaders() });
+                const response = await fetch(`/api/settings/models/enabled/${provider}`, { headers: buildChatFetchHeaders() });
                 if (!response.ok) throw new Error('Model catalogue unavailable');
                 return response.json();
             }
@@ -33885,6 +33895,7 @@ export function initializeChatTab() {
             // Model and actor controls share this event. Invalidate the display
             // snapshot immediately; retained debug data remains available for
             // diagnostics and will be rebound only when current history loads.
+            turnModelPicker?.invalidate();
             synchroniseLlmExecutionContext({ force: true, reason: 'settings_context_changed' });
             const newHiddenKey = getHiddenSessionsStorageKey();
             const newPinnedKey = getPinnedSessionsStorageKey();

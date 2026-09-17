@@ -289,11 +289,21 @@ def build_model_parameter_capabilities(
             fixed_value = _clean_text(reasoning_policy.get("fixed_value"))
             source = str(reasoning_policy.get("source") or "model_registry")
             supported = action != "omit"
-            merged_allowed_values = (
-                allowed_values
-                if allowed_values
+            merged_allowed_values = allowed_values or (
+                [fixed_value]
+                if fixed_value
                 else _normalise_string_list(reasoning_capability.get("allowed_values"))
             )
+            if supported and not merged_allowed_values:
+                # Explicit registry support can introduce a model outside the
+                # static family list without losing the provider's value domain.
+                merged_allowed_values = list(
+                    {
+                        "openai": OPENAI_REASONING_EFFORT_VALUES,
+                        "gemini": GEMINI_REASONING_EFFORT_VALUES,
+                        "meta": META_MUSE_REASONING_EFFORT_VALUES,
+                    }.get(provider_name, ())
+                )
             reasoning_capability = _parameter_capability(
                 parameter_id=MODEL_PARAMETER_REASONING_EFFORT,
                 supported=supported,
@@ -305,12 +315,18 @@ def build_model_parameter_capabilities(
                     *[
                         item
                         for item in reasoning_capability.get("sources", [])
-                        if isinstance(item, str) and item
+                        if isinstance(item, str) and item and item != "unsupported"
                     ],
                     source,
                 ],
-                provider_api_mapping=_extract_mapping(
-                    reasoning_capability.get("provider_api_mapping")
+                # Registry-only models still use the provider's transport.
+                provider_api_mapping={
+                    "openai": _OPENAI_REASONING_EFFORT_API_MAPPINGS,
+                    "gemini": _GEMINI_REASONING_EFFORT_API_MAPPINGS,
+                    "meta": _META_MUSE_REASONING_EFFORT_API_MAPPINGS,
+                }.get(
+                    provider_name,
+                    _extract_mapping(reasoning_capability.get("provider_api_mapping")),
                 ),
                 registry_policy=reasoning_policy,
             )
