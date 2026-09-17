@@ -847,6 +847,19 @@ class Von:
             outcome=state["result"]["status"],
             ended_at=state.get("finished_at"),
         )
+        # Optional accounting must never hold up accepted timing/completion.
+        # Only controller-retained events are read, never model result fields.
+        try:
+            receipt = execution_usage(state)
+            task = timing.record_usage(
+                state["task_id"],
+                attempt_id=state["attempt"],
+                actor_concept_id=self.config["agent_id"],
+                receipt=receipt,
+            )
+            state.pop("usage_recording_error_type", None)
+        except Exception as exc:  # noqa: BLE001 - accounting cannot gate timing
+            state["usage_recording_error_type"] = type(exc).__name__
         state["execution_timing"] = task["execution_timing"]
         return task
 
@@ -897,6 +910,10 @@ class Von:
         ).strip()
         if timing_receipt:
             content += "\n\n" + execution_timing_text(timing_receipt, state["attempt"])
+        if state.get("usage_recording_error_type"):
+            content += (
+                "\nUsage receipt could not be recorded; timing acceptance succeeded."
+            )
         if blocker:
             content += "\n\n" + retry_policy.waiting_text(blocker)
         if state.get("execution_settings"):
@@ -982,14 +999,43 @@ class Von:
         )
 
 
+def execution_usage(state):
+    from src.backend.services import coding_execution_usage as usage
+
+    model = (state.get("execution_settings") or {}).get("model")
+    if state.get("execution_source") == "codex_vscode":
+        return usage.unknown(
+            "Interactive bridge has no trusted task-specific token receipt or turn interval",
+            configured_model=model,
+            thread_id=state.get("consumer_thread"),
+            source="codex_vscode.consumer_thread",
+        )
+    if not state.get("run_dir"):
+        return usage.unknown("No retained exec stream", configured_model=model)
+    try:
+        with (Path(state["run_dir"]) / "events.jsonl").open("rb") as stream:
+            return usage.from_exec_stream(stream, configured_model=model)
+    except OSError:
+        return usage.unknown("Exec stream unavailable", configured_model=model)
+
+
 def execution_timing_text(timing, attempt_id):
     attempt = next(a for a in timing["attempts"] if a["attempt_id"] == attempt_id)
+    usage = attempt.get("usage") or {}
+    counters = usage.get("tokens")
+    usage_text = (
+        f"Observed root tokens (partial coverage): input {counters['input_tokens']}, "
+        f"cached input {counters['cached_input_tokens']} (included in input), "
+        f"output {counters['output_tokens']}."
+        if counters
+        else "Attempt token usage: unknown."
+    )
     return (
         f"Execution start (UTC): {attempt['started_at']}\n"
         f"Execution end (UTC): {attempt.get('ended_at') or 'unknown'}\n"
         f"Task completion accepted (UTC): {attempt.get('completion_accepted_at') or 'not completed'}\n"
         f"Attempt elapsed wall-clock seconds (includes waits): {attempt.get('elapsed_wall_seconds')}\n"
-        "Task cost: unknown; subscription usage is not a per-task invoice."
+        f"{usage_text}\nTask cost: unknown; subscription usage is not a per-task invoice."
     )
 
 
@@ -1095,6 +1141,7 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         "execution_started_at",
         "execution_timing",
         "execution_source",
+        "usage_recording_error_type",
     ):
         state.pop(key, None)
     state.pop("result", None)
