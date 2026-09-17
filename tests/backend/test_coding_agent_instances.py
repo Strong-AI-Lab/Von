@@ -274,7 +274,12 @@ def test_tool_reconcile_uses_canonical_identity_and_host_receipts(
 
     concepts, members = {}, {"#V#owner"}
     slot["allow_identity_creation"] = True
-    monkeypatch.setattr(concept_service, "get_concept_by_concept_id", concepts.get)
+    def lookup(concept_id):
+        if concept_id not in concepts:
+            raise concept_service.ConceptNotFoundError(concept_id)
+        return concepts[concept_id]
+
+    monkeypatch.setattr(concept_service, "get_concept_by_concept_id", lookup)
 
     def create(**kwargs):
         assert kwargs["organisation_concept_id"] == "#V#org"
