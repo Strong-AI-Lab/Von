@@ -19147,3 +19147,38 @@ html[data-footer-uptime="false"][data-footer-runtimecost="false"][data-footer-bu
 .message-draft-shell .prompt-input { width: 100%; box-sizing: border-box; }
 .message-draft-shell [data-draft-recovery][hidden] { display: none; }
 .message-draft-shell .composer-options-section select { max-width: 100%; min-height: 44px; }
+
+/* Task tabs share the concept stack layout while retaining task-specific controls. */
+.task-tab-button {
+    background: #eef7ff;
+    border-color: #b8d7f0;
+}
+
+.task-tab-open {
+    color: inherit;
+    font: inherit;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+}
+
+.task-tab-content {
+    max-width: 1100px;
+    margin-inline: auto;
+}
+
+.task-tab-content .task-inspector-card {
+    margin-top: 12px;
+}
+
+.task-tab-button .close-tab {
+    background: transparent;
+    border: 0;
+    padding: 0;
+}
+
+.task-tab-button .close-tab:hover {
+    background: rgba(255, 0, 0, 0.1);
+}
