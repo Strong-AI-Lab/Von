@@ -55,18 +55,18 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.url === '/api/messages/exchange') {
         let body = ''; for await (const chunk of req) body += chunk;
-        const { before, participant_ids } = JSON.parse(body); cursors.push(before);
+        const { before, first_unread, participant_ids } = JSON.parse(body); cursors.push(first_unread ? "first_unread" : before);
         if (zeroTransition) {
             const id = participant_ids.includes('#V#carol') ? 'carol-final' : 'bob-final';
             return res.end(JSON.stringify({ current_user_id: '#V#alice', before: 'read-history',
                 messages: [message(id, !readMessages.has(id), '15')] }));
         }
         const initial = Array.from({ length: 20 }, (_, index) => message(`latest-${String(index).padStart(2, '0')}`, false, '13'));
-        const result = !before ? { messages: background ? [...initial, message('Background unread', true, '14')] : initial, before: 'middle' }
+        const result = first_unread ? { messages: [message('Earlier unread', true, '10'), message('Most recent unread', true, '11')], before: 'history', after: 'later' } : !before ? { messages: background ? [...initial, message('Background unread', true, '14')] : initial, before: 'middle' }
             : before === 'middle' ? { messages: Array.from({ length: 10 }, (_, index) => message(`middle-${index}`, index === 5, '12')), before: 'older' }
                 : { messages: [message('Earlier unread', true, '10'), message('Most recent unread', true, '11')], before: null };
         const finish = () => res.end(JSON.stringify({ ...result, current_user_id: '#V#alice' }));
-        if (before || background) pendingPage = finish;
+        if (first_unread || before || background) pendingPage = finish;
         else finish();
         return;
     }
@@ -125,7 +125,7 @@ const server = http.createServer(async (req, res) => {
             pendingPage(); pendingPage = null;
             await page.evaluate(() => window.refreshDone);
             assert.equal(await content.evaluate(el => el.scrollTop), bottomPosition, 'background unread must not follow the bottom');
-            // Reopen the initial fixture, then traverse delayed earlier pages.
+            // Reopen the initial fixture, then seek through a delayed unread response.
             background = false;
             await page.evaluate(async () => {
                 const panel = await import('/static/js/components/messagePanel.js');
@@ -145,24 +145,20 @@ const server = http.createServer(async (req, res) => {
             await page.getByRole('button', { name: 'Jump to first unread', exact: true }).click();
             await expect.poll(() => Boolean(pendingPage)).toBe(true);
             assert.equal(await offset(), anchor.offset, 'pending go-to-unread preserves the visible message');
-            pendingPage(); pendingPage = null;
-            await expect.poll(() => Boolean(pendingPage)).toBe(true);
-            await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-            assert.ok(Math.abs(await offset() - anchor.offset) <= 1, 'intermediate page preserves the visible message within one CSS pixel');
             await expect(page.getByRole('button', { name: 'Loading unread messages…', exact: true })).toBeVisible();
             await page.screenshot({ path: path.join(evidence, `loading-${width}.png`) });
             pendingPage(); pendingPage = null;
             const target = page.locator('[data-contribution-id="Earlier unread"]');
             await expect(target).toBeFocused();
             await expect(target).toBeInViewport();
-            assert.deepEqual(cursors, ['middle', 'older']);
+            assert.deepEqual(cursors, ['first_unread']);
             await page.screenshot({ path: path.join(evidence, `unread-${width}.png`) });
             await send.click();
             await expect(input).toHaveValue('');
             assert.equal(sent.length, 1);
             assert.equal(sent[0].content, 'A reply from the up-arrow control.');
             assert.deepEqual(errors, []);
-            results.push({ width, cursors: [...cursors], sendArrow: true, sendTarget: box, sends: sent.length, labelledLatestNavigation: true, defaultTopPreserved: true, backgroundPosition: bottomPosition, intermediateAnchorOffset: anchor.offset, firstUnreadFocused: true, targetInViewport: true });
+            results.push({ width, cursors: [...cursors], sendArrow: true, sendTarget: box, sends: sent.length, labelledLatestNavigation: true, defaultTopPreserved: true, backgroundPosition: bottomPosition, pendingAnchorOffset: anchor.offset, firstUnreadFocused: true, targetInViewport: true });
             await page.close();
 
             // Real IntersectionObserver and confirmed HTTP receipt: the last
