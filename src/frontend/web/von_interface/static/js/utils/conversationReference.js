@@ -67,3 +67,33 @@ export function buildConversationReferencePayload(session, context = {}) {
     },
   };
 }
+
+export function isConversationConceptReference(value) {
+  return typeof value === 'string' && /^#V#conversation_[a-zA-Z0-9_-]+$/.test(value);
+}
+
+export async function readConversationReference(payload) {
+  const { postJson } = await import('../apiService.js');
+  return postJson('/von/api/session/conversation_reference', payload);
+}
+
+export async function copyCompactConversationReference(session, turnId = null) {
+  const sessionId = cleanText(session?.session_id) || cleanText(session?.chat_session_id);
+  if (!sessionId) throw new Error('Conversation unavailable');
+  const result = await readConversationReference({ session_id: sessionId, metadata_only: true, ...(turnId ? { turn_id: turnId } : {}) });
+  if (!result?.success || !result.concept_reference) throw new Error('Conversation or stored turn unavailable');
+  return result.concept_reference;
+}
+
+export async function conversationReferenceMetadata(fullId) {
+  try {
+    const result = await readConversationReference({ conversation_ref: fullId, metadata_only: true });
+    if (!result?.success) throw new Error('unavailable');
+    const name = `${result.session_name || 'Conversation'}${result.turn_id ? ' · Turn' : ''}`;
+    return { name, displayName: name, bestName: name, shortestName: name, kind: 'individual' };
+  } catch (_) {
+    // Do not turn a denied source into a proposal to create a concept, and do
+    // not derive private names from the identifier or a previous actor's cache.
+    return { name: 'Conversation unavailable', displayName: 'Conversation unavailable', kind: 'individual' };
+  }
+}

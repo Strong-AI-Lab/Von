@@ -11,6 +11,15 @@ class _FakeCollection:
 
     def _matches_query(self, doc: dict[str, Any], query: dict[str, Any]) -> bool:
         for key, value in query.items():
+            actual = doc
+            for part in key.split("."):
+                actual = (
+                    actual[int(part)] if isinstance(actual, list) else actual.get(part)
+                )
+            if key.startswith("history."):
+                if actual != value:
+                    return False
+                continue
             if isinstance(value, dict) and "$in" in value:
                 if doc.get(key) not in value["$in"]:
                     return False
@@ -33,7 +42,10 @@ class _FakeCollection:
             if not self._matches_query(doc, query):
                 continue
             for key, value in (update.get("$set") or {}).items():
-                doc[key] = value
+                if key.startswith("history."):
+                    doc["history"][int(key.split(".")[1])] = value
+                else:
+                    doc[key] = value
 
             class _Result:
                 matched_count = 1
@@ -210,3 +222,92 @@ def test_chat_history_blob_backfill_is_idempotent(monkeypatch):
     assert first["entries_updated"] == 1
     assert second["entries_updated"] == 0
     assert second["candidate_entries"] == 0
+
+
+def test_forensic_records_offload_losslessly_and_preserve_concurrent_append(
+    monkeypatch,
+):
+    from copy import deepcopy
+    from src.backend.services import chat_history_service as h
+    from src.backend.services.debug_payload_store import hydrate_debug_payload_blob_refs
+
+    entry = {
+        "role": "assistant",
+        "content": "Done",
+        "llm_debug_data": {
+            "request_id": "exact-request",
+            "turn_execution_record": {"observations": ["x" * 1024] * 70},
+            "turn_execution_record_tool_invocations": [{"args": "y" * 1024}] * 40,
+        },
+    }
+    original = deepcopy(entry)
+    docs = [
+        {
+            "_id": "one",
+            "user_id": "#V#u",
+            "namespace": "#V#u",
+            "session_id": "s",
+            "history": [entry],
+        }
+    ]
+    collection = _FakeCollection(docs)
+    update = collection.update_one
+
+    def concurrent_update(query, changes):
+        docs[0]["history"].append({"role": "user", "content": "New message"})
+        return update(query, changes)
+
+    monkeypatch.setattr(collection, "update_one", concurrent_update)
+    monkeypatch.setattr(
+        h, "get_chat_history_collection_service", lambda **kw: collection
+    )
+    store = _FakeBlobStore()
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env", lambda: store
+    )
+    result = h.backfill_chat_history_blob_payloads(
+        user_concept_id="#V#u", namespace="#V#u", session_ids=["s"], dry_run=False
+    )
+    assert result["entries_updated"] == 1
+    assert docs[0]["history"][1]["content"] == "New message"
+    assert docs[0]["history"][0]["llm_debug_data"]["request_id"] == "exact-request"
+    assert (
+        hydrate_debug_payload_blob_refs(docs[0]["history"][0], fail_soft=False).payload
+        == original
+    )
+    assert result["bytes_saved_estimate"] > 80000
+
+
+def test_backfill_does_not_overwrite_concurrent_entry_edit(monkeypatch):
+    from src.backend.services import chat_history_service as h
+
+    docs = [
+        {
+            "_id": "one",
+            "user_id": "#V#u",
+            "namespace": "#V#u",
+            "session_id": "s",
+            "history": [{"role": "assistant", "content": "x" * 100000}],
+        }
+    ]
+    collection = _FakeCollection(docs)
+    update = collection.update_one
+
+    def concurrent_edit(query, changes):
+        docs[0]["history"][0] = {"role": "assistant", "content": "Edited by user"}
+        return update(query, changes)
+
+    monkeypatch.setattr(collection, "update_one", concurrent_edit)
+    monkeypatch.setattr(
+        h, "get_chat_history_collection_service", lambda **kw: collection
+    )
+    monkeypatch.setattr(
+        "src.backend.services.blob_store.get_blob_store_from_env",
+        lambda: _FakeBlobStore(),
+    )
+    result = h.backfill_chat_history_blob_payloads(
+        user_concept_id="#V#u", dry_run=False
+    )
+    assert result["entries_updated"] == 0
+    assert result["errors"][0]["type"] == "entry_changed_concurrently"
+    assert docs[0]["history"][0]["content"] == "Edited by user"

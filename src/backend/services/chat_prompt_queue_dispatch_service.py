@@ -338,12 +338,23 @@ class ChatPromptQueueDispatcher:
 
         if self._reconcile_one_linked_terminal():
             return True
+        if self._reconcile_one_stopped_server_attempt():
+            return True
         if self._reconcile_one_interrupted_cancellation():
             return True
         if self._reconcile_one_task_launch():
             return True
         if self._reconcile_one_handoff():
             return True
+
+        from .background_workflow_continuation_service import reconcile_one_continuation
+
+        try:
+            reconcile_one_continuation()
+        except Exception:
+            _logger.exception(
+                "[chat_prompt_dispatch] Workflow continuation reconciliation unavailable"
+            )
 
         record = chat_prompt_queue_service.reserve_next_server_dispatch(
             server_instance_id=SERVER_INSTANCE_ID,
@@ -433,6 +444,22 @@ class ChatPromptQueueDispatcher:
                 source="queue_dispatcher",
                 error=error,
             )
+        return True
+
+    def _reconcile_one_stopped_server_attempt(self) -> bool:
+        record = chat_prompt_queue_service.terminalise_one_stopped_server_attempt(
+            current_server_instance_id=SERVER_INSTANCE_ID,
+        )
+        if record is None:
+            return False
+        # finish_prompt_record retains a durable reconciliation marker, so a
+        # projection failure here is retried by the existing dispatcher.
+        reconcile_linked_task_execution_terminal(
+            record,
+            status=record["status"],
+            source="stopped_server_reconciliation",
+            error=record.get("last_error"),
+        )
         return True
 
     def _reconcile_one_interrupted_cancellation(self) -> bool:

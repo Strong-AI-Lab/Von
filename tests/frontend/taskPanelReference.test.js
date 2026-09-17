@@ -72,7 +72,7 @@ test('Open in Tasks closes the popup and selects the exact task beyond the first
     const panel = require(base + 'components/taskPanel.js');
     await panel.openTaskInPanel('#V#exact_task');
     document.getElementById('taskStatusFilter').dispatchEvent(new Event('change'));
-    document.querySelector('.task-open-in-tab-btn').click();
+    document.querySelector('.task-open-in-tasks-btn').click();
     expect(document.getElementById('taskPanel').classList.contains('hidden')).toBe(true);
     expect(require(base + 'tabNavigation.js').activateTab).toHaveBeenCalledWith('globalTasksTab');
     await panel.showGlobalTasks();

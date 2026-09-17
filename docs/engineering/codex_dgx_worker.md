@@ -170,7 +170,7 @@ separate. The launcher should unset `OPENAI_API_KEY` and `CODEX_API_KEY`, set
 the dedicated `CODEX_HOME`, and execute the installed official Codex CLI.
 Validate an actual agent-issued shell command before enabling polling.
 
-Install the worker, `codex_von_inbox.py`, and both adjacent `_prompt.md` files
+Install the worker, `codex_von_inbox.py`, `codex_von_retry.py`, and both adjacent `_prompt.md` files
 from the same reviewed revision. Run them with the project's PDM-managed Python environment.
 When these scripts are copied into a release bundle outside a complete checkout,
 pass `--backend-root /path/to/reviewed/Von` to the worker. This selects the
@@ -183,6 +183,104 @@ point and list reads. The adapter requires `requested_model` and
 `requested_reasoning_effort` keys even when their values are null. An older reader
 that omits them fails visibly before pickup instead of silently choosing defaults.
 Installing only a newer worker script cannot repair an older canonical reader.
+
+### Waiting for a coding dependency
+
+The retry policy in `scripts/codex_von_retry.py` separates task context from
+permission to spend another coding attempt. After `blocked` or `needs_input`,
+the existing task state retains the result, failed attempt, recovery owner and
+expectation. Archive attachments, evidence/checkpoint updates, self-reports,
+unrelated comments, CI, a pending status and elapsed time cannot admit a retry.
+The task checkpoint and one idempotent message explain the wait. Other eligible
+tasks continue, including when one retained report cannot be delivered.
+
+A coding result may provide an optional `blocker` with `key`, `kind`
+(`dependency` or `transient`), `owner`, `recovery`, `scope_json`,
+`required_observations_json` and `probe_key` (usually null). The two JSON strings
+hold objects describing the relevant candidate/profile and exact observations,
+for example `{"authenticated":true,"profile_bound":true}`. The controller binds
+the task, coding actor, organisation, failed attempt and observation time. This
+describes an external prerequisite; code the assigned agent can safely repair
+and independently useful work should be handled before returning a blocker.
+
+There are three supported continuation routes:
+
+- The delegator can write a task comment beginning exactly
+  `/retry-coding <failed-attempt> <reason>`. This is an explicit one-attempt
+  retry after review, not a claim that the dependency was repaired. Quoted
+  commands and other authors' comments do not qualify.
+- For natural-language repair, answers or changed scope, use the existing inbox
+  reply route. Its bounded interpretation receives the retained result and
+  supplied receipt bytes. It must distinguish relevant recovery, explicit retry
+  and independently useful scope from a status report. The controller binds a
+  `resume_task` decision to that failed attempt and source message. This path
+  uses one ordinary inbox interpretation per new message; polling does not
+  repeatedly ask a model to reinterpret an unchanged failure.
+- A delegator-authored canonical task comment may carry `source.coding_retry`,
+  an operator-verified repair receipt. Required fields are `attempt`,
+  `blocker_key`, `binding` (`task_id`, `agent_id`, `organisation_id`), `scope`
+  (matching the blocker's JSON object), `observed_at`, `observations`,
+  `evidence_reference` and `reason`. Observations must include every required
+  value with its exact JSON type, and be observed after the failed attempt.
+  Use the linked file-copy concept and checksum as the evidence reference when
+  applicable. The trusted producer must actually inspect/read back the repair;
+  a filename, receipt metadata or a top-level ready flag is insufficient. The
+  comparator does not discover or execute arbitrary evidence files. It rejects
+  wrong-task/actor/org, wrong-revision, stale, future and contradictory receipts.
+
+Older text-only results are retained as **unclassified**, not silently inferred
+to have machine-checkable recovery conditions. They can use explicit retry or
+the contextual inbox route. Ordinary free-text task comments remain context;
+they do not automatically constitute repair. The visible wait supplies the
+supported continuation route, so a repair outside Git or with different wording
+does not require changing a classifier or a filename convention. Missing local
+state for a canonical blocked/in-progress task requires reconciliation instead
+of assuming earlier effects never happened.
+
+For known transient dependencies, the operator can register `retry_probes` in
+private controller configuration, keyed by `probe_key`. Each entry contains an
+`argv` list for an existing cheap read-only helper, `timeout_seconds`,
+`interval_seconds` and `max_interval_seconds`. Choose bounds from that helper's
+declared/observed duration with headroom; the subprocess timeout protects the
+controller queue's liveness, independently of coding-run duration. The helper
+receives the retained blocker JSON on stdin and returns the repair receipt
+above on stdout. No task/model-supplied command, URL or executable is run. Failed
+or unknown probes back off exponentially to the configured maximum, with the
+next check persisted before execution; they never launch a coding model. No
+probe is registered by default. Unknown coding-process outcomes always retain
+their work/effects for reconciliation, rather than treating them as a cheap
+transient failure.
+
+The source token is consumed in the same durable write that marks the new
+attempt running, before the subprocess starts. Restart first reconciles an
+existing run/report/archive. A replayed inbox acknowledgement cannot bind the
+old message to a newer failure or reopen a task whose retry already ran. Task
+cancellation, reassignment, project writer and current authority are rechecked
+before the admitted continuation. Model preferences still come from the
+canonical task.
+
+### DGX and Mac retry-policy handoff
+
+Source merge and installation are distinct. Use the existing coherent release
+procedure below at an idle controller boundary; retain the previous release,
+state, worktrees, schedule, lock and configured model preferences. Do not run a
+second worker to activate or test the upgrade. `--check-task` and the next
+scheduled runtime receipt must identify the selected module paths/revision.
+This change does not request a public web deployment.
+
+The Mac bridge is operator-owned and is not source-controlled in this repository.
+Its operator must import the same `codex_von_retry` module, map its retained
+attempt/result and canonical inputs to `retain_blocker`/`admission`, and persist
+`consume` with the running checkpoint before its existing launch call under its
+existing lock. Bind config identity locally; never trust a comment's claimed
+author or scope instead of the canonical author and current assignment. Keep
+the same inbox source authorisation, repair producer verification, current-task
+recheck, cheap-probe backoff and result/effect reconciliation boundaries as the
+DGX adapter. Run the shared tests plus an isolated replay of that installed
+bridge and record canonical wait/recovery read-back and zero duplicate launches.
+An import test or a DGX replay alone is not evidence of Mac integration or
+activation. Return the Mac adapter diff and both hosts' installation/runtime
+receipts through the coordinating operator before claiming both are active.
 Do not change global model defaults to compensate for a mismatched installation.
 
 For an authorised upgrade, use the coherent installation below. Preserve the
@@ -579,3 +677,183 @@ writes (registration, one batch, final reference), independently of event count.
 text, refresh, scoped download and clearing on scope change using an isolated
 browser fixture. These tests do not prove live scheduler activation, public
 OAuth, actual provider summaries, or production historical backfill.
+
+### Supervisor repair tasks
+
+An operator-owned `supervision_enabled: true` enables repair-task handoffs in
+an existing controller. It adds no schedule or model poll. Instantiate additional
+agents with that optional flag and their existing agent, delegator and organisation
+bindings; configure the ontology relation through canonical relationship services.
+Do not copy credentials or infer delegation from a supervisor relation.
+
+`report_to_concept_id` is the task override (`#V#reportsto`). When unset,
+`#V#has_supervisor` on the assignee supplies the default for people and agents.
+Canonical task point reads and creation responses expose `reporting_resolution`
+with the selected concept, source and resolution status. Defaults are not copied
+into the explicit field. An ambiguous, inaccessible or cyclic route is reported
+without admitting another coding run. Existing controllers keep their prior
+eligibility policy unless supervision is enabled; enabled controllers still
+require the configured creator/delegator, assignee, organisation and native writer.
+Reporting responsibility no longer substitutes for those execution checks.
+
+Under its existing lock, the controller retains an episode fingerprint before
+creating a canonical repair on behalf of the existing delegator. The repair
+records that attribution, source task, blocker and agent chain in
+`external_references.coding_supervision`, inherits explicit execution preferences,
+and links back with `blocks`/`blocked_by`. The controller reconciles the deterministic
+creation fingerprint after an interrupted acknowledgement. A same-blocker manual
+retry retains the repair episode and refreshes its attempt context; a verified
+recovery followed by a new failure starts a new episode. Self-reports, archives,
+status resets and elapsed time do not supply recovery evidence. Cancelled or
+reassigned repair tasks require reconciliation, not automatic duplication.
+
+The supervisor inspects retained work, repairs within the original scope, and
+returns `repair_receipt_json` containing exact fresh observations. The finishing
+controller checks the current source instructions, scope and assignment, then
+records a canonical attestation. The source admits that attempt-bound receipt once
+through the shared retry policy. A completed repair status alone is insufficient.
+Legacy unclassified failures remain reviewable but require an explicit reviewed
+continuation; the controller does not invent their missing observation contract.
+A human supervisor receives a native task and Von notification, never a coding
+process in the human's identity. Supervisor chains reject repeated identities.
+
+For an upgrade, install the coherent release and update a private Mac adapter
+under its existing lock. The Mac adapter calls `api.reconcile_supervision` for
+waiting attempts and `api.record_supervisor_repair` before applying a successful
+result. Carry `supervision` state to a reserved continuation alongside consumed
+retry tokens. Exclude derived reporting projections and controller-verified repair
+comments from the Mac instruction fingerprint; recheck retry admission at begin.
+Keep old retained results readable when nullable result fields are added.
+
+Before clearing legacy generated `report_to_concept_id` defaults, retain an exact
+review manifest: task ID, old value, original creation provenance, later reporting
+changes and source instruction. Preserve deliberate choices and ambiguous cases.
+Apply only reviewed entries after the eligibility fix is installed, through
+canonical task updates, and read back the effective ontology default. Do not use
+a blanket rewrite based solely on the current field matching the delegator.
+
+## Canonical execution timing
+
+The task service exposes `execution_timing` through `get_task`, task listings
+and the existing HTTP task-detail response. This is task-visible lifecycle
+metadata, using the controller's existing attempt ID; it does not grant access
+to private run archives. The supported writers are the trusted controllers,
+through `task_execution_timing_service.start` and `finish` (also available as
+`Von.start_execution` and `Von.finish_execution`). No new task consumer is added.
+
+- DGX records `execution_started_at` after its subprocess exists and before
+  supplying the task prompt. Queue pickup, checkout preparation and archive
+  registration are distinct; the previous local `started_at` was preparation
+  time and must not be imported as execution evidence.
+- The interactive Mac bridge records execution at its authorised `begin`
+  action, when the existing consumer takes the task. `select` only reserves it.
+  `resume` reconciles the same attempt and retains its original start.
+- An observed process exit supplies DGX `ended_at`; the Mac bridge supplies
+  the first retained `finish` time. Missing exit evidence leaves the end unknown.
+  Terminal attempts retain their outcome separately from successful completion.
+- Canonical `finish` retains the terminal observation, reconciles the existing
+  status path, then records `result_accepted_at` and, only for success,
+  `completion_accepted_at`. Repeated delivery preserves those timestamps.
+  Interrupted acceptance can resume after the status write without another run.
+- `started_at` is the earliest recorded execution start. `completed_at` is the
+  accepted completion for the current lifecycle, or null when uncompleted or
+  unknown. Reopening keeps `completion_history` and all prior attempts. A
+  previously accepted attempt cannot complete a reopened task. An external
+  completion is not attributed to an unfinished coding attempt.
+- Durations are **elapsed wall-clock seconds, including waits**, not active
+  coding effort. Attempt duration ends at the observed execution end; task
+  duration ends at accepted completion, so reporting/archive waits can differ.
+  Planned start/due dates and generic `updated_at` are not used. No historical
+  timestamps are fabricated during upgrade.
+
+### Coding-attempt usage and cost
+
+The DGX controller reads its retained `events.jsonl` after timing acceptance and
+uses `task_execution_timing_service.record_usage` to persist the observation on
+the existing attempt. `get_task`, task listings and HTTP task detail project it
+under `execution_timing.attempts[].usage`, with the task-local observed subtotal
+under `execution_timing.usage`. No new consumer, model call or billing credential
+is involved. The model-produced result is not a usage source.
+
+The supported source is a fresh `codex exec --json` invocation with one root
+thread, one started turn and one unambiguous completed-turn receipt. The
+[official event example](https://learn.chatgpt.com/docs/non-interactive-mode#make-output-machine-readable)
+supplies input, cached-input and output counters. Receipts retain the source,
+thread ID, provider turn ID when exposed (otherwise null with local ordinal 1),
+configured model separately from the unknown observed model/provider, and the
+SHA-256 of the retained event bytes. Raw prompts and tool contents stay outside
+task metadata. These observations are controller-captured CLI reports, not
+independently verified provider billing receipts.
+
+- Coverage is **partial**, even with valid root counters: child and external
+  tool coverage is unknown. Nested child/tool records are never added to a root
+  aggregate. Missing, malformed, multi-thread or multi-turn streams remain
+  **unknown**; resumed/cumulative thread counters are not guessed attempt deltas.
+- Repeated canonical delivery replaces nothing and adds nothing. A new attempt
+  retains its own receipt; identical aggregates from the same thread count once
+  in the task subtotal. Conflicting observations of a reused thread exclude that
+  whole thread from the subtotal and expose `conflicting_threads`. Different
+  fresh root threads count as separate work. This is a task-local subtotal, not
+  a cross-task billing ledger.
+- `observed_total_tokens` adds input and output only: cached input is a subset
+  of input. No observations yields null, not zero. Unknown attempts remain
+  visible alongside observed counters. Historical attempts are not backfilled.
+- Usage recording failure retains `usage_recording_error_type` in controller
+  state and reports the limitation without blocking timing or completion. A
+  replay of `finish_execution` can retry accounting; there is no additional
+  automatic accounting retry consumer. Unknown receipts can be enriched by a
+  later observation; an already observed receipt cannot silently change.
+
+Cost remains explicitly `unknown` with a null amount/currency. Neither inspected
+subscription route supplies a trustworthy per-task monetary receipt or an
+applicable price basis. No actual charge or estimated allocation is fabricated
+from API prices, configured model names or subscription token counts.
+
+The operator-owned bridge source inspected on 17 September 2026 (hash below)
+binds `consumer_thread` at `begin` and checks it at `resume`, but exposes no token
+receipt or task-specific turn interval. With the existing timing patch and the
+matching backend, its shared `finish_execution` records **unknown** usage with
+that thread ID and source `codex_vscode.consumer_thread`. A thread can contain
+other work, so its lifetime counters cannot be attributed to the task. No
+private conversation or Codex database is scanned for accounting.
+
+Acceptance uses the existing controller with a fixture executable emitting
+documented events, followed by canonical service/message read-back, repeated
+delivery, retry and conflicting-thread cases, and a usage-persistence failure.
+The operator patch replay below also verifies explicit unknown usage. Run
+`tests/backend/test_coding_execution_usage.py` alongside the timing tests. This
+proves repository behaviour against isolated canonical services; activation and
+live attempt observations require the operator's normal release boundary.
+
+### Operator-owned VS Code bridge integration
+
+The repository cannot activate or directly edit the operator-owned Mac bridge.
+[The bounded patch](patches/codex_vscode_task_timing.patch) adds the shared
+start/resume/finish calls to its existing `task-server.py`, preserves its
+assignment/input checks and lock, and includes canonical timing in its result
+message. It applies to the source inspected on 17 September 2026 with SHA-256
+`a665516dfe918b6e77046867721ad471c787535bf5e8a92d7aa677c57f19df5b`.
+If that source changed, review/rebase the patch against the new source rather
+than replacing the bridge with an old copy. Existing attempts lacking the new
+execution observation keep their historical state and are not assigned upgrade
+timestamps. No secrets or operator configuration belong in the patch.
+
+The isolated replay test reads the operator source named by
+`CODING_TIMING_MAC_BRIDGE_SOURCE`, applies the patch only to a temporary copy,
+and executes its function definitions with fixture state and canonical services
+backed by a mock database. It never executes the host bootstrap or messaging
+helper. Run with PDM:
+
+```sh
+VON_USE_MOCK_DB=1 CODING_TIMING_MAC_BRIDGE_SOURCE=/operator/path/task-server.py \
+  pdm run pytest tests/backend/test_task_execution_timing.py -q
+```
+
+Without the source path, only the optional operator replay is skipped; canonical
+service and DGX supported-path tests still run. This evidence proves the patched
+code path, not an installed Mac consumer. Apply the reviewed patch and select the
+matching backend/worker release at an idle boundary under the existing lock,
+with the prior bridge and release retained for rollback. Read back a supported
+begin/resume/finish attempt on each installed adapter before claiming activation.
+Preserve the current schedule, identities, active consumers and federation/import
+state. Public web deployment is a separate authorised action.

@@ -18,8 +18,41 @@ worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
 
 
+def test_result_schema_meets_strict_provider_contract_and_preserves_old_results():
+    # The provider rejects an object before execution if any declared property
+    # is absent from required, even when the property's value permits null.
+    def check_objects(schema):
+        if "properties" in schema:
+            assert set(schema["required"]) == set(schema["properties"])
+            assert schema["additionalProperties"] is False
+            for child in schema["properties"].values():
+                check_objects(child)
+
+    check_objects(worker.RESULT_SCHEMA)
+    legacy = {
+        "status": "completed",
+        "summary": "Done",
+        "evidence": "Verified",
+        "question": "",
+        "deploy_commit": "",
+    }
+    assert worker.validate_result(legacy) == legacy
+    current = dict(legacy, blocker=None)
+    assert worker.validate_result(current) == current
+    assert "null" in worker.RESULT_SCHEMA["properties"]["blocker"]["type"]
+    older = {key: value for key, value in legacy.items() if key != "deploy_commit"}
+    assert worker.validate_result(older) == older
+
+
 @pytest.fixture(autouse=True)
 def isolated_archive_boundary(monkeypatch):
+    import mongomock
+    from src.backend.services import task_dispatch_authority_service
+
+    collection = mongomock.MongoClient().test.task_dispatch_authorities
+    monkeypatch.setattr(
+        task_dispatch_authority_service, "_collection", lambda: collection
+    )
     # Existing controller tests isolate publication; canonical archive capture
     # and the real launch path are exercised in test_task_run_archives.py.
     monkeypatch.setattr(worker, "archive_checkpoint", lambda *a, **kw: True)
@@ -213,12 +246,14 @@ def test_deployment_request_and_live_task_authority(
 
 @pytest.mark.parametrize("writer", ["jira", "von", None])
 def test_project_tracking_authority_is_read_live(config, monkeypatch, writer):
-    from src.backend.services import task_project_service
+    from src.backend.services import task_project_service, task_project_home_service
+
+    monkeypatch.setattr(task_project_home_service, "get_project_home", lambda pid: None)
 
     api = object.__new__(worker.Von)
     api.config = config
     monkeypatch.setattr(
-        task_project_service, "get_task_project", lambda pid: {"writer": writer}
+        task_project_service, "task_execution_home", lambda pid: {"writer": writer}
     )
     assert api.native_writer(task(config, project_concept_id="#V#project")) is (
         writer == "von"
@@ -415,6 +450,7 @@ def test_git_preparation_failure_is_reported_without_losing_checkpoint(
 def test_interrupted_clone_recovers_with_independent_metadata_and_no_service_secrets(
     config, tmp_path, monkeypatch
 ):
+    monkeypatch.setattr(worker.Von, "start_execution", lambda *a, **kw: None)
     source = tmp_path / "source"
     run = worker.command
     run(["git", "init", "-b", "main", str(source)])

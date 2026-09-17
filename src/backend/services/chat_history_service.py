@@ -1809,6 +1809,13 @@ def _split_history_into_segments_with_locations(
             copied["contribution_timestamp"] = precise_timestamp.isoformat()
         if isinstance(entry.get("image_attachments"), list):
             copied["image_attachments"] = list(entry["image_attachments"])
+        if isinstance(entry.get("content_parts"), list):
+            copied["content_parts"] = list(entry["content_parts"])
+            if copied["content_parts"]:
+                from .display_elements_service import build_turn_display_elements
+                copied["display_elements"] = build_turn_display_elements(
+                    response_text=entry.get("content"), presenter_channels=None,
+                    content_parts=copied["content_parts"])
         turn_id = entry.get("turn_id")
         if isinstance(turn_id, str) and turn_id.strip():
             copied["turn_id"] = turn_id.strip()
@@ -3332,6 +3339,70 @@ def get_chat_history_segments(
         ) from e
 
 
+def find_chat_history_turn_position(
+    *,
+    user_id: str,
+    session_id: str,
+    turn_id: str,
+    namespace: Optional[str] = None,
+) -> Optional[int]:
+    """Locate a unique stored ID without transferring the full transcript.
+
+    The caller must first authorise this source. Recompute the position on every
+    dereference, so edits before the turn do not change its identity.
+    """
+    collection = get_chat_history_collection_service(read_only=True)
+    if collection is None:
+        raise ChatHistoryServiceError("Could not connect to chat history collection.")
+    _guard_chat_history_read("find_chat_history_turn_position")
+    for query in _build_chat_history_session_read_queries(
+        user_id=user_id,
+        session_id=session_id,
+        namespace=namespace,
+        include_legacy=True,
+    ):
+        rows = _read_aggregate(
+            collection,
+            [
+                {"$match": query},
+                {
+                    "$project": {
+                        "ids": {
+                            "$map": {
+                                "input": _history_array_expr(),
+                                "as": "entry",
+                                "in": {"$ifNull": ["$$entry.turn_id", None]},
+                            }
+                        }
+                    }
+                },
+                {
+                    "$project": {
+                        "position": {"$indexOfArray": ["$ids", turn_id]},
+                        "matches": {
+                            "$size": {
+                                "$filter": {
+                                    "input": "$ids",
+                                    "as": "id",
+                                    "cond": {"$eq": ["$$id", turn_id]},
+                                }
+                            }
+                        },
+                    }
+                },
+            ],
+            operation="find_chat_history_turn_position.aggregate",
+        )
+        row = next(rows, None)
+        if isinstance(row, Mapping):
+            return (
+                row["position"]
+                if row.get("matches") == 1 and row.get("position", -1) >= 0
+                else None
+            )
+    return None
+
+
 def get_chat_history_transcript_page(
     *,
     user_id: str,
@@ -4760,6 +4831,10 @@ def upsert_external_conversation_projection(
         == stored_manifest.get("package_sha256")
         and existing_manifest.get("parser_version")
         == stored_manifest.get("parser_version")
+        and existing_manifest.get("raw_file_copy_concept_id")
+        == stored_manifest.get("raw_file_copy_concept_id")
+        and existing_manifest.get("raw_document_concept_id")
+        == stored_manifest.get("raw_document_concept_id")
     ):
         existing_synchronisation = existing_manifest.get("synchronisation")
         existing_divergence = (
@@ -4782,6 +4857,7 @@ def upsert_external_conversation_projection(
         }
 
     divergence: Dict[str, Any] | None = None
+    corrected_fallback_timestamp_count = 0
     appended_history = prepared_history
     action = "new"
     if existing is not None:
@@ -4849,6 +4925,32 @@ def upsert_external_conversation_projection(
         else:
             action = "refreshed"
 
+        # A missing source timestamp is part of the event fingerprint; its
+        # display fallback is not. Repair only verified, unchanged events.
+        if not divergence:
+            repaired_history = []
+            for entry in existing_history:
+                incoming = incoming_by_id.get(entry.get("external_event_id"))
+                if (
+                    incoming is not None
+                    and "external_source_timestamp_utc" in entry
+                    and entry["external_source_timestamp_utc"] is None
+                    and incoming.get("external_timestamp_source") == "source_file_modified"
+                    and _coerce_datetime(incoming.get("timestamp")) is not None
+                    and (
+                        entry.get("timestamp") != incoming["timestamp"]
+                        or entry.get("external_timestamp_source") != "source_file_modified"
+                    )
+                ):
+                    entry = {
+                        **entry,
+                        "timestamp": incoming["timestamp"],
+                        "external_timestamp_source": "source_file_modified",
+                    }
+                    corrected_fallback_timestamp_count += 1
+                repaired_history.append(entry)
+            existing_history = repaired_history
+
     combined_history = [*existing_history, *appended_history]
     stored_manifest["synchronisation"] = {
         "schema_version": "external_conversation_synchronisation.v1",
@@ -4856,6 +4958,7 @@ def upsert_external_conversation_projection(
         "checked_at_utc": now.isoformat(),
         "appended_message_count": len(appended_history),
         "retained_message_count": len(existing_history),
+        "corrected_fallback_timestamp_count": corrected_fallback_timestamp_count,
         "divergence": divergence,
     }
     search_segments = [
@@ -4903,7 +5006,13 @@ def upsert_external_conversation_projection(
         query[f"{EXTERNAL_CONVERSATION_IMPORT_FIELD}.package_sha256"] = (
             existing_manifest.get("package_sha256")
         )
-        if appended_history:
+        if corrected_fallback_timestamp_count:
+            # Keep the same package compare-and-swap and avoid conflicting
+            # $push/$set updates to the history array.
+            set_fields["history"] = combined_history
+            set_fields["created_at"] = first_message_at
+            set_on_insert.pop("created_at", None)
+        elif appended_history:
             update["$push"] = {"history": {"$each": appended_history}}
     try:
         result = chat_history_coll.update_one(
@@ -4970,6 +5079,7 @@ def upsert_external_conversation_projection(
         "action": action,
         "session_id": session_id,
         "appended_message_count": len(appended_history),
+        "corrected_fallback_timestamp_count": corrected_fallback_timestamp_count,
         "divergence": divergence,
         "canonical_read_back": {
             "session_id": session_id,
@@ -5348,6 +5458,7 @@ def get_chat_history_sessions_older_than_count(
     cutoff: datetime,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    include_imported: bool = True,
     agent_visibility: Any = CHAT_SESSION_AGENT_VISIBILITY_INCLUDE,
 ) -> int:
     """Count actor-owned, untrashed sessions older than a recency cutoff.
@@ -5380,6 +5491,8 @@ def get_chat_history_sessions_older_than_count(
         namespace=namespace,
         include_legacy=include_legacy,
     )
+    if not include_imported:
+        query["origin_kind"] = {"$ne": "external_conversation_import"}
     query["trashed_at"] = None
     clauses: list[Dict[str, Any]] = [
         {
@@ -5737,6 +5850,7 @@ def get_chat_history_session_summaries_page(
     *,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    include_imported: bool = True,
     page_size: int = 100,
     position: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -5762,6 +5876,8 @@ def get_chat_history_session_summaries_page(
         namespace=namespace,
         include_legacy=include_legacy,
     )
+    if not include_imported:
+        base_query["origin_kind"] = {"$ne": "external_conversation_import"}
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     pipeline: List[Dict[str, Any]] = [
         {"$match": base_query},
@@ -5913,6 +6029,7 @@ def _load_chat_history_session_summaries(
     *,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    include_imported: bool = True,
     summary_mode: str = "full",
     metadata_query_limit: int | None = None,
 ) -> List[Dict[str, Any]]:
@@ -5931,6 +6048,9 @@ def _load_chat_history_session_summaries(
     query = build_chat_history_query(
         user_id=user_id, namespace=namespace, include_legacy=include_legacy
     )
+
+    if not include_imported:
+        query["origin_kind"] = {"$ne": "external_conversation_import"}
 
     if light_mode:
         try:
@@ -6113,6 +6233,7 @@ def get_chat_history_session_summaries_result(
     *,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    include_imported: bool = True,
     summary_mode: str = "full",
     agent_visibility: Any = CHAT_SESSION_AGENT_VISIBILITY_INCLUDE,
     keep_newest_agent_created: Any = True,
@@ -6132,6 +6253,7 @@ def get_chat_history_session_summaries_result(
         user_id,
         namespace=namespace,
         include_legacy=include_legacy,
+        include_imported=include_imported,
         summary_mode=summary_mode,
         metadata_query_limit=metadata_query_limit,
     )
@@ -8120,12 +8242,34 @@ def backfill_chat_history_blob_payloads(
                 continue
 
             try:
-                chat_history_coll.update_one(
-                    {"_id": doc.get("_id")},
-                    {"$set": {"history": updated_history}},
-                )
-                sessions_updated += 1
-                entries_updated += session_candidate_entries
+                # Replace only entries we actually observed. A full-array write
+                # could erase a concurrent append, edit, or deletion.
+                changed = 0
+                for index, (before, after) in enumerate(zip(history, updated_history)):
+                    if before == after:
+                        continue
+                    field = f"history.{index}"
+                    result = chat_history_coll.update_one(
+                        {
+                            "_id": doc.get("_id"),
+                            "user_id": doc.get("user_id"),
+                            "namespace": doc.get("namespace"),
+                            field: before,
+                        },
+                        {"$set": {field: after}},
+                    )
+                    if result.matched_count:
+                        changed += 1
+                    else:
+                        errors.append(
+                            {
+                                "type": "entry_changed_concurrently",
+                                "session_id": doc.get("session_id"),
+                                "history_index": index,
+                            }
+                        )
+                sessions_updated += int(changed > 0)
+                entries_updated += changed
             except Exception as exc:
                 errors.append(
                     {

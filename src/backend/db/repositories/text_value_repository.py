@@ -208,7 +208,10 @@ class TextRelationsRepository:
         coll = TextRelationsRepository.collection()
         if coll is None:
             raise RuntimeError("text_relations collection not available")
-        return coll.insert_one(document)
+        from ...services.task_project_home_service import text_relation_mutation
+
+        with text_relation_mutation(coll, {}, document=document):
+            return coll.insert_one(document)
 
     @staticmethod
     def update_one(
@@ -217,14 +220,20 @@ class TextRelationsRepository:
         coll = TextRelationsRepository.collection()
         if coll is None:
             raise RuntimeError("text_relations collection not available")
-        return coll.update_one(filter, update, upsert=upsert)
+        from ...services.task_project_home_service import text_relation_mutation
+
+        with text_relation_mutation(coll, filter, update=update) as fenced_query:
+            return coll.update_one(fenced_query, update, upsert=upsert)
 
     @staticmethod
     def update_many(filter: Dict[str, Any], update: Dict[str, Any]):
         coll = TextRelationsRepository.collection()
         if coll is None:
             raise RuntimeError("text_relations collection not available")
-        return coll.update_many(filter, update)
+        from ...services.task_project_home_service import text_relation_mutation
+
+        with text_relation_mutation(coll, filter, update=update) as fenced_query:
+            return coll.update_many(fenced_query, update)
 
     @staticmethod
     def find_one_and_update(
@@ -233,21 +242,32 @@ class TextRelationsRepository:
         coll = TextRelationsRepository.collection()
         if coll is None:
             return None
-        return coll.find_one_and_update(filter, update, return_document=return_document)
+        from ...services.task_project_home_service import text_relation_mutation
+
+        with text_relation_mutation(coll, filter, update=update) as fenced_query:
+            return coll.find_one_and_update(
+                fenced_query, update, return_document=return_document
+            )
 
     @staticmethod
     def delete_one(filter: Dict[str, Any]):
         coll = TextRelationsRepository.collection()
         if coll is None:
             raise RuntimeError("text_relations collection not available")
-        return coll.delete_one(filter)
+        from ...services.task_project_home_service import text_relation_mutation
+
+        with text_relation_mutation(coll, filter) as fenced_query:
+            return coll.delete_one(fenced_query)
 
     @staticmethod
     def delete_many(filter: Dict[str, Any]):
         coll = TextRelationsRepository.collection()
         if coll is None:
             raise RuntimeError("text_relations collection not available")
-        return coll.delete_many(filter)
+        from ...services.task_project_home_service import text_relation_mutation
+
+        with text_relation_mutation(coll, filter) as fenced_query:
+            return coll.delete_many(fenced_query)
 
     @staticmethod
     def count_documents(filter: Dict[str, Any]) -> int:

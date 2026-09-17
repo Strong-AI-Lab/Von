@@ -153,5 +153,6 @@ Existing worker/inbox tests cover task selection and attachment authority.
 Mocked service/scheduler coverage is not a live Von deployment or another Unix
 account. Before calling the package ready, run the task's isolated canary through
 the normal agent-callable path and retain task, attachment and recipient
-read-back. The implementation task's current delivery explicitly prohibits
-starting another worker, so that acceptance step remains outstanding.
+read-back. Michael authorised the temporary resource-bounded canary on 17 September 2026;
+its current acceptance receipt is retained with the native implementation task.
+That authorisation does not request a permanent additional production consumer.

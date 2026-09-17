@@ -1,3 +1,4 @@
+import { copyCompactConversationReference } from './utils/conversationReference.js';
 import {
   createConcept,
   deleteJson,
@@ -1602,7 +1603,10 @@ async function copyConceptQaReference(session) {
     showToast('This Q&A does not yet have a stable conversation reference.', 'info');
     return false;
   }
-  const copied = await copyTextWithClipboardFallback(JSON.stringify(payload, null, 2));
+  let reference;
+  try { reference = await copyCompactConversationReference(session); }
+  catch (_) { showToast('Conversation reference unavailable.', 'info'); return false; }
+  const copied = await copyTextWithClipboardFallback(reference);
   showToast(
     copied ? 'Copied conversation reference.' : 'Could not copy conversation reference.',
     copied ? 'success' : 'error',

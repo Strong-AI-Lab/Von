@@ -40,6 +40,28 @@ def _codex_source(path: Path) -> None:
     path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
 
 
+def test_planning_recovery_cannot_substitute_another_workers_roots(monkeypatch, tmp_path):
+    batches, items = _collections(monkeypatch)
+    roots = [tmp_path / "mac_snapshot", tmp_path / "dgx_sessions"]
+    for root in roots:
+        root.mkdir()
+        _codex_source(root / "conversation.jsonl")
+    monkeypatch.setenv("VON_CODEX_CONVERSATION_ROOT", str(roots[0]))
+    batch = {"batch_id": "recover", "custodian_user_id": "#V#user",
+             "providers": ["codex"], "status": "planning",
+             "discovery_scope": bulk._discovery_scope(["codex"])}
+    batches.insert_one(batch)
+    monkeypatch.setenv("VON_CODEX_CONVERSATION_ROOT", str(roots[1]))
+    bulk._populate_batch(batch)
+    assert items.count_documents({}) == 0
+    assert batches.find_one({})["status"] == "planning"
+    monkeypatch.setenv("VON_CODEX_CONVERSATION_ROOT", str(roots[0]))
+    bulk._populate_batch(batch)
+    assert items.count_documents({}) == 1
+    assert items.find_one({})["local_path"].startswith(str(roots[0]))
+    assert batches.find_one({})["status"] == "ready"
+
+
 def test_local_blob_store_streams_a_file_without_changing_its_bytes(tmp_path: Path):
     source = tmp_path / "source.bin"
     source.write_bytes((b"bounded-stream" * 1024) + b"end")
@@ -82,6 +104,24 @@ def test_discovery_is_allowlisted_and_preview_does_not_persist(
     assert preview["warning_count"] == 1
     assert str(tmp_path) not in json.dumps(preview)
     assert "local_path" not in json.dumps(preview)
+
+
+def test_default_codex_discovery_includes_archived_conversations(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.delenv("VON_CODEX_CONVERSATION_ROOT", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    for directory in ("sessions", "archived_sessions"):
+        root = tmp_path / ".codex" / directory
+        root.mkdir(parents=True)
+        _codex_source(root / "conversation.jsonl")
+    sources, warnings = bulk.discover_local_conversations(["codex"])
+    assert {source.root_id for source in sources} == {
+        "codex:sessions",
+        "codex:archived",
+    }
+    assert len(sources) == 2
+    assert not warnings
 
 
 def test_batch_pause_resume_and_expired_lease_recovery(monkeypatch, tmp_path: Path):

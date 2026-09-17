@@ -671,6 +671,11 @@ def store_source_archive(
     raw = canonical_json(archive)
     digest = hashlib.sha256(raw).hexdigest()
     data = gzip.compress(raw, mtime=0)
+    # Python 3.11/3.12 may emit the platform OS byte with mtime=0; later
+    # versions emit 255. Keep the header portable and address stored bytes
+    # independently of raw JSON so another compressor cannot replace them.
+    data = data[:9] + b"\xff" + data[10:]
+    blob_digest = hashlib.sha256(data).hexdigest()
     source = archive.get("source", {})
     source_id = str(source.get("id") or source.get("key") or "site")
     kind = archive["kind"]
@@ -692,7 +697,7 @@ def store_source_archive(
             source_system="jira_source_archive",
             source_identifier=source_id,
             source_uri=source.get("self"),
-            blob_key=f"jira-source/{scope}/{kind}/{source_id}/{digest}.json.gz",
+            blob_key=f"jira-source/{scope}/{kind}/{source_id}/{digest}/{blob_digest}.json.gz",
             metadata={
                 "schema": archive["schema"],
                 "content_sha256": digest,
@@ -712,7 +717,7 @@ def store_source_archive(
     return {
         "file_copy_concept_id": receipt["concept_id"],
         "content_sha256": digest,
-        "blob_sha256": hashlib.sha256(data).hexdigest(),
+        "blob_sha256": blob_digest,
         "size_bytes": len(data),
         "complete": bool(archive["complete"]),
         "schema": archive["schema"],

@@ -3958,11 +3958,33 @@ def json_dumps_sorted(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
 
 
+def execute_governed_concept_description_update(
+    concept_id: str, description: str
+) -> dict[str, Any]:
+    """Bind browser description verification to the writer's exact prepared input."""
+    from .concept_service import (
+        prepare_concept_description_update,
+        update_concept_description,
+    )
+
+    prepared = prepare_concept_description_update(concept_id, description)
+    return execute_governed_ontology_method(
+        method_name="upsert_singleton_text_relation",
+        arguments=prepared,
+        mutate=lambda: {
+            "success": update_concept_description(
+                concept_id, description, prepared_update=prepared
+            )
+        },
+    )
+
+
 __all__ = [
     "OntologyMutationCommandError",
     "build_ontology_mutation_intent",
     "canonical_read_back_for_method",
     "delete_legacy_name",
+    "execute_governed_concept_description_update",
     "execute_governed_ontology_method",
     "is_ontology_mutation_method",
     "issue_same_turn_method_delegation",

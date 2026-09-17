@@ -504,6 +504,12 @@ def route_episode_critique_memory(
                 task_concept_id = _safe_str(existing_task.get("task_concept_id"))
                 task_action = "reused_existing" if task_concept_id else "not_needed"
             else:
+                # A retained private namespace is not authority to reconstruct
+                # identity, but it rules out silently publishing an unscoped
+                # task. Keep the critique available for retry with explicit
+                # identity supplied through the normal workflow path.
+                if namespace and not user_id and not org_id:
+                    raise RuntimeError("remediation_task_scope_identity_missing")
                 task = create_task(
                     title=_build_task_title(state_dict),
                     description=_build_task_description(

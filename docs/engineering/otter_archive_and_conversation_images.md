@@ -38,6 +38,18 @@ text. Consumers reassembling originals must check the complete upstream hash.
 
 ## Reusable image handling
 
+In the main conversation composer, open **More actions** (the **+** on a phone),
+then choose **Paste image** to read a copied screenshot through the browser's
+clipboard permission prompt. **Attach image** opens the native image picker if
+clipboard access is unavailable, denied, or contains no image. Both preserve the
+caption and use the existing upload/preview path; review the preview before
+sending. Ordinary text paste still belongs to the message field.
+
+Android keyboards can refuse their own image-tile insertion before Von receives
+a paste event. The explicit action is a recovery for that browser limitation;
+it does not enable Gboard's image tile. See the
+[native observations and diagnosis](mobile_screenshot_paste_2026-09-14.md).
+
 The existing drop, paste and picker routes feed one image pipeline. Up to eight still PNG, JPEG or WebP
 images may accompany a message (8 MiB and 25 million pixels per image). Media is decoded rather than
 trusted by filename. The composer shows progress, previews, removal and failures; unresolved preparation
@@ -204,3 +216,71 @@ handoff increments `event_handoff_failures`, leaves the meeting pending, and
 makes the run partial while retaining the successful preservation receipt. A
 retry reuses the event's durable instance when one already exists. A queued or
 reused workflow does not prove its later mail, deck or paper effects succeeded.
+
+## Mobile/PWA image picker (local acceptance, 14 September 2026)
+
+The composer has an **Attach image** button beside the draft. Choose one or more
+photos/files, wait for previews, enter an instruction, then send. **More actions →
+Paste image** attempts the browser clipboard API; ordinary image paste into the
+conversation and the general **Upload File** control use the same image pipeline.
+Remove an image and choose another to replace it. Removal cancels an in-progress
+browser upload and excludes any late result from the request; an already stored
+source is not deleted. Failed uploads remain visible, block sending, and offer
+retry/removal. Closing the picker leaves the existing draft intact.
+
+The picker advertises PNG, JPEG and WebP. HEIC, animated and other unsupported
+images need conversion to a supported still format; the backend checks actual
+bytes, dimensions and size. Recognised image filenames with an empty browser MIME
+type still use that validator and remain image attachments rather than generic
+workflow file inputs. Clipboard denial, cancellation, missing APIs and an empty
+clipboard provide the picker as a fallback. No clipboard permission is requested
+until **Paste image** is pressed. There is no offline upload queue: retry when
+connectivity returns. Unsent image selections are not restored after a page reload.
+
+Acceptance for PR #658, product revision
+`87f70a14f973ccedb1500b395ea554fb523dddb2`:
+
+- 34 targeted frontend tests passed across attachment request binding, image
+  validation/cancellation, picker/clipboard controls, upload recovery and compact
+  composer behaviour. All 16 `tests/backend/test_conversation_images.py` tests
+  passed, covering authenticated upload/original routes, invalid bytes, actor
+  isolation and provider-byte transport without issuing model requests.
+- `tests/browser/imagePickerAuthenticated.cjs` passed on the operator-prepared
+  disposable fixture at `http://127.0.0.1:5085`, using visible Browser test login
+  as synthetic `#V#blocked_picker658_alice` and a fresh conversation per viewport.
+  Chromium 153.0.8010.12 passed at 360, 412 and 1440 pixels: native chooser event,
+  actual uploads, SHA-256 and original-byte read-back, decoded previews,
+  removal/replacement, preserved caption, cancellation, 44-pixel attachment
+  control and no composer overflow. A failed upload disabled Send and a real
+  retry succeeded. The actual request builder submitted only the replacement ID
+  to the newly created conversation, and no image IDs on the next text request.
+- The same browser loaded the served standalone PWA manifest and exercised the
+  composer with the actual `/von/service-worker.js` controlling `/von/`. This is
+  local PWA-shell acceptance, not physical-device installation or offline upload.
+- `tests/browser/imagePicker.cjs` passed at three widths;
+  `tests/browser/composerControls.cjs` passed all six desktop/touch/short profiles.
+  `tests/browser/mobileScreenshotPaste.cjs` passed at three widths with real
+  desktop clipboard grants/denial, preserved captions, ordinary multiline text
+  paste and stubbed upload endpoints. Authenticated and component evidence is
+  retained under the task worktree's `.run/image-picker-authenticated/` and
+  `.run/image-picker-current/` respectively.
+
+The authenticated fixture deliberately disables generation. Browser submissions
+were intercepted at `/von/generate`; this does not establish a model answer or
+persisted conversation history. It verifies actual upload/storage/read-back and
+frontend request association, complemented by the targeted backend tests.
+
+The operator's Android 17 emulator evidence used Chrome 145 and Gboard 17.2,
+with native Copy/Paste image taps, a real clipboard permission prompt and native
+Allow. The unchanged PR658 helper returned a PNG that decoded to 24×16 and
+preserved captions. Source and clipboard PNG hashes differ because Chromium
+re-encodes clipboard images. The evidence archive is file copy
+`#V#computer_file_copy_7c09b5898bec45148912a9c8bb53a996`, SHA-256
+`4b4a8838656df8a3a5d8b1b360b7e1c5370b1e848120f98f6706a02531e46af2`.
+This establishes the helper's native capability, not physical Pixel, Chrome 152,
+iOS, original-byte clipboard fidelity or a fix for Gboard keyboard-tile refusal.
+The earlier fixture-repair archive is
+`#V#computer_file_copy_9e29aa91aa07485a9054d95ddb85de40`, SHA-256
+`35ed4ddb42f3a96469df16d465a9f230770904c5e402c68d9f34fde3a6ba6cd0`;
+it establishes setup recovery only. Both supplied archive checksums were verified.
+No public deployment was requested by this task.

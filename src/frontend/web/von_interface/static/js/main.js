@@ -11,6 +11,9 @@ import { getLanguageDisplayName } from './languageConfig.js';
 import { escapeHtml } from './markdownUtils.js';
 import './suppressTooltips.js';
 import { activateTab, loadTabData, setupTabNavigation } from './tabNavigation.js';
+import { installOutageView } from '../outage/app.js';
+import { fetchVonHealth, healthErrorKind } from '../outage/health.js';
+import { preserveOutageDraft } from '../outage/draft.js';
 import { evaluateServerHealthState } from './utils/serverHealthState.js';
 import { handleSelectConceptByIdDetail } from './utils/selectConceptByIdHandler.js';
 import {
@@ -54,6 +57,7 @@ const getCurrentNamespace = getSessionScopedNamespace;
 
 document.addEventListener('DOMContentLoaded', async () => {
   console.log("DOM fully loaded and parsed.");
+  installOutageView();
 
   const authStatus = await initialiseHomeAuthentication();
   if (!hasAuthenticatedVonActor(authStatus)) {
@@ -92,6 +96,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     applyHomeAuthUnavailable(new Error(`Organisation context could not be confirmed. ${error.message}`));
     return;
   }
+  let releaseOutageDraft = preserveOutageDraft(getCurrentNamespace);
+  document.addEventListener('orgSwitched', () => {
+    releaseOutageDraft?.();
+    releaseOutageDraft = preserveOutageDraft(getCurrentNamespace);
+  });
   loadDeferredSettingsFrame();
 
   // JVNAUTOSCI-954: report bounded, client-reported capability hints (speech/audio)
@@ -136,6 +145,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Start background preload of Vontology data while chat is active
+  try {
+    const { openNotificationMessage } = await import('./pushNotifications.js');
+    await openNotificationMessage();
+  } catch (error) {
+    console.warn('[main] Notification navigation unavailable');
+  }
+
   try {
     preloadVontologyData();
     startHealthPolling();
@@ -980,11 +996,11 @@ function startHealthPolling() {
           ? formatUptime(Math.max(0, Date.now() - lastHealthSuccessAtMs))
           : null;
         uptimeSpan.textContent = lastCheckLabel
-          ? `server down (checked ${lastCheckLabel})`
-          : 'server down';
+          ? `cannot reach Von (checked ${lastCheckLabel})`
+          : 'cannot reach Von';
         const baseTitle = lastSuccessLabel
-          ? `Von server is unreachable | Last healthy response ${lastSuccessLabel} ago`
-          : 'Von server is unreachable';
+          ? `Connection to Von is unconfirmed | Last healthy response ${lastSuccessLabel} ago`
+          : 'Connection to Von is unconfirmed';
         uptimeSpan.title = copyHint ? `${baseTitle} | ${copyHint}` : baseTitle;
         if (uptimeContainer) uptimeContainer.classList.add('pid-error');
       } else if (serverHealthUiState === 'waiting') {
@@ -1116,10 +1132,10 @@ function startHealthPolling() {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 8000);
-      const res = await fetch('/health', { cache: 'no-store', signal: controller.signal });
-      clearTimeout(timeout);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
+      let data;
+      try { data = await fetchVonHealth({ signal: controller.signal }); }
+      finally { clearTimeout(timeout); }
+      const recoveringFromOutage = serverHealthUiState === 'down';
       lastHealthCheckCompletedAtMs = Date.now();
       hasSeenSuccessfulHealthPoll = true;
       firstFailureAtMs = null;
@@ -2299,7 +2315,8 @@ function startHealthPolling() {
         writeCachedStartTimeIso(newStart);
       }
 
-      if (autoReloadEnabled() && !reloadTriggered && lastIdentity.pid !== null && lastIdentity.start !== null) {
+      if (autoReloadEnabled() && !recoveringFromOutage && !isThinkingActive()
+          && !document.getElementById('promptInput')?.value && !reloadTriggered && lastIdentity.pid !== null && lastIdentity.start !== null) {
         if (newPid !== null && newStart !== null && (newPid !== lastIdentity.pid || newStart !== lastIdentity.start)) {
           reloadTriggered = true;
           setTimeout(() => { try { window.location.reload(); } catch (_) { /* no-op */ } }, 300);
@@ -2316,10 +2333,7 @@ function startHealthPolling() {
         firstFailureAtMs = Date.now();
       }
       const nowMs = Date.now();
-      const isHttpError = typeof e?.message === 'string' && e.message.startsWith('HTTP ');
-      const errorKind = e?.name === 'AbortError'
-        ? 'timeout'
-        : (isHttpError ? 'http' : 'network_or_unknown');
+      const errorKind = healthErrorKind(e);
       const errorDetail = typeof e?.message === 'string'
         ? e.message
         : String(e || '');
@@ -2375,6 +2389,10 @@ function startHealthPolling() {
     }
     scheduleHealthPoll(nextDelay);
   }
+  document.addEventListener('von:requestHealthCheck', () => {
+    if (healthPollTimerId) clearTimeout(healthPollTimerId);
+    void poll();
+  });
   poll();
   // Also update busy indicator more responsively
   setInterval(updateBusyIndicator, 1500);

@@ -11950,6 +11950,101 @@ def test_current_conversation_history_read_cannot_be_redirected_by_model() -> No
     }
 
 
+@pytest.mark.parametrize("persisted", [True, False])
+def test_pending_workflow_returns_actual_continuation_registration_receipt(
+    monkeypatch, persisted
+):
+    from src.backend.services.workflow_turn_capability_service import (
+        WorkflowTurnCapability,
+    )
+
+    capability = WorkflowTurnCapability(
+        name="represented_pending",
+        workflow_id="#V#pending",
+        display_name="Pending",
+        description="Extract the document",
+        relevance_score=1,
+        input_schema={},
+    )
+    monkeypatch.setattr(
+        "src.backend.services.workflow_turn_capability_service.discover_turn_workflow_capabilities",
+        lambda *a, **kw: ([capability], {"status": "completed", "match_count": 1}),
+    )
+    registered = []
+
+    def register(**kwargs):
+        registered.append(kwargs)
+        return {
+            "persisted": persisted,
+            "reason": "test_receipt",
+            "queue_id": "held" if persisted else None,
+        }
+
+    monkeypatch.setattr(
+        "src.backend.services.background_workflow_continuation_service.register_continuation",
+        register,
+    )
+    client = _SequenceClient(
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_capabilities",
+                    call_id="discover",
+                    payload={"query": "extract document"},
+                )
+            ],
+        ),
+        LLMResponse(
+            text_response="",
+            tool_calls=[
+                ToolCall(
+                    tool_name="turn_invoke_capability",
+                    call_id="invoke",
+                    payload={
+                        "name": capability.name,
+                        "arguments": {
+                            "continuation_prompt": "Reconcile the existing event and complete remaining representation"
+                        },
+                    },
+                )
+            ],
+        ),
+        LLMResponse(text_response="Extraction remains pending."),
+    )
+    execute_adaptive_turn(
+        gateway=_workflow_gateway(
+            lambda **kw: {
+                "success": True,
+                "instance_id": "instance",
+                "created_new": True,
+                "final_status": "running",
+            },
+            hard_timeout_enabled=False,
+        ),
+        prompt="Represent this event",
+        context=[],
+        llm_client=client,
+        model="test-model",
+        user_namespace="#V#user@org",
+        user_concept_id="#V#user",
+        org_concept_id="#V#org",
+        turn_id="request",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+    assert len(registered) == 1
+    assert registered[0]["scope"]["user_concept_id"] == "#V#user"
+    assert registered[0]["request_id"] == "request"
+    encoded = "\n".join(
+        str(message.get("content", "")) for message in client.calls[2]["context"]
+    )
+    assert '"conversation_continuation"' in encoded
+    assert (
+        '"persisted":true' if persisted else '"persisted":false'
+    ) in encoded.replace(" ", "")
+
+
 def test_represented_workflow_is_discovered_and_invoked_as_bound_capability(
     monkeypatch,
 ) -> None:
@@ -16444,7 +16539,8 @@ def test_steering_after_tool_keeps_receipt_and_does_not_repeat_effect():
 
 
 @pytest.mark.parametrize(
-    "scenario", ["direct", "recovery", "assign", "replay", "partial", "partial_replay", "failure"]
+    "scenario",
+    ["direct", "recovery", "assign", "replay", "partial", "partial_replay", "failure"],
 )
 def test_task_creation_requested_outcome_reaches_final_response(scenario: str) -> None:
     from src.backend.integrations.internal_mcp.schemas import make_error_response
@@ -16616,15 +16712,30 @@ def test_task_creation_requested_outcome_reaches_final_response(scenario: str) -
         "description",
         "organisation_concept_id",
         "requested_model",
+        "requested_reasoning_effort",
+        "priority",
+        "due_date",
+        "notes",
         "assignee_concept_id",
         "unverified",
         "changed",
+        "partial",
         "other_type_error",
         "later_reassignment",
     ],
 )
+@pytest.mark.parametrize(
+    "invalid_field,error",
+    [
+        ("task_type_id", "Unknown task type"),
+        ("task_source_id", "Unknown task source"),
+        ("source_id", "Unknown task source"),
+    ],
+)
 def test_task_create_reconciliation_requires_matching_verified_requested_object(
     difference: str,
+    invalid_field: str,
+    error: str,
 ) -> None:
     arguments = {
         "title": "Requested work",
@@ -16632,6 +16743,11 @@ def test_task_create_reconciliation_requires_matching_verified_requested_object(
         "organisation_concept_id": "#V#org",
         "assignee_concept_id": "#V#codex_dgx",
         "requested_model": "test-model",
+        "requested_reasoning_effort": "high",
+        "priority": "high",
+        "due_date": "2026-10-01T12:00:00Z",
+        "notes": "Source: fixture-message-001",
+        "idempotency_key": "same-key-is-not-enough",
     }
     later_arguments = dict(arguments)
     fields = {"assignee_concept_id": "#V#codex_dgx"}
@@ -16645,7 +16761,7 @@ def test_task_create_reconciliation_requires_matching_verified_requested_object(
             "tool": "task_create",
             "effective_arguments": {
                 **arguments,
-                "task_type_id": "#V#task_specification",
+                invalid_field: "#V#invalid_category",
             },
         },
         {
@@ -16656,14 +16772,14 @@ def test_task_create_reconciliation_requires_matching_verified_requested_object(
     ]
     snapshot = {
         "failed": {
-            "effect_status": "failed",
+            "effect_status": "partial" if difference == "partial" else "failed",
             "changed": difference == "changed",
             "failure_fact": {
                 "error_code": "INVALID_DATA",
                 "error": (
                     "Other validation failure"
                     if difference == "other_type_error"
-                    else "Unknown task type"
+                    else error
                 ),
             },
         },
@@ -16704,3 +16820,46 @@ def test_task_create_reconciliation_requires_matching_verified_requested_object(
         difference == "none"
     )
     assert "recovery_status" not in snapshot["failed"]
+
+
+def test_image_only_native_output_is_a_completed_answer_and_is_retained(monkeypatch):
+    from src.backend.services import conversation_image_service as images
+    from src.backend.languagemodels.structured_tool_calling.types import LLMContentPart
+    import io
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.new('RGB', (16, 12), 'navy').save(buffer, 'PNG')
+    data = buffer.getvalue()
+    seen = []
+    def store(**kw):
+        seen.append(kw)
+        return {'concept_id': '#V#generated-fixture', **images.inspect_image(data), 'provenance': kw['provenance']}
+    monkeypatch.setattr(images, 'store_image', store)
+    client = _SequenceClient(LLMResponse(text_response='', content_parts=[
+        LLMContentPart('image', 'ig-1', image_data=data, provenance={'kind': 'generated'})]))
+    result = execute_adaptive_turn(gateway=_gateway(lambda **kw: {'success': True}),
+        prompt='Illustrate diffusion.', context=[], llm_client=client, model='test-model',
+        user_concept_id='#V#person', org_concept_id='#V#org', turn_id='visual-turn')
+    assert result.terminal_status == 'completed'
+    assert len(client.calls) == 1
+    assert result.content_parts[0]['asset']['concept_id'] == '#V#generated-fixture'
+    assert seen[0]['user_concept_id'] == '#V#person'
+    assert 'image_data' not in str(result)
+
+
+def test_generated_image_storage_failure_preserves_text_without_another_model_call(monkeypatch):
+    from src.backend.services import conversation_image_service as images
+    from src.backend.languagemodels.structured_tool_calling.types import LLMContentPart
+    monkeypatch.setattr(images, 'inspect_image', lambda b: {'content_type': 'image/png', 'sha256': 'a' * 64})
+    def fail(**kw): raise OSError('unavailable')
+    monkeypatch.setattr(images, 'store_image', fail)
+    client = _SequenceClient(LLMResponse(text_response='Useful explanation.', content_parts=[
+        LLMContentPart('text', 'text1', text='Useful explanation.'),
+        LLMContentPart('image', 'ig-1', image_data=b'fixture', provenance={'kind': 'generated'})]))
+    result = execute_adaptive_turn(gateway=_gateway(lambda **kw: {'success': True}),
+        prompt='Illustrate diffusion.', context=[], llm_client=client, model='test-model',
+        user_concept_id='#V#person', turn_id='visual-turn')
+    assert result.terminal_status == 'answer_partially_completed'
+    assert result.response_text == 'Useful explanation.'
+    assert result.content_parts[1]['kind'] == 'media_error'
+    assert len(client.calls) == 1

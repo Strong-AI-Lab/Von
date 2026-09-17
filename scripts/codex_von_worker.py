@@ -23,6 +23,22 @@ from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 
+try:
+    from . import codex_von_retry as retry_policy
+except ImportError:
+    try:
+        import codex_von_retry as retry_policy
+    except ImportError:
+        from scripts import codex_von_retry as retry_policy
+
+try:
+    from . import codex_von_supervision as supervision
+except ImportError:
+    try:
+        import codex_von_supervision as supervision
+    except ImportError:
+        from scripts import codex_von_supervision as supervision
+
 ACTIVITY_CHECKPOINT_SECONDS = 15
 INSTANCE_PROTOCOL_VERSION = 1
 
@@ -35,8 +51,18 @@ RESULT_SCHEMA = {
         "evidence": {"type": "string"},
         "question": {"type": "string"},
         "deploy_commit": {"type": "string"},
+        "blocker": retry_policy.BLOCKER_SCHEMA,
+        "repair_receipt_json": {"type": ["string", "null"]},
     },
-    "required": ["status", "summary", "evidence", "question", "deploy_commit"],
+    "required": [
+        "status",
+        "summary",
+        "evidence",
+        "question",
+        "deploy_commit",
+        "blocker",
+        "repair_receipt_json",
+    ],
     "additionalProperties": False,
 }
 
@@ -85,6 +111,8 @@ def capability_context(config, *, read_only, worktree=None):
         "von_mcp": "disabled; canonical reads/effects belong to the controller",
         "controller_actions": ["reply", "resume_task", "create_task"],
         "deployment_enabled": bool(config.get("deployment_command")),
+        "retry_probe_keys": sorted((config.get("retry_probes") or {}).keys()),
+        "supervision_enabled": bool(config.get("supervision_enabled")),
         "limitations": [
             "Use available shell tools for non-secret host/repository facts; missing supplied facts do not mean inspection is unavailable.",
             "Do not access credentials, private databases or live-service mutation routes.",
@@ -161,12 +189,29 @@ def require_task_execution_preferences(task):
 
 
 def authorised_task(task, config):
-    return (
-        task.get("assignee_concept_id") == config["agent_id"]
+    if (
+        task.get("assignee_concept_id") != config["agent_id"]
+        or task.get("organisation_concept_id") not in (None, config["organisation_id"])
+    ):
+        return False
+    if not config.get("supervision_enabled") and task.get(
+        "report_to_concept_id"
+    ) not in (None, config["delegator_id"]):
+        return False
+    from src.backend.services.task_dispatch_authority_service import (
+        has_assignment_record,
+        is_authorised_assignment,
+    )
+    if (
+        not task.get("federation")
         and task.get("organisation_concept_id") == config["organisation_id"]
         and task.get("created_by_concept_id") == config["delegator_id"]
-        and task.get("report_to_concept_id") in (None, config["delegator_id"])
-    )
+        and not has_assignment_record(task["task_concept_id"])
+    ):
+        return True
+    if not task.get("dispatch_requested"):
+        return False
+    return is_authorised_assignment(task, config["delegator_id"])
 
 
 def referenced_tasks(config, api, supplied, task_ids=()):
@@ -406,8 +451,8 @@ def check_task(config, api, task_id):
     while True:
         page = api.tasks.search_tasks(
             assignee_concept_id=config["agent_id"],
-            created_by_concept_id=config["delegator_id"],
             organisation_concept_id=config["organisation_id"],
+            organisation_scope_mode="current_plus_unscoped",
             statuses=[task["status"]],
             limit=200,
             offset=offset,
@@ -434,14 +479,22 @@ def check_task(config, api, task_id):
 
 
 def validate_result(value):
-    fields = set(RESULT_SCHEMA["required"])
-    if not isinstance(value, dict) or set(value) not in (
+    # Strict output requires every property; retained old results may omit blocker.
+    optional = {"blocker", "repair_receipt_json"}
+    fields = set(RESULT_SCHEMA["required"]) - optional
+    if not isinstance(value, dict) or set(value) - optional not in (
         fields,
         fields - {"deploy_commit"},
     ):
         raise ValueError("Codex did not return the required result fields")
-    if any(not isinstance(v, str) for v in value.values()):
+    if any(not isinstance(v, str) for k, v in value.items() if k not in optional):
         raise ValueError("Codex result fields must be text")
+    if value.get("repair_receipt_json") is not None and (
+        not isinstance(value["repair_receipt_json"], str)
+        or not isinstance(json.loads(value["repair_receipt_json"]), dict)
+    ):
+        raise ValueError("Repair receipt must be a JSON object string or null")
+    retry_policy.validate_blocker(value.get("blocker"))
     if value["status"] not in RESULT_SCHEMA["properties"]["status"]["enum"]:
         raise ValueError("Unknown Codex outcome")
     if not value["summary"].strip() or (
@@ -467,10 +520,18 @@ class Von:
     def native_writer(self, task):
         project_id = task.get("project_concept_id")
         if project_id:
-            from src.backend.services.task_project_service import get_task_project
+            from src.backend.services.task_project_service import task_execution_home
 
-            project = get_task_project(project_id)
-            return bool(project and project.get("writer") == "von")
+            project = task_execution_home(task["task_concept_id"])
+            home = project.get("write_home") if project else None
+            return bool(
+                project
+                and project.get("writer") == "von"
+                and (
+                    home is None
+                    or home.get("writable_here") is True
+                )
+            )
         return not task.get("is_imported_jira_task", False)
 
     def pending(self):
@@ -478,8 +539,8 @@ class Von:
         while True:
             page = self.tasks.search_tasks(
                 assignee_concept_id=self.config["agent_id"],
-                created_by_concept_id=self.config["delegator_id"],
                 organisation_concept_id=self.config["organisation_id"],
+                organisation_scope_mode="current_plus_unscoped",
                 statuses=sorted(ACTIVE),
                 limit=200,
                 offset=offset,
@@ -508,9 +569,11 @@ class Von:
         require_task_execution_preferences(task)
         task_id = task["task_concept_id"]
         comments = []
+        all_comments = []
         offset = 0
         while True:
             page = self.tasks.list_task_comments(task_id, offset=offset, limit=500)
+            all_comments.extend(page["comments"])
             comments.extend(
                 c
                 for c in page["comments"]
@@ -598,11 +661,46 @@ class Von:
             "requested_model": task.get("requested_model"),
             "requested_reasoning_effort": task.get("requested_reasoning_effort"),
             "comments": comments,
+            "reporting_resolution": supervision.resolution(task)
+            if self.config.get("supervision_enabled")
+            else None,
+            "report_to_concept_id": task.get("report_to_concept_id"),
+            "supervisor_repair_comments": supervision.repair_comments(
+                self.config, self, task, all_comments
+            ),
             "replies": [
                 message for message in replies if not self.inbox_answered(message)
             ],
             **self.followup_context(task_id),
         }
+
+    def reconcile_supervision(self, task, state, persist):
+        try:
+            return supervision.reconcile(self.config, self, task, state, persist)
+        except Exception as exc:  # noqa: BLE001 - preserve failed handoffs while other tasks progress
+            key = (
+                fingerprint(
+                    [state["task_id"], state.get("attempt"), type(exc).__name__]
+                )
+                + ":supervision-failure"
+            )
+            if state.get("supervision_failure_message", {}).get("key") != key:
+                message_id = self.send(
+                    task,
+                    key,
+                    f"Supervisor handoff for {state['task_id']} could not be reconciled ({type(exc).__name__}). "
+                    "Review the existing repair task, current assignment, organisation membership and reporting configuration. "
+                    "The source remains waiting without another coding launch; retained state is available to the controller.",
+                )
+                state["supervision_failure_message"] = {
+                    "key": key,
+                    "message_id": message_id,
+                }
+                persist()
+            return None
+
+    def record_supervisor_repair(self, task, result):
+        return supervision.record_repair(self.config, self, task, result)
 
     def inbox_answered(self, message):
         if not self.config.get("inbox_enabled"):
@@ -713,7 +811,7 @@ class Von:
             recipient_ids=[c["delegator_id"]],
             organisation_concept_id=c["organisation_id"],
             thread_id=task["task_concept_id"],
-            subject=f"{c.get('agent_name', c['agent_id'])}: {task['title']}",
+            subject=f"{c.get('display_name', c.get('agent_name', c['agent_id']))}: {task['title']}",
             content=content,
             metadata={"attribution": "Sent by " + c["agent_id"]},
         )
@@ -726,6 +824,47 @@ class Von:
             raise RuntimeError("Direct message canonical read-back failed")
         return message_id
 
+    def start_execution(self, state, *, source="codex_dgx"):
+        from src.backend.services import task_execution_timing_service as timing
+
+        state["execution_source"] = source
+        task = timing.start(
+            state["task_id"],
+            attempt_id=state["attempt"],
+            actor_concept_id=self.config["agent_id"],
+            started_at=state["execution_started_at"],
+            source=source,
+        )
+        state["execution_timing"] = task["execution_timing"]
+        return task
+
+    def finish_execution(self, state):
+        from src.backend.services import task_execution_timing_service as timing
+
+        self.start_execution(state, source=state.get("execution_source", "codex_dgx"))
+        task = timing.finish(
+            state["task_id"],
+            attempt_id=state["attempt"],
+            actor_concept_id=self.config["agent_id"],
+            outcome=state["result"]["status"],
+            ended_at=state.get("finished_at"),
+        )
+        # Optional accounting must never hold up accepted timing/completion.
+        # Only controller-retained events are read, never model result fields.
+        try:
+            receipt = execution_usage(state)
+            task = timing.record_usage(
+                state["task_id"],
+                attempt_id=state["attempt"],
+                actor_concept_id=self.config["agent_id"],
+                receipt=receipt,
+            )
+            state.pop("usage_recording_error_type", None)
+        except Exception as exc:  # noqa: BLE001 - accounting cannot gate timing
+            state["usage_recording_error_type"] = type(exc).__name__
+        state["execution_timing"] = task["execution_timing"]
+        return task
+
     def finish(self, state):
         try:
             task = self.task(state["task_id"])
@@ -735,17 +874,50 @@ class Von:
                 "title": state.get("title", state["task_id"]),
             }
         result = state["result"]
+        blocker = retry_policy.retain_blocker(self.config, state)
         scope_valid = (
             authorised_task(task, self.config)
             and task.get("status") in ACTIVE
             and self.native_writer(task)
         )
+        timing_receipt = None
+        if state.get("execution_started_at") and (
+            scope_valid
+            or (
+                authorised_task(task, self.config)
+                and self.native_writer(task)
+                and task.get("status") == "completed"
+                and result["status"] == "completed"
+                and any(
+                    a["attempt_id"] == state["attempt"] and a.get("outcome") == "completed"
+                    for a in task.get("execution_timing", {}).get("attempts", [])
+                )
+            )
+        ):
+            # Supervisor receipts require the still-active repair assignment.
+            if scope_valid:
+                self.record_supervisor_repair(task, result)
+            # Canonical acceptance precedes its completion message. Replaying
+            # this attempt cannot complete a reopened task.
+            timing_receipt = self.finish_execution(state)["execution_timing"]
+            task = self.task(state["task_id"])
+            scope_valid = task["status"] == (
+                "completed" if result["status"] == "completed" else "blocked"
+            )
         content = (
             f"{result['summary']}\n\n{result['evidence']}\n\n"
             f"{result['question']}\n\nTask: {state['task_id']}\n"
             f"Coding worktree: {state.get('worktree', 'not started')}\n"
             f"Run: {state['attempt']}"
         ).strip()
+        if timing_receipt:
+            content += "\n\n" + execution_timing_text(timing_receipt, state["attempt"])
+        if state.get("usage_recording_error_type"):
+            content += (
+                "\nUsage receipt could not be recorded; timing acceptance succeeded."
+            )
+        if blocker:
+            content += "\n\n" + retry_policy.waiting_text(blocker)
         if state.get("execution_settings"):
             settings = state["execution_settings"]
             content += (
@@ -775,6 +947,8 @@ class Von:
             state["report_task"], state["attempt"] + ":result", state["report_content"]
         )
         if scope_valid:
+            if timing_receipt is None:
+                self.record_supervisor_repair(task, result)
             evidence_addition = (
                 f"{result['evidence']}\nVon result: {message_id}\n"
                 f"Execution archive: {capture.get('archive_url', 'unavailable')}\n"
@@ -787,8 +961,11 @@ class Von:
             report_fields = {
                 "progress_signal": result["summary"],
                 "evidence": evidence,
-                "next_checkpoint": result["question"]
-                or "Result available in Von messages.",
+                "next_checkpoint": (
+                    retry_policy.waiting_text(blocker)
+                    if blocker
+                    else result["question"] or "Result available in Von messages."
+                ),
             }
             self.tasks.update_task_fields(
                 state["task_id"],
@@ -801,6 +978,8 @@ class Von:
             )
             if self.task(state["task_id"])["status"] != status:
                 raise RuntimeError("Task status canonical read-back failed")
+            if blocker:
+                state["waiting_report"] = {"delivered": True, "message_id": message_id}
             # Reporting changes evidence/checkpoint fields now supplied as context.
             # Do not mistake this worker's own report for a new instruction.
             # Retain the launch snapshot so a concurrent user note/comment
@@ -820,6 +999,46 @@ class Von:
             ),
             message_id=message_id,
         )
+
+
+def execution_usage(state):
+    from src.backend.services import coding_execution_usage as usage
+
+    model = (state.get("execution_settings") or {}).get("model")
+    if state.get("execution_source") == "codex_vscode":
+        return usage.unknown(
+            "Interactive bridge has no trusted task-specific token receipt or turn interval",
+            configured_model=model,
+            thread_id=state.get("consumer_thread"),
+            source="codex_vscode.consumer_thread",
+        )
+    if not state.get("run_dir"):
+        return usage.unknown("No retained exec stream", configured_model=model)
+    try:
+        with (Path(state["run_dir"]) / "events.jsonl").open("rb") as stream:
+            return usage.from_exec_stream(stream, configured_model=model)
+    except OSError:
+        return usage.unknown("Exec stream unavailable", configured_model=model)
+
+
+def execution_timing_text(timing, attempt_id):
+    attempt = next(a for a in timing["attempts"] if a["attempt_id"] == attempt_id)
+    usage = attempt.get("usage") or {}
+    counters = usage.get("tokens")
+    usage_text = (
+        f"Observed root tokens (partial coverage): input {counters['input_tokens']}, "
+        f"cached input {counters['cached_input_tokens']} (included in input), "
+        f"output {counters['output_tokens']}."
+        if counters
+        else "Attempt token usage: unknown."
+    )
+    return (
+        f"Execution start (UTC): {attempt['started_at']}\n"
+        f"Execution end (UTC): {attempt.get('ended_at') or 'unknown'}\n"
+        f"Task completion accepted (UTC): {attempt.get('completion_accepted_at') or 'not completed'}\n"
+        f"Attempt elapsed wall-clock seconds (includes waits): {attempt.get('elapsed_wall_seconds')}\n"
+        f"{usage_text}\nTask cost: unknown; subscription usage is not a per-task invoice."
+    )
 
 
 def command(args, **kwargs):
@@ -879,6 +1098,7 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         "assignment": inputs,
         "conversation": conversation,
         "prior_result": state.get("result"),
+        "retry_admission": state.get("pending_admission"),
         "worker_identity": config["agent_id"],
         "capabilities": capability_context(config, read_only=False, worktree=worktree),
     }
@@ -894,10 +1114,16 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
                     "error_type": type(exc).__name__,
                 }
     context["file_copy_evidence"] = stage_file_copy_evidence(config, context, run_dir)
+    followup = inputs.get("followup") or {}
+    if followup.get("attachments"):
+        attachment_context = {"message": followup}
+        inbox_module().prepare_attachment_inputs(config, attachment_context, run_dir)
+        context["attachment_inputs"] = attachment_context.get("attachment_inputs", [])
     context_path = run_dir / "context.json"
     write_json(context_path, context)
     prompt = Path(__file__).with_name("codex_von_worker_prompt.md").read_text()
     prompt += f"\nRead your assigned context from {context_path}.\n"
+    retry_policy.consume(state, state.pop("pending_admission", {"kind": "initial"}))
     state.update(
         phase="running",
         attempt=attempt,
@@ -905,7 +1131,7 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         run_dir=str(run_dir),
         input_hash=input_fingerprint(inputs),
         input_snapshot=inputs,
-        started_at=datetime.now(UTC).isoformat(),
+        prepared_at=datetime.now(UTC).isoformat(),
         worker_revision=config.get("runtime_evidence", {}).get("commit"),
     )
     for key in (
@@ -913,6 +1139,11 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         "capture_provenance",
         "archive_pending_reported",
         "finished_at",
+        "started_at",
+        "execution_started_at",
+        "execution_timing",
+        "execution_source",
+        "usage_recording_error_type",
     ):
         state.pop(key, None)
     state.pop("result", None)
@@ -1034,6 +1265,14 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
             stderr=errors,
             pass_fds=(lock_fd, *config.get("_capacity_fds", ())),
         ) as process:
+            # The child is alive and waiting for its authorised input. Queue,
+            # checkout preparation and reservation are not execution time.
+            state["started_at"] = state["execution_started_at"] = datetime.now(
+                UTC
+            ).isoformat()
+            write_json(state_path, state)
+            api.start_execution(state)
+            write_json(state_path, state)
             process.stdin.write(prompt)
             process.stdin.close()
             while True:
@@ -1056,7 +1295,10 @@ def recover_result(state):
     """Only a successful process plus valid structured output is completion."""
     run_dir = Path(state["run_dir"])
     try:
-        if json.loads((run_dir / "exit.json").read_text())["returncode"] != 0:
+        exit_receipt = json.loads((run_dir / "exit.json").read_text())
+        if exit_receipt.get("finished_at"):
+            state["finished_at"] = exit_receipt["finished_at"]
+        if exit_receipt["returncode"] != 0:
             raise ValueError("Codex exited unsuccessfully")
         result = validate_result(json.loads((run_dir / "result.json").read_text()))
     except (OSError, ValueError, KeyError) as exc:
@@ -1064,7 +1306,7 @@ def recover_result(state):
             "status": "blocked",
             "summary": "The Codex run did not produce a verified terminal result.",
             "evidence": f"{type(exc).__name__}. Work and logs remain at {run_dir}.",
-            "question": "Please set this task back to pending to retry after checking the retained run.",
+            "question": "Reconcile the retained work and effects, then give an explicit retry reason in the task thread.",
         }
     state.update(phase="reporting", result=result)
 
@@ -1205,6 +1447,99 @@ def backfill_run(config, api, selection):
     return {"task_id": task_id, "attempt": attempt, "capture": state["capture"]}
 
 
+def probe_recovery(config, state, state_path):
+    """Run only an operator-registered cheap read probe, never model output code.
+
+    Probe bounds protect controller/queue liveness. The operator selects these
+    from that probe's declared/observed duration, independently of coding time.
+    Saving the next check first also backs off an interrupted/unknown probe.
+    """
+    blocker = state.get("blocker") or {}
+    if blocker.get("kind") != "transient":
+        return None
+    probe = (config.get("retry_probes") or {}).get(blocker.get("probe_key"))
+    if not probe:
+        return None
+    now = datetime.now(UTC)
+    next_check = retry_policy.timestamp(blocker.get("next_check_at"))
+    if next_check and now < next_check:
+        return None
+    from datetime import timedelta
+
+    timeout = float(probe["timeout_seconds"])
+    interval = float(probe["interval_seconds"])
+    maximum = float(probe["max_interval_seconds"])
+    argv = probe["argv"]
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(arg, str) for arg in argv)
+        or not 0 < timeout <= interval <= maximum
+    ):
+        raise ValueError("Invalid operator retry probe bounds or argv")
+    failures = min(blocker.get("probe_failures", 0), 16)
+    blocker["next_check_at"] = (
+        now + timedelta(seconds=min(maximum, interval * 2**failures))
+    ).isoformat()
+    write_json(state_path, state)
+    try:
+        completed = subprocess.run(
+            argv,
+            input=json.dumps(blocker),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=True,
+        )
+        receipt = json.loads(completed.stdout)
+        if retry_policy.verified_repair(blocker, receipt, datetime.now(UTC)):
+            return {
+                "kind": "probe_recovery",
+                "token": "probe:" + retry_policy.digest(receipt),
+                "reason": receipt["reason"],
+                "receipt": receipt,
+            }
+        blocker["probe_outcome"] = "observations_not_verified"
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        blocker["probe_outcome"] = type(exc).__name__
+    blocker["probe_failures"] = failures + 1
+    write_json(state_path, state)
+    return None
+
+
+def report_waiting(config, api, task, state, path):
+    """One stable report per blocker, including legacy state adopted at upgrade."""
+    blocker = state["blocker"]
+    report = state.setdefault(
+        "waiting_report",
+        {
+            "key": fingerprint([blocker["binding"], blocker["attempt"], blocker["key"]])
+            + ":waiting",
+            "content": retry_policy.waiting_text(blocker),
+        },
+    )
+    if report.get("delivered"):
+        return
+    write_json(path, state)
+    report["message_id"] = api.send(task, report["key"], report["content"])
+    api.tasks.update_task_fields(
+        state["task_id"],
+        fields={"next_checkpoint": report["content"]},
+        actor_concept_id=config["agent_id"],
+    )
+    api.tasks.update_task_status(
+        state["task_id"], "blocked", actor_concept_id=config["agent_id"]
+    )
+    current = api.task(state["task_id"])
+    if (
+        current.get("next_checkpoint") != report["content"]
+        or current["status"] != "blocked"
+    ):
+        raise RuntimeError("Waiting checkpoint canonical read-back failed")
+    report["delivered"] = True
+    write_json(path, state)
+
+
 def tick(config, api, lock_fd):
     states_dir = Path(config["state_root"]) / "tasks"
     states_dir.mkdir(parents=True, exist_ok=True)
@@ -1222,8 +1557,12 @@ def tick(config, api, lock_fd):
             recover_result(state)
             write_json(path, state)
         if state["phase"] in {"reporting", "archive_pending"}:
-            apply_deployment(config, api, state, path, lock_fd)
-            finish_captured(config, api, state, path)
+            try:
+                apply_deployment(config, api, state, path, lock_fd)
+                finish_captured(config, api, state, path)
+            except Exception as exc:  # noqa: BLE001 - preserve any failed report without wedging other tasks
+                state["reconciliation_error"] = type(exc).__name__
+                write_json(path, state)
     if config.get("inbox_enabled") and inbox_module().tick(config, api, lock_fd):
         return
     for task in api.pending():
@@ -1236,22 +1575,92 @@ def tick(config, api, lock_fd):
             if path.exists()
             else {"task_id": task_id, "phase": "new"}
         )
-        if state["phase"] == "archive_pending":
+        if state["phase"] in {"running", "reporting", "archive_pending"}:
             continue
         state["title"] = task["title"]
         inputs = api.inputs(task)
+        # A lost controller state is not proof that earlier effects never ran.
+        # Adopt canonical blocked/in-progress evidence without replaying work.
+        if (state["phase"] == "new" and task["status"] != "pending") or (
+            state["phase"] == "waiting" and not state.get("result")
+        ):
+            state.update(
+                phase="waiting",
+                attempt="unretained-"
+                + fingerprint(
+                    [
+                        task_id,
+                        task.get("updated_at"),
+                        task.get("evidence"),
+                    ]
+                )[:16],
+                result={
+                    "status": "blocked",
+                    "summary": task.get("progress_signal")
+                    or "Canonical task has prior work but its local attempt state is unavailable.",
+                    "evidence": task.get("evidence") or "",
+                    "question": task.get("next_checkpoint")
+                    or "Reconcile canonical results and retained work before an explicit retry.",
+                },
+            )
+        if state["phase"] == "waiting":
+            decision = retry_policy.admission(config, state, inputs)
+            write_json(path, state)
+            if decision is None:
+                try:
+                    decision = probe_recovery(config, state, path)
+                except (KeyError, TypeError, ValueError) as exc:
+                    state["blocker"]["probe_outcome"] = type(exc).__name__
+            if decision is None:
+                # One task's unavailable reporting must not wedge the queue.
+                try:
+                    report_waiting(config, api, task, state, path)
+                    if config.get("supervision_enabled"):
+                        api.reconcile_supervision(
+                            task,
+                            state,
+                            lambda path=path, state=state: write_json(path, state),
+                        )
+                except Exception as exc:  # noqa: BLE001 - canonical reporting errors stay isolated to this task
+                    state["waiting_report_error"] = type(exc).__name__
+                    write_json(path, state)
+                continue
+            state["pending_admission"] = decision
         if (
-            state["phase"] in {"waiting", "done"}
+            state["phase"] == "done"
             and task["status"] != "pending"
             and state.get("input_hash") == input_fingerprint(inputs)
         ):
             continue
+        if state.get("pending_admission"):
+            # Probes and evidence reads can outlast a cancellation or reassignment.
+            # Re-read the supported canonical route before consuming any retry.
+            current = api.task(task_id)
+            if not (
+                authorised_task(current, config)
+                and current.get("status") in ACTIVE
+                and api.native_writer(current)
+            ):
+                continue
+            current_inputs = api.inputs(current)
+            decision = state["pending_admission"]
+            if decision["kind"] != "probe_recovery":
+                checked = retry_policy.admission(config, state, current_inputs)
+                if not checked or checked.get("token") != decision.get("token"):
+                    continue
+            task, inputs = current, current_inputs
         conversation = api.conversation(task)
         # The model may proceed from adequate task text when a transcript is unavailable.
         api.send(
             task,
             fingerprint([task_id, input_fingerprint(inputs)]) + ":started",
-            f"I am picking up this assigned coding task: {task['title']}.\nTask: {task_id}\n"
+            (
+                f"Continuing after {state['pending_admission']['kind']}: "
+                f"{state['pending_admission'].get('reason', '')}\n"
+                if state.get("pending_admission")
+                else ""
+            )
+            + f"I am picking up this assigned coding task: {task['title']}.\nTask: {task_id}\n"
             "I will send the result or a question here. Reply in this task thread or add a task comment.",
         )
         api.tasks.update_task_status(
@@ -1272,7 +1681,7 @@ def tick(config, api, lock_fd):
                     "Coding execution settings rejected: " + str(exc)
                 )
                 state["result"]["question"] = (
-                    "Correct this task's model or reasoning setting, then requeue it."
+                    "Correct this task's model or reasoning setting, then give an explicit retry reason in the task thread."
                 )
             write_json(path, state)
         apply_deployment(config, api, state, path, lock_fd)

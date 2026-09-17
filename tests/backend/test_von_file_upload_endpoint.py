@@ -397,6 +397,74 @@ def test_upload_returns_error_when_blob_store_fails(app, monkeypatch):
     assert workflow_calls == []
 
 
+@pytest.mark.parametrize(
+    "filename,content_type",
+    [
+        ("report.md", "application/octet-stream"),
+        ("report", "text/markdown"),
+    ],
+)
+def test_markdown_preview_round_trip_and_denial(app, filename, content_type):
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user"
+    payload = b"# Report\n\n| A | B |\n|---|---|\n| one | two |\n\n<script>alert(1)</script>\n\n[Bad](javascript:alert(1))"
+    uploaded = client.post(
+        "/von/api/files/upload",
+        data={"file": (io.BytesIO(payload), filename, content_type)},
+    ).get_json()["uploaded"]
+    encoded = urllib.parse.quote(uploaded["concept_id"], safe="")
+    url = f"/von/api/files/{encoded}/preview"
+    response = client.get(url)
+    assert response.status_code == 200
+    assert response.mimetype == "text/html"
+    assert b"<h1>Report</h1>" in response.data
+    assert b"<table>" in response.data
+    assert b"<script>" not in response.data
+    assert b"javascript:" not in response.data
+    assert b"Download original" in response.data
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "default-src 'none'" in response.headers["Content-Security-Policy"]
+    assert "sandbox " in response.headers["Content-Security-Policy"]
+    assert client.get(f"/von/api/files/{encoded}/download").data == payload
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#other_user"
+    denied = client.get(url)
+    assert denied.status_code == 404
+    assert b"<h1>Report</h1>" not in denied.data
+    with client.session_transaction() as sess:
+        sess.clear()
+    assert client.get(url).status_code == 401
+
+
+@pytest.mark.parametrize(
+    "filename,payload,status,message",
+    [
+        ("report.pdf", b"%PDF-example", 415, b"Markdown files only"),
+        ("report.md", b"\xff", 415, b"not UTF-8"),
+        ("report.md", b"x" * (2 * 1024 * 1024 + 1), 413, b"too large"),
+        ("report.md", b"", 200, b"This file is empty"),
+    ],
+    ids=["unsupported", "invalid-utf8", "oversized", "empty"],
+)
+def test_preview_recoverable_outcomes(app, filename, payload, status, message):
+    client = app.test_client()
+    with client.session_transaction() as sess:
+        sess["user_concept_id"] = "#V#user"
+    uploaded = client.post(
+        "/von/api/files/upload",
+        data={"file": (io.BytesIO(payload or b" "), filename)},
+    ).get_json()["uploaded"]
+    if not payload:
+        store = app.config["TEST_FAKE_STORE"]
+        store._bytes_by_key[store.last_put["key"]] = b""
+    encoded = urllib.parse.quote(uploaded["concept_id"], safe="")
+    response = client.get(f"/von/api/files/{encoded}/preview")
+    assert response.status_code == status
+    assert message in response.data
+    assert b"Download original" in response.data
+
+
 def test_upload_returns_error_when_blob_store_initialisation_fails(app, monkeypatch):
     client = app.test_client()
 

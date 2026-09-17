@@ -13,8 +13,9 @@ try:
         authorised_task,
         capability_context,
         fingerprint,
-        resolve_execution_settings,
         referenced_tasks,
+        resolve_execution_settings,
+        retry_policy,
         stage_file_copy_evidence,
         write_json,
     )
@@ -23,8 +24,9 @@ except ImportError:
         authorised_task,
         capability_context,
         fingerprint,
-        resolve_execution_settings,
         referenced_tasks,
+        resolve_execution_settings,
+        retry_policy,
         stage_file_copy_evidence,
         write_json,
     )
@@ -139,6 +141,20 @@ def context_for(config, api, message):
     tasks = [item["task"] for item in lookup["results"] if item["status"] == "found"]
     for item in lookup["results"]:
         if item["status"] == "found":
+            retained = retained_task_state(config, item["task_id"])
+            if retained:
+                item["retained_attempt"] = {
+                    key: retained.get(key)
+                    for key in (
+                        "attempt",
+                        "phase",
+                        "result",
+                        "blocker",
+                        "worktree",
+                        "finished_at",
+                        "execution_settings",
+                    )
+                }
             try:
                 item["assignment_context"] = api.inputs(item["task"])
             except Exception as exc:
@@ -161,6 +177,11 @@ def context_for(config, api, message):
             "task_selection": "Accessible native assignments referenced by these messages; proximity is not a request to resume them.",
         },
     }
+
+
+def retained_task_state(config, task_id):
+    path = Path(config["state_root"]) / "tasks" / (fingerprint(task_id)[:16] + ".json")
+    return json.loads(path.read_text()) if path.exists() else {}
 
 
 def validate_result(value, context):
@@ -262,6 +283,74 @@ def recover(state):
     state["phase"] = "reporting"
 
 
+def prepare_attachment_inputs(config, context, run):
+    """Copy recipient-authorised bytes into this response's private sandbox.
+
+    Paths come from this receiving controller, never a sender's machine. The
+    canonical message is re-read by the loader; supplied descriptors confer no
+    authority. Retrying preparation replaces the same content-addressed files.
+    """
+    message = context.get("message", {})
+    references = message.get("attachments", [])
+    if not references:
+        return
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.services.message_attachment_service import (
+        attachment_text,
+        load_attachment_reference,
+    )
+
+    inputs = []
+    for reference in references[:8]:
+        item = {
+            "concept_id": reference.get("concept_id"),
+            "filename": reference.get("filename"),
+        }
+        try:
+            with override_current_actor(config["agent_id"], config["organisation_id"]):
+                info, data = load_attachment_reference(
+                    {
+                        "concept_id": reference.get("concept_id"),
+                        "message_id": reference.get("message_id")
+                        or message["message_id"],
+                    },
+                    config["agent_id"],
+                )
+            suffix = {
+                "image/png": ".png",
+                "image/jpeg": ".jpg",
+                "image/webp": ".webp",
+            }.get(info["content_type"], ".bin")
+            directory = Path(run) / "attachments"
+            directory.mkdir(mode=0o700, exist_ok=True)
+            path = directory / (info["sha256"] + suffix)
+            path.write_bytes(data)
+            path.chmod(0o600)
+            item.update(
+                local_path=str(path.resolve()),
+                content_type=info["content_type"],
+                sha256=info["sha256"],
+            )
+            if info["content_type"].startswith("image/"):
+                item["instruction"] = (
+                    "Use view_image on local_path to inspect the supplied original. Filename alone is not image evidence."
+                )
+            else:
+                item["content"] = attachment_text(info, data)
+        except (ValueError, PermissionError, OSError):
+            item["error"] = (
+                "Attachment unavailable in this response; do not claim to have inspected it."
+            )
+        inputs.append(item)
+    context["attachment_inputs"] = inputs
+    if len(references) > 8:
+        inputs.append(
+            {
+                "error": "Only the first eight attachments were prepared in this run; remaining references have not been inspected."
+            }
+        )
+
+
 def launch(config, state, lock_fd):
     run = Path(state["run_dir"])
     run.mkdir(parents=True, exist_ok=True)
@@ -272,6 +361,7 @@ def launch(config, state, lock_fd):
     state["context"]["file_copy_evidence"] = stage_file_copy_evidence(
         config, state["context"], run
     )
+    prepare_attachment_inputs(config, state["context"], run)
     write_json(run / "schema.json", SCHEMA)
     write_json(run / "context.json", state["context"])
     prompt = Path(__file__).with_name("codex_von_inbox_prompt.md").read_text()
@@ -431,13 +521,40 @@ def finish(config, api, state, path):
     if task_id:
         if result["action"] == "resume_task":
             state["effect_stage"] = "task_resume"
+            retained = retained_task_state(config, task_id)
+            blocker = (
+                retry_policy.retain_blocker(config, retained) if retained else None
+            )
+            # Freeze before reopen/delivery; a lost acknowledgement must never
+            # bind the old request to a newer failed attempt on the next poll.
+            if "retry_intent" not in state:
+                state["retry_intent"] = (
+                    {
+                        "attempt": blocker["attempt"],
+                        "binding": blocker["binding"],
+                        "reason": result["answer"],
+                    }
+                    if blocker
+                    else None
+                )
+                write_json(path, state)
             # This exact follow-up is the new coding/deployment authority carrier.
             followup = {
                 "message_id": message["message_id"],
                 "content": message["content"],
                 "deployment_requested": result["deployment_requested"],
+                **({"retry": state["retry_intent"]} if state["retry_intent"] else {}),
+                **(
+                    {"attachments": message["attachments"]}
+                    if message.get("attachments")
+                    else {}
+                ),
             }
             prior = task_followup(config, task_id)
+            if "message:" + message["message_id"] in retained.get(
+                "consumed_retry_tokens", []
+            ):
+                state["resume_applied"] = True
             if not state.get("resume_applied"):
                 if (
                     prior
@@ -460,6 +577,11 @@ def finish(config, api, state, path):
                         *prior.get("message_ids", [prior["message_id"]]),
                         message["message_id"],
                     ]
+                    if prior.get("attachments") or followup.get("attachments"):
+                        followup["attachments"] = [
+                            *prior.get("attachments", []),
+                            *followup.get("attachments", []),
+                        ]
                 write_json(followup_path(config, task_id), followup)
                 if task["status"] != "pending":
                     api.tasks.update_task_status(
@@ -511,7 +633,7 @@ def finish(config, api, state, path):
         organisation_concept_id=config["organisation_id"],
         thread_id=task_id or message.get("thread_id"),
         reply_to_id=message["message_id"],
-        subject=config.get("agent_name", config["agent_id"]) + " reply",
+        subject=config.get("display_name", config.get("agent_name", config["agent_id"])) + " reply",
         content=state["report_content"],
         metadata={
             "attribution": "Sent by " + config["agent_id"],
@@ -570,7 +692,7 @@ def finish_or_retain(config, api, state, path):
                 recipient_ids=[config["delegator_id"]],
                 organisation_concept_id=config["organisation_id"],
                 reply_to_id=message["message_id"],
-                subject=config.get("agent_name", config["agent_id"]) + " recovery pending",
+                subject=config.get("display_name", config.get("agent_name", config["agent_id"])) + " recovery pending",
                 content=state.setdefault("failure_report_content", content),
             )
             row = api.messages.get_message_for_user(
@@ -619,7 +741,9 @@ def tick(config, api, lock_fd):
             write_json(path, state)
         if state["phase"] == "reporting":
             finish_or_retain(config, api, state, path)
-            return True
+            # A retained delivery failure uses no model and must not prevent
+            # independent coding tasks from making progress on this poll.
+            return state["phase"] == "done"
     pending = new_messages(config, api)
     if not pending:
         return False

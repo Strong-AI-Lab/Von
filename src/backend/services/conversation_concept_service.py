@@ -49,6 +49,57 @@ class ConversationConceptError(Exception):
     pass
 
 
+def resolve_conversation_names(concepts: Iterable[Dict[str, Any]]) -> Dict[str, str]:
+    """Project current source titles for the authenticated owner's concepts.
+
+    Titles remain in chat history. Exact owner/session pairs are read in batches;
+    a concept ID or a stored owner identifier alone never authorises the read.
+    Shared participants use the existing source-reference/invitation route.
+    """
+    candidates = [doc for doc in concepts if _is_visible_conversation_document(doc)]
+    if not candidates:
+        return {}
+    from ..security.access_control import get_effective_user_concept_id
+    from .chat_history_service import (
+        get_chat_history_session_summaries_for_owner_sessions,
+    )
+
+    actor = get_effective_user_concept_id()
+    if not actor:
+        return {}
+    pairs_by_id = {}
+    for doc in candidates:
+        owners = doc.get("relationships", {}).get(PREDICATE_HAS_OWNER, [])
+        owners = [owners] if isinstance(owners, str) else owners
+        session_id = (doc.get("metadata") or {}).get("session_id")
+        if owners == [actor] and isinstance(session_id, str) and session_id.strip():
+            pairs_by_id[doc["concept_id"]] = (actor, session_id.strip())
+    pairs = list(dict.fromkeys(pairs_by_id.values()))
+    summaries = {}
+    try:
+        for offset in range(0, len(pairs), 50):
+            summaries.update(
+                get_chat_history_session_summaries_for_owner_sessions(
+                    pairs[offset : offset + 50], limit=50
+                )
+            )
+    except Exception:
+        logger.warning(
+            "Conversation source names temporarily unavailable", exc_info=True
+        )
+    result = {}
+    for concept_id, pair in pairs_by_id.items():
+        summary = summaries.get(pair)
+        if isinstance(summary, dict):
+            title = summary.get("session_name")
+            result[concept_id] = (
+                title.strip()
+                if isinstance(title, str) and title.strip()
+                else "Conversation"
+            )
+    return result
+
+
 def _generate_conversation_concept_id(session_id: str) -> str:
     """Generate a concept_id for a conversation based on session_id.
 
@@ -561,6 +612,63 @@ def get_or_create_conversation_concept(
     return conversation_concept_id
 
 
+def get_source_conversation_identity_for_authorisation(
+    session_id: str,
+) -> Optional[str]:
+    """Internal inverse locator, for a source already authorised by the caller.
+
+    Return identity only, preserving a legacy materialised identity even when
+    the accepted participant cannot read the owner's private concept document.
+    """
+    collection = ConceptsRepository.collection()
+    if collection is None:
+        return None
+    expected = _generate_conversation_concept_id(session_id)
+    document = collection.find_one(
+        {
+            "concept_id": expected,
+            "metadata.session_id": session_id,
+            "relationships.is_an_instance_of": CONVERSATION_TYPE_ID,
+        },
+        {"_id": 0, "concept_id": 1},
+    )
+    if document:
+        return document.get("concept_id")
+    document = collection.find_one(
+        {
+            "metadata.session_id": session_id,
+            "relationships.is_an_instance_of": CONVERSATION_TYPE_ID,
+        },
+        {"_id": 0, "concept_id": 1},
+    )
+    return document.get("concept_id") if document else None
+
+
+def get_conversation_source_locator_for_authorisation(concept_id: str) -> Optional[str]:
+    """Internal locator-only read, followed by mandatory source authorisation.
+
+    An accepted participant may read the chat source without seeing its owner's
+    private concept projection. Read only its exact session locator here; never
+    return a title, owner, text or concept document through this boundary.
+    Callers must not expose this locator before current chat access succeeds.
+    Legacy text-only mappings remain subject to the actor-filtered reader.
+    """
+    collection = ConceptsRepository.collection()
+    if collection is not None:
+        document = collection.find_one(
+            {
+                "concept_id": concept_id,
+                "relationships.is_an_instance_of": CONVERSATION_TYPE_ID,
+            },
+            {"_id": 0, "metadata.session_id": 1},
+        )
+        source = (document or {}).get("metadata", {}).get("session_id")
+        if isinstance(source, str) and source.strip():
+            return source.strip()
+    concept = get_conversation_concept(concept_id)
+    return concept.get("session_id") if concept else None
+
+
 def get_conversation_concept(conversation_concept_id: str) -> Optional[Dict[str, Any]]:
     """Get a conversation concept by concept_id.
 
@@ -628,6 +736,8 @@ def _build_conversation_response(doc: Dict[str, Any]) -> Dict[str, Any]:
     owner = (relationships.get(PREDICATE_HAS_OWNER) or [None])[0]
     participants = relationships.get(PREDICATE_HAS_PARTICIPANT, [])
     organisation = (relationships.get(PREDICATE_HAS_ORGANISATION) or [None])[0]
+
+    name = resolve_conversation_names([doc]).get(conversation_concept_id, name)
 
     return {
         "conversation_concept_id": conversation_concept_id,
