@@ -525,3 +525,54 @@ test('a refresh after a disconnected new arrival replaces the window and keeps h
     [...document.querySelectorAll('button')].find(el => el.textContent === 'Load earlier messages').click(); await flush();
     expect(api.postJson.mock.calls.at(-1)[1].before).toBe('new-history');
 });
+
+test('Steer pins the discovered turn across an ambiguous send retry while Queue remains separate', async () => {
+    sessionStorage.setItem('von_current_user', JSON.stringify({ concept_id: '#V#alice' }));
+    const api = require(base + 'apiService.js');
+    const target = { agent_id: '#V#bob', organisation_id: '#V#lab', task_id: '#V#task', attempt: 'attempt-1', thread_id: 'thread-1', turn_id: 'turn-1' };
+    api.getJson.mockResolvedValue({ available: true, submit_target: target });
+    api.postJsonDetailed.mockRejectedValueOnce(new Error('Connection lost'));
+    await require(base + 'components/messagePanel.js').openMessageExchange(row('#V#bob'));
+    const input = document.getElementById('messageInput');
+    input.value = 'Use the existing bounded test.';
+    document.getElementById('sendMessageBtn').dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+    await flush();
+    const first = api.postJsonDetailed.mock.calls[0][1];
+    expect(first.submit_mode).toBe('steer');
+    expect(first.submit_target).toEqual(target);
+    expect(input.value).toBe('Use the existing bounded test.');
+    api.getJson.mockResolvedValue({ available: true, submit_target: { ...target, turn_id: 'replacement' } });
+    api.postJsonDetailed.mockRejectedValueOnce(new Error('Still unknown'));
+    document.getElementById('sendMessageBtn').dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+    await flush();
+    expect(api.postJsonDetailed.mock.calls[1][1]).toEqual(first);
+    expect(api.getJson.mock.calls.filter(([url]) => url.startsWith('/api/messages/steering-target'))).toHaveLength(1);
+    api.postJsonDetailed.mockResolvedValueOnce({ data: { success: true } });
+    document.getElementById('sendMessageBtn').click(); await flush();
+    const separate = api.postJsonDetailed.mock.calls[2][1];
+    expect(separate.submit_mode).toBe('queue');
+    expect(separate.submit_target).toBeUndefined();
+    expect(separate.delivery_idempotency_key).not.toBe(first.delivery_idempotency_key);
+});
+
+test('unavailable Mac or idle recipient retains the draft without creating a message', async () => {
+    const api = require(base + 'apiService.js');
+    api.getJson.mockResolvedValue({ available: false, reason: 'Queue remains available.' });
+    api.postJsonDetailed.mockClear();
+    await require(base + 'components/messagePanel.js').openMessageExchange(row('#V#codex_vscode'));
+    const input = document.getElementById('messageInput'); input.value = 'Keep this guidance';
+    document.getElementById('sendMessageBtn').dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+    await flush();
+    expect(input.value).toBe('Keep this guidance');
+    expect(api.postJsonDetailed).not.toHaveBeenCalled();
+});
+
+test('accepted guidance receipt is displayed without claiming model consumption', async () => {
+    const api = require(base + 'apiService.js');
+    const result = response('guidance');
+    result.messages[0].concept_data.metadata = { submit_mode: 'steer' };
+    result.messages[0].concept_data.steering_delivery = { status: 'accepted', consumption_verified: false };
+    api.postJson.mockResolvedValueOnce(result);
+    await require(base + 'components/messagePanel.js').openMessageExchange(row('#V#bob'));
+    expect(document.querySelector('.message-steering-status').textContent).toContain('consumption not verified');
+});

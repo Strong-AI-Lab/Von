@@ -207,12 +207,22 @@ def test_exact_worker_launch_uses_owned_transport_and_recovers_structured_result
     }
     state = {"task_id": "#V#task", "checkout_prepared": True, "worktree": str(tmp_path)}
     starts = []
+
     def start_execution(state):
         assert state["prepared_at"] <= state["execution_started_at"]
         assert state["started_at"] == state["execution_started_at"]
         assert not state.get("active_turn")
         starts.append(state["execution_started_at"])
-    monkeypatch.setattr(worker, "Von", lambda config: SimpleNamespace(start_execution=start_execution))
+
+    monkeypatch.setattr(
+        worker,
+        "Von",
+        lambda config: SimpleNamespace(
+            start_execution=start_execution,
+            publish_steering_target=lambda binding: binding,
+            withdraw_steering_target=lambda binding: None,
+        ),
+    )
     monkeypatch.setattr(worker, "referenced_tasks", lambda *a: {"results": []})
     monkeypatch.setattr(worker, "stage_file_copy_evidence", lambda *a: {"results": []})
     observed = []

@@ -1,8 +1,7 @@
 """Attempt-bound input capture within the existing DGX controller lock.
 
-Public message admission remains disabled until a canonical active-target
-publication/read-back route and host acceptance are supplied. This receiver does
-not manufacture a target from whichever task happens to be running.
+Canonical admission publishes the existing owner's exact target. This receiver
+rechecks it and never manufactures a target from whichever task is running.
 """
 
 from __future__ import annotations
@@ -42,12 +41,28 @@ def recover_delivery(state):
     )
 
 
+def reconcile_receipt(api, state, path):
+    """Retry a retained receipt, never the guidance or a model execution."""
+    receipt = state.get("steering_delivery")
+    if not receipt or receipt.get("canonical_readback"):
+        return
+    api.record_steering_delivery(
+        state["context"]["message"]["message_id"],
+        receipt["binding"],
+        receipt["status"],
+    )
+    receipt["canonical_readback"] = True
+    receipt.pop("canonical_receipt_error", None)
+    worker.write_json(path, state)
+
+
 class ActiveInbox:
     def __init__(self, config, api, state, save):
         self.config, self.api, self.state, self.save = config, api, state, save
         self.binding = None
 
     def active(self, thread_id, turn_id):
+        previous = self.binding
         self.binding = (
             None
             if not turn_id
@@ -60,6 +75,14 @@ class ActiveInbox:
                 "turn_id": turn_id,
             }
         )
+        try:
+            if self.binding:
+                self.api.publish_steering_target(self.binding)
+            elif previous:
+                self.api.withdraw_steering_target(previous)
+            self.state.pop("steering_publication_error", None)
+        except Exception as exc:
+            self.state["steering_publication_error"] = type(exc).__name__
         self.state["active_turn"] = self.binding
         self.save()
 
@@ -142,3 +165,8 @@ class ActiveInbox:
         )
         recover_delivery(state)
         worker.write_json(path, state)
+        try:
+            reconcile_receipt(self.api, state, path)
+        except Exception as exc:
+            state["steering_delivery"]["canonical_receipt_error"] = type(exc).__name__
+            worker.write_json(path, state)

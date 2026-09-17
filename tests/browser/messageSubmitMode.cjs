@@ -9,6 +9,8 @@ const root = path.resolve(__dirname, '../../src/frontend/web/von_interface');
 const evidence = process.argv[2] || '.run/message-submit-mode';
 fs.mkdirSync(evidence, { recursive: true });
 let submitted = [];
+let available = false;
+const target = { agent_id: '#V#worker', organisation_id: '#V#lab', task_id: '#V#fixture_task', attempt: 'fixture-attempt', thread_id: 'fixture-thread', turn_id: 'fixture-turn' };
 const server = http.createServer(async (req, res) => {
     if (req.url === '/') {
         res.setHeader('Content-Type', 'text/html');
@@ -22,11 +24,12 @@ const server = http.createServer(async (req, res) => {
         }
     }
     res.setHeader('Content-Type', 'application/json');
+    if (req.url.startsWith('/api/messages/steering-target?')) return res.end(JSON.stringify({ available, submit_target: available ? target : null }));
     if (req.url === '/api/messages/' && req.method === 'POST') {
         let body = ''; for await (const chunk of req) body += chunk;
         submitted.push(JSON.parse(body));
         res.statusCode = 201;
-        return res.end(JSON.stringify({ success: true, message_id: '#V#fixture_message', submit_mode: 'queue' }));
+        return res.end(JSON.stringify({ success: true, message_id: '#V#fixture_message', submit_mode: submitted.at(-1).submit_mode }));
     }
     res.end(JSON.stringify({ success: true, authenticated: true, current_user_id: '#V#alice', messages: [], profiles: [] }));
 });
@@ -46,7 +49,7 @@ async function mount(page) {
     try {
         const results = [];
         for (const width of [390, 1280]) {
-            submitted = [];
+            submitted = []; available = false;
             const touch = width < 800;
             const page = await browser.newPage({ viewport: { width, height: 850 }, hasTouch: touch });
             page.setDefaultTimeout(10000);
@@ -67,7 +70,7 @@ async function mount(page) {
             await expect(input).toHaveValue('Keep my multiline\ndraft unchanged.');
             await menu.locator('summary')[touch ? 'tap' : 'click']();
             await mode.selectOption('steer');
-            await expect(button).toHaveAccessibleName(/Steering unavailable/);
+            await expect(button).toHaveAccessibleName(/Steer active coding turn/);
             const panelBounds = await menu.locator('.composer-options-panel').boundingBox();
             assert(panelBounds.x >= 0 && panelBounds.x + panelBounds.width <= width);
             await mode.scrollIntoViewIfNeeded();
@@ -92,9 +95,17 @@ async function mount(page) {
             await input.fill('One'); await input.press('Shift+Enter');
             await expect(input).toHaveValue('One\n');
             assert.equal(submitted.length, 1);
+            available = true;
+            await input.fill('Bound guidance for the active attempt.');
+            await button[touch ? 'tap' : 'click']();
+            await expect(input).toHaveValue('');
+            assert.equal(submitted.length, 2);
+            assert.equal(submitted[1].submit_mode, 'steer');
+            assert.deepEqual(submitted[1].submit_target, target);
+            await page.screenshot({ path: path.join(evidence, `steer-${width}.png`) });
             assert.deepEqual(errors, []);
             results.push({ width, touch, bounds, panelBounds, savedDefaultAfterReload: true,
-                unsupportedDraftRetained: true, queuedPayload: submitted[0], noLiveDeliveryClaim: true });
+                unsupportedDraftRetained: true, queuedPayload: submitted[0], steeringPayload: submitted[1], noLiveDeliveryClaim: true });
             await page.close();
         }
         fs.writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ fixture: true, results }, null, 2));

@@ -154,7 +154,9 @@ def _get_current_org_concept_id(
 
 
 def _get_message_metadata(message_doc: Any) -> dict[str, Any]:
-    concept_data = message_doc.get("concept_data") if isinstance(message_doc, dict) else {}
+    concept_data = (
+        message_doc.get("concept_data") if isinstance(message_doc, dict) else {}
+    )
     metadata = concept_data.get("metadata") if isinstance(concept_data, dict) else {}
     return dict(metadata) if isinstance(metadata, dict) else {}
 
@@ -165,20 +167,26 @@ def _resolve_recommendation_subject_id(
     current_user_concept_id: str | None,
 ) -> Optional[str]:
     metadata = _get_message_metadata(message_doc)
-    subject_id = _normalise_concept_id(metadata.get("recommendation_subject_concept_id"))
+    subject_id = _normalise_concept_id(
+        metadata.get("recommendation_subject_concept_id")
+    )
     if subject_id:
         return subject_id
     if current_user_concept_id:
         return _normalise_concept_id(current_user_concept_id)
 
-    relationships = message_doc.get("relationships") if isinstance(message_doc, dict) else {}
+    relationships = (
+        message_doc.get("relationships") if isinstance(message_doc, dict) else {}
+    )
     recipient_ids = _normalise_concept_id_list(
         relationships.get("#V#has_recipient") if isinstance(relationships, dict) else []
     )
     return recipient_ids[0] if recipient_ids else None
 
 
-def _resolve_message_recommendation_assertion_ids(message_doc: dict[str, Any]) -> list[str]:
+def _resolve_message_recommendation_assertion_ids(
+    message_doc: dict[str, Any],
+) -> list[str]:
     metadata = _get_message_metadata(message_doc)
     return _normalise_concept_id_list(metadata.get("recommendation_assertion_ids"))
 
@@ -260,9 +268,7 @@ def _build_common_organisation_options(
 
         membership_map: dict[str, str] = {}
         membership_entries = (
-            memberships.get("memberships", [])
-            if isinstance(memberships, dict)
-            else []
+            memberships.get("memberships", []) if isinstance(memberships, dict) else []
         )
         for membership in membership_entries:
             if not isinstance(membership, dict):
@@ -274,9 +280,7 @@ def _build_common_organisation_options(
                 continue
             role = membership.get("role")
             membership_map[organisation_concept_id] = (
-                role.strip()
-                if isinstance(role, str) and role.strip()
-                else "member"
+                role.strip() if isinstance(role, str) and role.strip() else "member"
             )
         membership_maps.append(membership_map)
 
@@ -306,6 +310,36 @@ def _build_common_organisation_options(
         )
     )
     return options
+
+
+@message_bp.route("/steering-target", methods=["GET"])
+def get_coding_steering_target():
+    from ...services.coding_agent_steering_service import resolve
+
+    sender = _get_current_user_concept_id()
+    if not sender:
+        return jsonify(error="Authentication required"), 401
+    recipient = _normalise_concept_id(request.args.get("recipient_id"))
+    org = _normalise_concept_id(request.args.get("organisation_concept_id"))
+    if not recipient or not org:
+        return (
+            jsonify(
+                available=False,
+                reason="Choose a coding recipient and shared organisation",
+            ),
+            200,
+        )
+    try:
+        target = resolve(sender_id=sender, recipient_id=recipient, organisation_id=org)
+        return jsonify(available=True, submit_target=target), 200
+    except (DirectMessageSteeringUnavailable, PermissionError):
+        return (
+            jsonify(
+                available=False,
+                reason="No active steering target. Queue remains available.",
+            ),
+            200,
+        )
 
 
 @message_bp.route("/", methods=["POST"])
@@ -478,12 +512,26 @@ def send_message() -> ResponseReturnValue:
                 raise ValueError("Conflicting submit modes")
             if any(
                 key in data or key in metadata_payload
-                for key in ("submit_target", "submit_intent", "steering_target")
+                for key in ("submit_intent", "steering_target")
             ):
                 raise ValueError(
                     "Active-turn targets are not supported by this message route"
                 )
-            metadata_payload["submit_mode"] = validate_direct_message_submit_mode(mode)
+            supplied_target = data.get(
+                "submit_target", metadata_payload.get("submit_target")
+            )
+            if (
+                "submit_target" in metadata_payload
+                and metadata_payload["submit_target"] != supplied_target
+            ):
+                raise ValueError("Conflicting submit targets")
+            if supplied_target is not None:
+                if mode != "steer" or not isinstance(supplied_target, dict):
+                    raise ValueError("Only Steering accepts an exact active target")
+                metadata_payload["submit_target"] = supplied_target
+            metadata_payload["submit_mode"] = validate_direct_message_submit_mode(
+                mode, target=supplied_target
+            )
         except DirectMessageSteeringUnavailable as exc:
             return (
                 jsonify(
@@ -590,6 +638,18 @@ def send_message() -> ResponseReturnValue:
                     "idempotent_replay": reused,
                     "delivery_status": delivery_status,
                     "submit_mode": metadata_payload["submit_mode"],
+                    **(
+                        {
+                            "steering_delivery": (
+                                (message.get("concept_data") or {}).get(
+                                    "steering_delivery"
+                                )
+                                or {"status": "pending", "consumption_verified": False}
+                            )
+                        }
+                        if mode == "steer"
+                        else {}
+                    ),
                     "message_id": message.get("concept_id"),
                     "conversation": conversation,
                     "sent_at": message.get("concept_data", {}).get("sent_at"),
@@ -602,6 +662,16 @@ def send_message() -> ResponseReturnValue:
             200 if reused else 201,
         )
 
+    except DirectMessageSteeringUnavailable as exc:
+        return (
+            jsonify(
+                error=str(exc),
+                error_code="message_steering_unavailable",
+                effect_status="not_applied",
+                retryable=False,
+            ),
+            409,
+        )
     except DirectMessageIdempotencyConflict as exc:
         return (
             jsonify(

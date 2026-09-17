@@ -822,6 +822,21 @@ class Von:
             raise RuntimeError("Direct message canonical read-back failed")
         return message_id
 
+    def publish_steering_target(self, binding):
+        from src.backend.services.coding_agent_steering_service import publish
+
+        return publish(binding, delegator_id=self.config["delegator_id"])
+
+    def withdraw_steering_target(self, binding):
+        from src.backend.services.coding_agent_steering_service import withdraw
+
+        withdraw(binding)
+
+    def record_steering_delivery(self, message_id, binding, status):
+        from src.backend.services.coding_agent_steering_service import record_delivery
+
+        return record_delivery(message_id, binding, status)
+
     def start_execution(self, state, *, source="codex_dgx"):
         from src.backend.services import task_execution_timing_service as timing
 
@@ -1319,6 +1334,8 @@ def launch_app_server(
     inputs = ActiveInbox(config, api, state, save)
 
     def checkpoint():
+        if inputs.binding:
+            inputs.active(inputs.binding["thread_id"], inputs.binding["turn_id"])
         archive_checkpoint(config, state)
         save()
 

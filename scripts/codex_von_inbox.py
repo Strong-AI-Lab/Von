@@ -353,13 +353,13 @@ def prepare_attachment_inputs(config, context, run):
 
 def launch(config, state, lock_fd):
     # A retained/externally-created steering message cannot be interpreted as a
-    # fresh task after its intended turn has ended. This exec route has no live
-    # turn transport yet. Report non-delivery without asking a model to execute it.
+    # fresh task after its intended turn has ended. Report non-delivery without
+    # asking a model to execute it.
     if state["context"]["message"].get("submit_mode", "queue") != "queue":
         state["result"] = {
             "answer": (
-                "This message was not applied: active steering is unavailable on "
-                "the installed DGX inbox route. The original message is retained. "
+                "This message was not applied to its intended active turn. "
+                "The original message and target are retained. "
                 "Choose Queue explicitly to request separate work."
             ),
             "task_id": "",
@@ -367,6 +367,9 @@ def launch(config, state, lock_fd):
             "deployment_requested": False,
             "new_task": None,
         }
+        target = state["context"]["message"].get("submit_target")
+        if isinstance(target, dict) and target.get("agent_id") == config["agent_id"]:
+            state["steering_delivery"] = {"status": "not_applied", "binding": target}
         state["phase"] = "reporting"
         return
     run = Path(state["run_dir"])
@@ -516,6 +519,13 @@ def finish(config, api, state, path):
     message = state["context"]["message"]
     state["effect_stage"] = "source_authorisation"
     authorise_source(config, api, message)
+    if state.get("steering_delivery"):
+        try:
+            from .codex_von_steering import reconcile_receipt
+        except ImportError:
+            from codex_von_steering import reconcile_receipt
+        state["effect_stage"] = "steering_receipt"
+        reconcile_receipt(api, state, path)
     # Check again at the effect boundary, including recovered on-disk states.
     result = state["result"] = validate_result(state["result"], state["context"])
     task_id = result["task_id"]

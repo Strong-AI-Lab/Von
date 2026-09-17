@@ -73,10 +73,10 @@ class DirectMessageSteeringUnavailable(ValueError):
     """No receiving-controller active-turn binding is available on this route."""
 
 
-def validate_direct_message_submit_mode(mode: Any = "queue") -> str:
+def validate_direct_message_submit_mode(mode: Any = "queue", *, target=None) -> str:
     if mode not in ("queue", "steer"):
         raise ValueError("submit_mode must be queue or steer")
-    if mode == "steer":
+    if mode == "steer" and not target:
         raise DirectMessageSteeringUnavailable(
             "Active steering is unavailable on this route. Retain the draft or "
             "explicitly choose Queue for separate work."
@@ -86,11 +86,21 @@ def validate_direct_message_submit_mode(mode: Any = "queue") -> str:
 
 def _validate_submit_metadata(metadata: Optional[Dict[str, Any]]) -> None:
     metadata = metadata if isinstance(metadata, dict) else {}
-    validate_direct_message_submit_mode(metadata.get("submit_mode", "queue"))
-    if any(
-        key in metadata for key in ("submit_target", "submit_intent", "steering_target")
-    ):
-        raise ValueError("Active-turn targets are not supported by this message route")
+    validate_direct_message_submit_mode(
+        metadata.get("submit_mode", "queue"), target=metadata.get("submit_target")
+    )
+    if any(key in metadata for key in ("submit_intent", "steering_target")):
+        raise ValueError("Unsupported active-turn target alias")
+    if metadata.get("submit_target") is not None:
+        from .coding_agent_steering_service import TARGET_KEYS
+
+        target = metadata["submit_target"]
+        if (
+            metadata.get("submit_mode") != "steer"
+            or not isinstance(target, dict)
+            or set(target) != TARGET_KEYS
+        ):
+            raise ValueError("Steering requires an exact active-turn target")
 
 
 @dataclass(frozen=True)
@@ -393,6 +403,7 @@ def project_direct_message(message_doc: Dict[str, Any]) -> Dict[str, Any]:
         # dropping them would turn old steering intents into new queued work.
         "submit_mode": metadata.get("submit_mode", "queue"),
         "submit_target": metadata.get("submit_target"),
+        "steering_delivery": concept_data.get("steering_delivery"),
     }
 
 
@@ -448,6 +459,16 @@ def create_message(
 
     if not recipient_ids:
         raise ValueError("At least one valid recipient is required")
+
+    if (metadata or {}).get("submit_mode") == "steer":
+        from .coding_agent_steering_service import validate_submission
+
+        validate_submission(
+            sender_id=sender_id,
+            recipient_ids=recipient_ids,
+            organisation_id=org_id,
+            target=metadata.get("submit_target"),
+        )
 
     timestamp = datetime.now(timezone.utc)
     concept_id = _generate_message_concept_id(sender_id, timestamp)

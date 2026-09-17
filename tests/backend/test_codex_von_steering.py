@@ -42,6 +42,9 @@ def receiver(tmp_path, monkeypatch):
         "src.backend.services.task_dispatch_authority_service.get_db", lambda: db
     )
     api = SimpleNamespace(
+        publish_steering_target=lambda binding: binding,
+        withdraw_steering_target=lambda binding: None,
+        record_steering_delivery=lambda *args: None,
         task=lambda _: task,
         native_writer=lambda _: True,
         messages=SimpleNamespace(
@@ -173,3 +176,37 @@ def test_observation_failure_does_not_end_the_owned_turn(receiver):
     assert active.state["active_turn"] == active.binding
     assert active.state["steering_poll_error"]["type"] == "ConnectionError"
     assert "private details" not in json.dumps(active.state)
+
+
+def test_canonical_receipt_retry_never_replays_guidance(receiver):
+    active, rows, _ = receiver
+    message = list(active.pending())[0]
+    calls = []
+
+    def store(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise ConnectionError("unavailable")
+
+    active.api.record_steering_delivery = store
+    active.delivered(message, "accepted")
+    path = inbox.state_path(active.config, rows[0]["message_id"])
+    retained = json.loads(path.read_text())
+    assert retained["steering_delivery"]["canonical_receipt_error"] == "ConnectionError"
+    assert not list(active.pending())
+    steering.reconcile_receipt(active.api, retained, path)
+    assert retained["steering_delivery"]["canonical_readback"]
+    steering.reconcile_receipt(active.api, retained, path)
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+
+
+def test_late_guidance_has_not_applied_receipt_without_model(receiver):
+    active, rows, _ = receiver
+    state = {"context": {"message": rows[0]}}
+    inbox.launch(active.config, state, 0)
+    assert state["phase"] == "reporting"
+    assert state["steering_delivery"] == {
+        "status": "not_applied",
+        "binding": active.binding,
+    }

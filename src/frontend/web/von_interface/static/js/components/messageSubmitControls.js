@@ -2,7 +2,7 @@ import { getSubmitMode, setSubmitMode, selectedSubmitMode, presentSubmitMode, su
 
 // This route currently has no verified live-turn transport. Never relabel queue
 // acceptance as steering; retain the draft so the sender can choose separate work.
-export function createMessageSubmitControls({ button, optionsPanel, getActor, onSubmit, onUnavailable }) {
+export function createMessageSubmitControls({ button, optionsPanel, getActor, onSubmit, onUnavailable, onSteer }) {
     button.innerHTML = submitArrowMarkup;
     const menu = optionsPanel?.closest('details') || document.createElement('details');
     const optionsName = optionsPanel ? 'More actions' : 'Submit options';
@@ -25,11 +25,11 @@ export function createMessageSubmitControls({ button, optionsPanel, getActor, on
     label.append(select);
     const help = document.createElement('p');
     help.id = `${button.id}ModeHelp`;
-    help.textContent = 'Queue sends a separate message. Active coding-agent steering is not available on this route yet. Choosing Steering retains your draft. Shift-click the arrow for the opposite action once; Shift+Enter inserts a newline. Choose either action here with keyboard or touch.';
+    help.textContent = onSteer ? 'Queue sends separate work. Steering checks the recipient’s active coding turn. If unavailable, your draft stays here. Shift-click chooses the opposite action once.' : 'Queue sends a separate message. Active coding-agent steering is not available on this route yet. Choosing Steering retains your draft. Shift-click the arrow for the opposite action once; Shift+Enter inserts a newline. Choose either action here with keyboard or touch.';
     select.setAttribute('aria-describedby', help.id);
     button.setAttribute('aria-describedby', help.id);
     const actions = [];
-    for (const [mode, text] of [['queue', 'Queue this message'], ['steer', 'Steer (unavailable)']]) {
+    for (const [mode, text] of [['queue', 'Queue this message'], ['steer', onSteer ? 'Steer active coding turn' : 'Steer (unavailable)']]) {
         const action = document.createElement('button');
         action.type = 'button';
         action.textContent = text;
@@ -50,7 +50,7 @@ export function createMessageSubmitControls({ button, optionsPanel, getActor, on
         select.value = mode;
         select.disabled = pending;
         for (const action of actions) action.disabled = button.disabled;
-        const description = mode === 'steer' ? 'Steering unavailable; draft will be retained' : 'Submit separate message';
+        const description = mode === 'steer' ? (onSteer ? 'Steer active coding turn' : 'Steering unavailable; draft will be retained') : 'Submit separate message';
         presentSubmitMode(button, mode, {
             label: pending ? 'Submitting message' : description,
             help: `${description}. Shift-click for the opposite action once. ${optionsName} contains both actions and the shared default.`,
@@ -60,6 +60,11 @@ export function createMessageSubmitControls({ button, optionsPanel, getActor, on
     function activate(event = {}, explicitMode) {
         if (pending || button.disabled) return;
         const mode = explicitMode || selectedSubmitMode(getActor(), event);
+        if (mode === 'steer' && onSteer) {
+            menu.open = false;
+            onSteer();
+            return;
+        }
         if (mode === 'steer') {
             status.textContent = `Active steering is unavailable on this route. Draft and attachments retained; choose Queue this message in ${optionsName} for separate work.`;
             onUnavailable(status.textContent);
