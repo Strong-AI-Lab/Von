@@ -84,11 +84,11 @@ coding/emulation needs explicit shared reservation support before activation.
 ## Current delivery decision and evidence
 
 The bounded emulator/controller capability passed live acceptance on 13 September
-2026. **Publication to main still waits for core PR #682**, on which this separate
-follow-on is based. No production deployment is enabled, and this task must not
-become a gate for the core package.
+2026. Core PR #682 merged on 17 September 2026; this separate follow-on
+now integrates the accepted core and current task timing/retry changes. No
+production Android registry or emulator is enabled by publication.
 
-124 targeted tests pass, covering worker/inbox/provisioner regressions, task and
+131 targeted integration tests pass, covering worker/inbox/provisioner regressions, task and
 organisation denial, duplicate requests, retained uncertain effects, shared
 capacity contention and symlink-safe controller mailboxes.
 

@@ -143,19 +143,39 @@ Coding children inherit the descriptor so controller death does not release
 admission while the child still runs. Per-service memory ceilings remain
 necessary; this lock alone does not constrain non-coding processes.
 
-## Evidence boundary for the initial candidate
+## Acceptance and limitations
 
-Targeted tests exercise scoped discovery, forged actor rejection, live role
-loss, bad settings, canonical identity/membership adapter calls, repeated and
-interrupted reconciliation, retained pause, active-run protection, scheduler
-ownership and two actual competing lock holders including an inherited child.
-Existing worker/inbox tests cover task selection and attachment authority.
-Mocked service/scheduler coverage is not a live Von deployment or another Unix
-account. Before calling the package ready, run the task's isolated canary through
-the normal agent-callable path and retain task, attachment and recipient
-read-back. Michael authorised the temporary resource-bounded canary on 17 September 2026;
-its current acceptance receipt is retained with the native implementation task.
-That authorisation does not request a permanent additional production consumer.
+On 17 September 2026, the normal actor-scoped tool provisioned a temporary,
+independently attributed instance on the prepared DGX account. Repeated
+reconciliation retained one identity and paused unit. Killing its host
+provisioner after release preparation and before activation retained an honest
+partial state; the same request recovered without another identity or unit.
+
+The resource-bounded canary used the existing DGX worker's inherited lock as
+its host admission inode. Its first scheduled poll reported
+`waiting_for_capacity` without selecting a task while that worker was active.
+After admission became available, one actual Astra/high execution consumed a
+checksum-verified canonical attachment, produced and read back its artefact,
+completed the canonical task, and sent its independently attributed result to
+the intended recipient. Canonical start/end, partial token usage and unknown
+cost were recorded; timing and message replay did not duplicate the result.
+An unrelated private file remained unavailable, wrong-assignee task selection
+was excluded, and another organisation's provisioning request was denied.
+The temporary timer and service were removed afterwards; the identity, task,
+artefact and receipts remain audit evidence.
+
+This acceptance found and repaired two defects missed by initial mocks:
+canonical missing-identity lookup raises `ConceptNotFoundError`, and
+`EnvironmentFile` requires systemd path escaping rather than command quoting.
+The installed unit's environment paths and 8 GiB memory ceiling were read back.
+Targeted lifecycle, worker/inbox, capacity, release and timing checks also pass.
+
+The test used the existing prepared Unix account, not a separate account.
+Separate-account authentication and hostile-account isolation remain unverified;
+shared-account execution is not a security sandbox between users. No permanent
+additional consumer, production registry, or public deployment was activated.
+Native task `#V#task_agent_002b293c463ed8e1e52df23cb68f9612` retains the
+substantive acceptance receipt and its environment/revision provenance.
 
 ## Optional native Android testing
 
