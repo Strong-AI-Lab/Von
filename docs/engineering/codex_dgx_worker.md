@@ -726,3 +726,77 @@ changes and source instruction. Preserve deliberate choices and ambiguous cases.
 Apply only reviewed entries after the eligibility fix is installed, through
 canonical task updates, and read back the effective ontology default. Do not use
 a blanket rewrite based solely on the current field matching the delegator.
+
+## Canonical execution timing
+
+The task service exposes `execution_timing` through `get_task`, task listings
+and the existing HTTP task-detail response. This is task-visible lifecycle
+metadata, using the controller's existing attempt ID; it does not grant access
+to private run archives. The supported writers are the trusted controllers,
+through `task_execution_timing_service.start` and `finish` (also available as
+`Von.start_execution` and `Von.finish_execution`). No new task consumer is added.
+
+- DGX records `execution_started_at` after its subprocess exists and before
+  supplying the task prompt. Queue pickup, checkout preparation and archive
+  registration are distinct; the previous local `started_at` was preparation
+  time and must not be imported as execution evidence.
+- The interactive Mac bridge records execution at its authorised `begin`
+  action, when the existing consumer takes the task. `select` only reserves it.
+  `resume` reconciles the same attempt and retains its original start.
+- An observed process exit supplies DGX `ended_at`; the Mac bridge supplies
+  the first retained `finish` time. Missing exit evidence leaves the end unknown.
+  Terminal attempts retain their outcome separately from successful completion.
+- Canonical `finish` retains the terminal observation, reconciles the existing
+  status path, then records `result_accepted_at` and, only for success,
+  `completion_accepted_at`. Repeated delivery preserves those timestamps.
+  Interrupted acceptance can resume after the status write without another run.
+- `started_at` is the earliest recorded execution start. `completed_at` is the
+  accepted completion for the current lifecycle, or null when uncompleted or
+  unknown. Reopening keeps `completion_history` and all prior attempts. A
+  previously accepted attempt cannot complete a reopened task. An external
+  completion is not attributed to an unfinished coding attempt.
+- Durations are **elapsed wall-clock seconds, including waits**, not active
+  coding effort. Attempt duration ends at the observed execution end; task
+  duration ends at accepted completion, so reporting/archive waits can differ.
+  Planned start/due dates and generic `updated_at` are not used. No historical
+  timestamps are fabricated during upgrade.
+
+Cost is explicitly `unknown` with a null amount/currency. Codex `turn.completed`
+records can contain token usage, but the subscription execution route supplies
+no trustworthy per-task monetary receipt or applicable price basis. This slice
+does not sum parent/child calls or treat subscription tokens as an API invoice.
+Attributable usage/cost needs separate controller-owned backlog work; it is not
+a timing acceptance gate.
+
+### Operator-owned VS Code bridge integration
+
+The repository cannot activate or directly edit the operator-owned Mac bridge.
+[The bounded patch](patches/codex_vscode_task_timing.patch) adds the shared
+start/resume/finish calls to its existing `task-server.py`, preserves its
+assignment/input checks and lock, and includes canonical timing in its result
+message. It applies to the source inspected on 17 September 2026 with SHA-256
+`a665516dfe918b6e77046867721ad471c787535bf5e8a92d7aa677c57f19df5b`.
+If that source changed, review/rebase the patch against the new source rather
+than replacing the bridge with an old copy. Existing attempts lacking the new
+execution observation keep their historical state and are not assigned upgrade
+timestamps. No secrets or operator configuration belong in the patch.
+
+The isolated replay test reads the operator source named by
+`CODING_TIMING_MAC_BRIDGE_SOURCE`, applies the patch only to a temporary copy,
+and executes its function definitions with fixture state and canonical services
+backed by a mock database. It never executes the host bootstrap or messaging
+helper. Run with PDM:
+
+```sh
+VON_USE_MOCK_DB=1 CODING_TIMING_MAC_BRIDGE_SOURCE=/operator/path/task-server.py \
+  pdm run pytest tests/backend/test_task_execution_timing.py -q
+```
+
+Without the source path, only the optional operator replay is skipped; canonical
+service and DGX supported-path tests still run. This evidence proves the patched
+code path, not an installed Mac consumer. Apply the reviewed patch and select the
+matching backend/worker release at an idle boundary under the existing lock,
+with the prior bridge and release retained for rollback. Read back a supported
+begin/resume/finish attempt on each installed adapter before claiming activation.
+Preserve the current schedule, identities, active consumers and federation/import
+state. Public web deployment is a separate authorised action.
