@@ -105,7 +105,7 @@ const key = (...args) => execFileSync(process.env.XDOTOOL || 'xdotool', args, { 
         await page.setViewportSize({ width: 360, height: 640 });
         await check('narrow360', 1, true);
         await page.locator('.mobile-footer-details > summary').click();
-        await page.locator('.conversation-model-controls button').click();
+        await page.locator('.conversation-model-controls > button').click();
         await page.locator('.mobile-footer-details > summary').click();
         await expect(page.frameLocator('#settingsFrame').locator('#premium-model-settings')).toBeVisible();
         receipt.modelSettingsReachable = true;

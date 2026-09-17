@@ -117,7 +117,7 @@ async function measure(page, name) {
         await expect(page.locator('.footer-container')).toBeHidden();
         await measure(page, 'after-refresh');
         await page.locator('.mobile-footer-details > summary').click();
-        await page.locator('.conversation-model-controls button').click();
+        await page.locator('.conversation-model-controls > button').click();
         await page.locator('.mobile-footer-details > summary').click();
         await expect(page.frameLocator('#settingsFrame').locator('#premium-model-settings')).toBeVisible();
         const reasoningState = async p => {
@@ -149,7 +149,7 @@ async function measure(page, name) {
         }
         await desktop.locator('.footer-org-menu-trigger').click();
         await expect(desktop.locator('.footer-org-options')).toBeVisible();
-        await control.locator('.conversation-model-controls button').click();
+        await control.locator('.conversation-model-controls > button').click();
         await expect(control.frameLocator('#settingsFrame').locator('#premium-model-settings')).toBeVisible();
         assert.deepEqual(await reasoningState(control), candidateReasoning);
         fs.writeFileSync(path.join(evidence, 'result.json'), JSON.stringify({ sha, metrics, reasoningState: candidateReasoning, noSendsOrModelCalls: true, simulationLimits: 'Chromium viewport/touch simulation; no physical keyboard or public OAuth claim' }, null, 2));
