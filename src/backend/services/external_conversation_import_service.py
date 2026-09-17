@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 EXTERNAL_CONVERSATION_PACKAGE_SCHEMA_VERSION = "external_conversation_package.v1"
-EXTERNAL_CONVERSATION_PARSER_VERSION = "2026-08-29.2"
+EXTERNAL_CONVERSATION_PARSER_VERSION = "2026-09-16.3"
 EXTERNAL_CONVERSATION_ORIGIN_KIND = "external_conversation_import"
 EXTERNAL_CONVERSATION_LINEAGE_SCHEMA_VERSION = "conversation_lineage.v1"
 MAX_EXTERNAL_CONVERSATION_SOURCE_BYTES = 32 * 1024 * 1024
@@ -504,6 +504,10 @@ def _parse_codex_records(
         locator = f"line:{record.get('__line_number')}"
         timestamp = _iso_timestamp(record.get("timestamp") or payload.get("timestamp"))
         if envelope_type == "session_meta":
+            # Forked rollouts start with their own metadata, then may include
+            # copied ancestor metadata. The ancestor is not this conversation.
+            if session_id is not None:
+                continue
             session_id = (
                 _clean_text(payload.get("id"), maximum=240)
                 or _clean_text(payload.get("session_id"), maximum=240)
@@ -835,6 +839,23 @@ def _parse_gemini_records(
     session_id = _clean_text(state.get("sessionId"), maximum=240) or (
         f"gemini-{source_sha256[:24]}"
     )
+    identity_report: dict[str, Any] = {}
+    if session_id == "a2a-server":
+        # Gemini's A2A server reuses this placeholder across distinct runs.
+        # startTime stays fixed as a journal grows; lastUpdated/content do not.
+        started_at = _iso_timestamp(state.get("startTime"))
+        identity_suffix = (
+            hashlib.sha256(started_at.encode("utf-8")).hexdigest()[:24]
+            if started_at
+            else source_sha256[:24]
+        )
+        identity_report = {
+            "source_session_id": session_id,
+            "session_identity_basis": (
+                "session_id_and_start_time" if started_at else "source_sha256"
+            ),
+        }
+        session_id = f"{session_id}-{identity_suffix}"
     messages = state.get("messages")
     messages = messages if isinstance(messages, list) else []
     events: list[ExternalConversationEvent] = []
@@ -899,6 +920,7 @@ def _parse_gemini_records(
             "assistant_message_count": assistant_count,
             "source_has_no_assistant_messages": assistant_count == 0,
             "branch_information_present": False,
+            **identity_report,
         },
     )
 
@@ -1438,6 +1460,8 @@ def parse_external_conversation_file(
 
 def _history_projection(
     package: ExternalConversationPackage,
+    *,
+    source_file_modified_at: datetime,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     history: list[dict[str, Any]] = []
     total_chars = 0
@@ -1467,7 +1491,10 @@ def _history_projection(
             {
                 "role": event.source_role,
                 "content": projected,
-                "timestamp": timestamp or datetime.now(timezone.utc),
+                "timestamp": timestamp or source_file_modified_at,
+                "external_timestamp_source": (
+                    "source_message" if timestamp else "source_file_modified"
+                ),
                 "external_event_id": event.event_id,
                 "external_event_kind": event.event_kind,
                 "external_source_role": event.source_role,
@@ -1521,6 +1548,18 @@ def _build_source_record(
         f"external-import://custodian/{custodian_scope}/"
         f"{package.provider}/{package.source_session_id}"
     )
+    # Provider session IDs can repeat across accounts/workspaces. Raw custody
+    # must distinguish the same source scopes as the conversation projection.
+    # Hash exact values before the ingestion layer normalises paths to lowercase.
+    if package.source_account or package.source_workspace:
+        source_scope = hashlib.sha256(
+            json.dumps(
+                [package.source_account or "", package.source_workspace or ""],
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        canonical_source_path += f"/scope/{source_scope}"
     return SessionRecord(
         environment=package.provider,
         source_session_id=package.source_session_id,
@@ -1599,7 +1638,10 @@ def import_external_conversation_file(
         source_account=package.source_account,
         source_workspace=package.source_workspace,
     )
-    history, projection_report = _history_projection(package)
+    source_file_modified_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    history, projection_report = _history_projection(
+        package, source_file_modified_at=source_file_modified_at
+    )
     if not history:
         raise ExternalConversationImportError(
             "The source contains no user-visible human or assistant messages.",
@@ -1695,6 +1737,7 @@ def import_external_conversation_file(
         "parser_version": package.parser_version,
         "source_created_at_utc": package.source_created_at_utc,
         "source_updated_at_utc": package.source_updated_at_utc,
+        "source_file_modified_at_utc": source_file_modified_at.isoformat(),
         "parent_conversation_id": package.parent_conversation_id,
         "raw_document_concept_id": raw_document_concept_id,
         "raw_file_copy_concept_id": raw_record_result.get("file_copy_concept_id"),

@@ -203,7 +203,6 @@ def test_run_new_record_counts_created_mutation(monkeypatch, tmp_path):
 def test_run_unchanged_record_skips_mutation(monkeypatch, tmp_path):
     from src.backend.services.ai_chat_session_ingestion_service import (
         AIChatSessionIngestionService,
-        SessionDecision,
     )
 
     record = _record(tmp_path=tmp_path)
@@ -220,15 +219,20 @@ def test_run_unchanged_record_skips_mutation(monkeypatch, tmp_path):
     )
 
     monkeypatch.setattr(service, "ensure_ontology_types", lambda: [])
+    _install_source_profile_authority(service)
     monkeypatch.setattr(
         service,
-        "_classify_record",
-        lambda _rec: SessionDecision(
-            action="unchanged",
-            reason="content_hash_match",
-            record=_rec,
-            document_concept_id=_rec.document_concept_id,
-        ),
+        "_get_concept",
+        lambda _concept_id: {
+            "concept_id": record.document_concept_id,
+            "attributes": {
+                "source_content_sha256": record.content_sha256,
+                "current_file_copy_concept_id": "#V#retained_file_copy",
+            },
+            "relationships": {
+                service._document_has_file_predicate_id(): ["#V#retained_file_copy"]
+            },
+        },
     )
 
     result = service.run(dry_run=False)
@@ -239,6 +243,7 @@ def test_run_unchanged_record_skips_mutation(monkeypatch, tmp_path):
     assert result.counters.skipped == 1
     assert result.counters.intended_mutations == 0
     assert result.counters.executed_mutations == 0
+    assert result.records[0]["file_copy_concept_id"] == "#V#retained_file_copy"
 
 
 def test_dry_run_uses_ontology_validation_not_bootstrap(monkeypatch, tmp_path):
@@ -272,6 +277,7 @@ def test_dry_run_uses_ontology_validation_not_bootstrap(monkeypatch, tmp_path):
 
     monkeypatch.setattr(service, "ensure_ontology_types", _bootstrap)
     monkeypatch.setattr(service, "validate_ontology_types", _validate)
+    monkeypatch.setattr(service, "_get_concept", lambda _concept_id: None)
 
     result = service.run(dry_run=True)
 

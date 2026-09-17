@@ -24,6 +24,124 @@ def _jsonl(*records: dict) -> bytes:
     return ("\n".join(json.dumps(record) for record in records) + "\n").encode()
 
 
+def test_codex_child_identity_survives_inherited_ancestor_metadata():
+    def parse(child_id: str, *, append: bool = False):
+        records = [
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": child_id,
+                    "forked_from_id": "parent",
+                    "cwd": "/child",
+                },
+            },
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": "parent",
+                    "forked_from_id": "grandparent",
+                    "cwd": "/parent",
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": "Inherited question",
+                },
+            },
+        ]
+        if append:
+            records.append(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": "Child answer",
+                    },
+                }
+            )
+        return parse_external_conversation_bytes(
+            _jsonl(*records), provider_hint="codex"
+        )
+
+    first, sibling, grown = (
+        parse("child-1"),
+        parse("child-2"),
+        parse("child-1", append=True),
+    )
+    assert first.source_session_id == grown.source_session_id == "child-1"
+    assert sibling.source_session_id == "child-2"
+    assert first.parent_conversation_id == "parent"
+    assert first.source_workspace == "/child"
+    assert first.events[0].event_id == grown.events[0].event_id
+    assert first.events[0].event_id != sibling.events[0].event_id
+
+
+def test_gemini_server_runs_have_distinct_stable_identities():
+    def parse(start: str, *, append: bool = False, session_id: str = "a2a-server"):
+        messages = [{"id": "user-1", "type": "user", "content": "Inspect the code"}]
+        if append:
+            messages.append({"id": "assistant-1", "type": "gemini", "content": "Done"})
+        return parse_external_conversation_bytes(
+            _jsonl(
+                {
+                    "sessionId": session_id,
+                    "projectHash": "workspace",
+                    "startTime": start,
+                    "lastUpdated": "2026-09-16T12:01:00Z" if append else start,
+                    "messages": messages,
+                }
+            ),
+            provider_hint="gemini",
+        )
+
+    first = parse("2026-09-16T12:00:00Z")
+    other = parse("2026-09-16T12:00:01Z")
+    grown = parse("2026-09-16T12:00:00+00:00", append=True)
+    assert first.source_session_id != other.source_session_id
+    assert first.source_session_id == grown.source_session_id
+    assert first.events[0].event_id == grown.events[0].event_id
+    assert first.loss_report["source_session_id"] == "a2a-server"
+    assert first.loss_report["session_identity_basis"] == "session_id_and_start_time"
+    assert (
+        parse("2026-09-16T12:00:00Z", session_id="unique-session").source_session_id
+        == "unique-session"
+    )
+
+
+def test_raw_custody_distinguishes_gemini_workspace_and_account(tmp_path):
+    def record(workspace, account=None, *, append=False):
+        messages = [{"type": "user", "content": "Inspect this workspace"}]
+        if append:
+            messages.append({"type": "gemini", "content": "Inspected"})
+        path = tmp_path / "same-filename.jsonl"
+        path.write_bytes(_jsonl({
+            "sessionId": "a2a-server",
+            "startTime": "2026-06-28T16:27:59Z",
+            "projectHash": workspace,
+            "messages": messages,
+        }))
+        package = external_conversation_import_service.parse_external_conversation_file(
+            path, provider_hint="gemini", source_account=account
+        )
+        return external_conversation_import_service._build_source_record(
+            path=path, package=package, custodian_user_id="#V#user", namespace="#V#user"
+        )
+
+    first = record("workspace")
+    grown = record("workspace", append=True)
+    other_workspace = record("Workspace")
+    other_account = record("workspace", "another-account")
+    assert first.source_session_id == other_workspace.source_session_id
+    assert first.document_concept_id == grown.document_concept_id
+    assert len({first.document_concept_id, other_workspace.document_concept_id,
+                other_account.document_concept_id}) == 3
+    assert "another-account" not in other_account.canonical_source_path
+
+
 def test_codex_parser_projects_visible_messages_without_importing_instructions():
     package = parse_external_conversation_bytes(
         _jsonl(
@@ -301,6 +419,18 @@ def test_chat_projection_is_read_only_idempotent_and_actor_scoped(monkeypatch):
         manifest=manifest,
     )
     assert repeated["action"] == "unchanged"
+    # A corrected raw-document reference must refresh even when bytes, parsed
+    # events and the file-copy reference did not change. Keep transcript intact.
+    history_before = collection.find_one({"session_id": "external-session"})["history"]
+    repaired = chat_history_service.upsert_external_conversation_projection(
+        user_id="#V#user", session_id="external-session", session_name="Imported session",
+        namespace="#V#user@org", organisation_concept_id="#V#org", role_in_org="member",
+        history=history, manifest={**manifest, "raw_document_concept_id": "#V#scoped-source"},
+    )
+    assert repaired["action"] == "refreshed"
+    after = collection.find_one({"session_id": "external-session"})
+    assert after["external_conversation_import"]["raw_document_concept_id"] == "#V#scoped-source"
+    assert after["history"] == history_before
     assert (
         collection.find_one({"session_id": "external-session"})["session_name"]
         == "Imported session"

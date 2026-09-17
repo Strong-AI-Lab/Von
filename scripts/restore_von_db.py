@@ -262,6 +262,28 @@ def _resolve_blob_store_for_restore(backend: str):
             os.environ["VON_BLOB_STORE_BACKEND"] = orig
 
 
+def _uri_for_namespace_restore(uri: str) -> str:
+    """Let --nsFrom/--nsTo select databases while preserving authentication.
+
+    A database path in the URI makes mongorestore treat --dir as a single
+    database directory and skip its database subdirectories with exit code 0.
+    """
+    from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
+
+    parts = urlsplit(uri)
+    database = unquote(parts.path.lstrip("/"))
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    if (
+        database
+        and parts.username
+        and not any(k.lower() == "authsource" for k, _ in query)
+    ):
+        query.append(("authSource", database))
+    return urlunsplit(
+        (parts.scheme, parts.netloc, "/", urlencode(query), parts.fragment)
+    )
+
+
 def _run_mongorestore(
     *,
     mongo_uri: str,
@@ -302,7 +324,7 @@ def _run_mongorestore(
                 )
         config_path = config_root / "config.yml"
         config_path.write_text(
-            f"uri: {json.dumps(mongo_uri)}\n",
+            f"uri: {json.dumps(_uri_for_namespace_restore(mongo_uri))}\n",
             encoding="utf-8",
         )
         os.chmod(config_path, 0o600)

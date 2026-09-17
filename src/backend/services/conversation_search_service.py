@@ -127,6 +127,7 @@ def _lexical_candidates(
     namespace: str | None,
     query: str,
     trashed_only: bool = False,
+    include_imported: bool = True,
     candidate_limit: int = _MAX_CANDIDATES,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     collection = chat_history_service.get_chat_history_collection_service(
@@ -142,6 +143,8 @@ def _lexical_candidates(
     mongo_query["trashed_at"] = (
         {"$exists": True, "$ne": None} if trashed_only else None
     )
+    if not include_imported:
+        mongo_query["origin_kind"] = {"$ne": "external_conversation_import"}
     mongo_query["$text"] = {"$search": query}
     projection = {
         "_id": 0,
@@ -223,6 +226,7 @@ def search_actor_conversations(
     page_size: int = 20,
     cursor: str | None = None,
     include_hidden: bool = False,
+    include_imported: bool = True,
     trashed_only: bool = False,
 ) -> dict[str, Any]:
     """Search accessible conversations and return a signed keyset continuation."""
@@ -274,6 +278,7 @@ def search_actor_conversations(
             "filters": clean_filters,
             "sort": sort_mode,
             "include_hidden": include_hidden,
+            "include_imported": include_imported,
             "trashed_only": trashed_only,
         }
         cursor_context = hashlib.sha256(
@@ -291,6 +296,7 @@ def search_actor_conversations(
                 organisation_concept_id=organisation_concept_id,
                 limit=safe_page_size,
                 include_hidden=include_hidden,
+                include_imported=include_imported,
                 include_trashed=trashed_only,
                 # The source cursor is already signed and binds the actor,
                 # namespace, organisation, and list filters.  Returning it
@@ -382,6 +388,7 @@ def search_actor_conversations(
                 organisation_concept_id=organisation_concept_id,
                 limit=100,
                 include_hidden=include_hidden,
+                include_imported=include_imported,
                 include_trashed=trashed_only,
                 cursor=accessible_cursor,
             )
@@ -470,6 +477,7 @@ def search_actor_conversations(
                 query=query_text,
                 trashed_only=trashed_only,
                 candidate_limit=per_scope_candidate_limit,
+                include_imported=include_imported,
             )
             lexical_rows.extend(scope_rows)
             lexical_scope_states.append(scope_state)
@@ -653,6 +661,7 @@ def search_actor_conversations(
         "filters": clean_filters,
         "sort": sort_mode,
         "include_hidden": include_hidden,
+        "include_imported": include_imported,
         "trashed_only": trashed_only,
         "index_version": chat_history_service.CONVERSATION_SEARCH_INDEX_VERSION,
         "index_generation": index_generation,

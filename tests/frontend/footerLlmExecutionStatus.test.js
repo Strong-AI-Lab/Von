@@ -152,6 +152,46 @@ describe('footer latest LLM execution status', () => {
         delete window.__VON_RESTORE_TITLES;
     });
 
+    test.each(['openai', 'gemini', 'openrouter', 'meta'])('reasoning follows the persisted %s request and opens settings', async (provider) => {
+        localStorage.setItem('von:localModelPreference', JSON.stringify({
+            schemaVersion: 'localModelPreference.v1', activeSource: provider,
+            [`${provider}Model`]: 'fixture-model',
+            [`${provider}ModelParameters`]: { reasoning_effort: 'high' },
+        }));
+        const { setModelInfoFooterText } = require(domUtilsPath);
+        const { buildLocalModelRequestFields } = require('../../src/frontend/web/von_interface/static/js/utils/localModelPreferences.js');
+        await setModelInfoFooterText();
+        const segment = document.querySelector('.footer-reasoning-level');
+        expect(segment.textContent).toBe('Reasoning: high');
+        expect(buildLocalModelRequestFields()).toMatchObject({
+            model_provider: provider, model_parameters: { reasoning_effort: 'high' },
+        });
+        const settingsClick = jest.fn();
+        document.querySelector('[data-tab="settingsTab"]').addEventListener('click', settingsClick);
+        segment.querySelector('button').click();
+        expect(settingsClick).toHaveBeenCalledTimes(1);
+        expect(segment.querySelector('button').getAttribute('aria-label')).toContain('Configured reasoning level high');
+    });
+
+    test('reasoning shows server preference, default and unselected without leaking inactive effort', async () => {
+        installFetchMock({ settingsPayload: { resolved_llm: {
+            provider: 'openai', model: 'fixture-model', model_parameters: { reasoning_effort: 'low' },
+        } } });
+        const { setModelInfoFooterText } = require(domUtilsPath);
+        await setModelInfoFooterText();
+        expect(document.querySelector('.footer-reasoning-level').textContent).toBe('Reasoning: low');
+        localStorage.setItem('von:localModelPreference', JSON.stringify({
+            activeSource: 'ollama', openaiModel: 'fixture-model',
+            openaiModelParameters: { reasoning_effort: 'high' },
+            ollamaSelection: { model: 'local-model' },
+        }));
+        await setModelInfoFooterText();
+        expect(document.querySelector('.footer-reasoning-level').textContent).toBe('Reasoning: provider default');
+        localStorage.setItem('von:localModelPreference', JSON.stringify({ activeSource: 'ollama' }));
+        await setModelInfoFooterText();
+        expect(document.querySelector('.footer-reasoning-level').textContent).toBe('Reasoning: unselected');
+    });
+
     test('shows unselected model when premium is disabled and no Ollama model is selected', async () => {
         localStorage.setItem('von:localModelPreference', JSON.stringify({
             schemaVersion: 'localModelPreference.v1',

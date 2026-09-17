@@ -69,6 +69,7 @@ describe('chat task queue', () => {
         try {
             const chatTab = require(chatTabModulePath);
             if (typeof chatTab.__testOnly_resetChatRequestState === 'function') {
+                chatTab.__testOnly_setTurnModelPicker(null);
                 chatTab.__testOnly_resetChatRequestState();
             }
         } catch (_) {
@@ -118,7 +119,7 @@ describe('chat task queue', () => {
         expect(dictationStatus.textContent).toBe('');
     });
 
-    test('sends the stored Gemini choice as a bare model with its exact provider', async () => {
+    test('uses a temporary model once, restores default parameters and preserves queued model choices', async () => {
         const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
         const { sendMessage } = require(chatTabModulePath);
         getUserContext.mockReturnValue({
@@ -177,6 +178,29 @@ describe('chat task queue', () => {
                 model_parameters: { reasoning_effort: 'high' }
             });
             expect(generateBody.model).not.toContain('gemini:');
+            const { createTurnModelPicker } = require('../../src/frontend/web/von_interface/static/js/components/turnModelPicker.js');
+            document.body.insertAdjacentHTML('beforeend', '<select id="temporaryModel"><option value="">Default</option></select><p id="temporaryStatus"></p><button id="temporaryClear"></button>');
+            const select = document.getElementById('temporaryModel');
+            const picker = createTurnModelPicker({ select,
+                status: document.getElementById('temporaryStatus'),
+                clearButton: document.getElementById('temporaryClear'),
+                loadModels: async provider => provider === 'openai' ? ['gpt-6-astra'] : [] });
+            await picker.load();
+            require(chatTabModulePath).__testOnly_setTurnModelPicker(picker);
+            select.value = JSON.stringify({ model: 'gpt-6-astra', model_provider: 'openai' });
+            select.dispatchEvent(new Event('change'));
+            document.getElementById('promptInput').value = 'Use stronger model once';
+            await sendMessage();
+            expect(generateBody).toMatchObject({ model: 'gpt-6-astra', model_provider: 'openai', model_parameters: {} });
+            expect(picker.peek()).toBeNull();
+            document.getElementById('promptInput').value = 'Use default again';
+            await sendMessage();
+            expect(generateBody).toMatchObject({ model: 'gemini-3.7-flash', model_provider: 'gemini', model_parameters: { reasoning_effort: 'high' } });
+            // A retained queue choice must survive later default changes.
+            await sendMessage({ fromQueue: true, promptOverride: 'Queued stronger turn', sessionId: 'session-1',
+                executionEnvelope: { model: 'gpt-6-astra', model_provider: 'openai', model_parameters: {} } });
+            expect(generateBody).toMatchObject({ model: 'gpt-6-astra', model_provider: 'openai', model_parameters: {} });
+            require(chatTabModulePath).__testOnly_setTurnModelPicker(null);
         } finally {
             localStorage.removeItem('von:localModelPreference');
             window.scrollTo = originalScrollTo;
@@ -231,6 +255,14 @@ describe('chat task queue', () => {
                 });
             }
 
+            if (url === '/von/api/chat_prompt_queue' && options.method === 'GET') {
+                return Promise.resolve({ ok: true, json: async () => ({
+                    items: queueBodies.slice(1).map((body, index) => ({
+                        ...body, queue_id: `queue-${index + 2}`, status: 'queued'
+                    }))
+                }) });
+            }
+
             if (typeof url === 'string' && url.startsWith('/von/generate')) {
                 const parsed = JSON.parse(options.body || '{}');
                 generateBodies.push(parsed);
@@ -267,8 +299,14 @@ describe('chat task queue', () => {
         expect(generateBodies).toHaveLength(1);
         expect(document.getElementById('sendButton').textContent).toBe('Queue Prompt');
 
+        const temporaryChoice = { model: 'gpt-6-astra', model_provider: 'openai', model_parameters: {} };
+        const picker = { peek: () => temporaryChoice, take: jest.fn(() => temporaryChoice), clear: jest.fn() };
+        require(chatTabModulePath).__testOnly_setTurnModelPicker(picker);
         promptInput.value = 'Second draft';
         await sendMessage();
+        expect(picker.take).toHaveBeenCalledTimes(1);
+        expect(queueBodies[1].execution_envelope).toMatchObject(temporaryChoice);
+        require(chatTabModulePath).__testOnly_setTurnModelPicker(null);
 
         const queuedEditor = document.querySelector('.chat-task-queue-edit');
         expect(queuedEditor).toBeTruthy();
@@ -1335,6 +1373,73 @@ describe('chat task queue', () => {
         expect(document.getElementById('sendButton').textContent).toBe('Send Prompt');
     }, 15000);
 
+    test.each([false, true])('reconciles a foreground completion in its own tab (switch away: %s)', async (switchAway) => {
+        const chat = require(chatTabModulePath);
+        const { getUserContext } = require('../../src/frontend/web/von_interface/static/js/apiService.js');
+        getUserContext.mockReturnValue({ user_id: 'user', org_id: 'org', language: 'en-NZ' });
+        const completed = { queue_id: 'finished', session_id: 'session-1',
+            prompt_raw: 'Find Email from Yitan', status: 'queued' };
+        const pending = { queue_id: 'pending', session_id: 'session-1',
+            prompt_raw: 'A distinct unsent request', status: 'queued' };
+        let finish;
+        let terminal = false;
+        const calls = [];
+        global.fetch = jest.fn((url, options = {}) => {
+            calls.push({ url, method: options.method || 'GET' });
+            const reply = data => Promise.resolve({ ok: true, json: async () => data });
+            if (url === '/von/api/chat_prompt_queue') {
+                if (options.method === 'POST') return reply({ item: completed });
+                return reply({ items: terminal ? [pending] : [completed, pending] });
+            }
+            if (url === '/von/generate') return new Promise(resolve => {
+                finish = () => { terminal = true; resolve({ ok: true, json: async () => ({ response: 'Done' }) }); };
+            });
+            if (String(url).startsWith('/von/history/length')) return reply({ history_length: 0 });
+            return reply({});
+        });
+        document.getElementById('promptInput').value = completed.prompt_raw;
+        const sending = chat.sendMessage();
+        await flushMicrotasks();
+        expect(finish).toBeDefined();
+        if (switchAway) chat.__testOnly_setActiveChatSession('session-2', 'Other');
+        await chat.__testOnly_refreshChatPromptQueueFromServer();
+        finish();
+        await sending;
+        await flushMicrotasks();
+        chat.__testOnly_setActiveChatSession('session-1', 'Current');
+        expect(Array.from(document.querySelectorAll('.chat-task-queue-edit'), el => el.value)).not.toContain(completed.prompt_raw);
+        expect(Array.from(document.querySelectorAll('.chat-task-queue-edit'), el => el.value)).toContain(pending.prompt_raw);
+        expect(calls.filter(call => call.url === '/von/api/chat_prompt_queue' && call.method === 'GET')).toHaveLength(2);
+        expect(calls.filter(call => call.url === '/von/generate')).toHaveLength(1);
+        expect(calls.some(call => /\/(finish|claim)$/.test(call.url) || call.method === 'DELETE')).toBe(false);
+        expect(calls.some(call => call.url.startsWith('/von/history?'))).toBe(false);
+        // A fresh mount obtains the same canonical queue without replaying work.
+        chat.__testOnly_resetChatRequestState();
+        chat.__testOnly_setActiveChatSession('session-1', 'Current');
+        await chat.__testOnly_refreshChatPromptQueueFromServer();
+        expect(Array.from(document.querySelectorAll('.chat-task-queue-edit'), el => el.value)).not.toContain(completed.prompt_raw);
+        expect(Array.from(document.querySelectorAll('.chat-task-queue-edit'), el => el.value)).toContain(pending.prompt_raw);
+        expect(calls.filter(call => call.url === '/von/generate')).toHaveLength(1);
+    });
+
+    test('an older queue read cannot resurrect a completed row or refetch history', async () => {
+        const chat = require(chatTabModulePath);
+        let resolveOld;
+        let count = 0;
+        global.fetch = jest.fn(() => {
+            count += 1;
+            if (count === 1) return new Promise(resolve => { resolveOld = resolve; });
+            return Promise.resolve({ ok: true, json: async () => ({ items: [] }) });
+        });
+        const oldRead = chat.__testOnly_refreshChatPromptQueueFromServer();
+        await chat.__testOnly_refreshChatPromptQueueFromServer();
+        resolveOld({ ok: true, json: async () => ({ items: [{ queue_id: 'finished',
+            session_id: 'session-1', prompt_raw: 'Find Email from Yitan', status: 'queued', dispatch_mode: 'server' }] }) });
+        expect(await oldRead).toBe(false);
+        expect(document.querySelector('.chat-task-queue-item')).toBeNull();
+        expect(global.fetch).toHaveBeenCalledTimes(2);
+    });
+
     test('polls server-owned queue work and refreshes active history after its row disappears', async () => {
         const {
             __testOnly_refreshChatPromptQueueFromServer,
@@ -2280,6 +2385,7 @@ describe('chat task queue', () => {
         });
 
         let resolveGenerate = null;
+        let terminal = false;
         const generateBodies = [];
         const queued = {
             queue_id: 'queue-manual-legacy',
@@ -2293,7 +2399,7 @@ describe('chat task queue', () => {
                 return Promise.resolve({
                     ok: true,
                     status: 200,
-                    json: async () => ({ success: true, items: [queued] })
+                    json: async () => ({ success: true, items: terminal ? [] : [queued] })
                 });
             }
             if (url === '/von/api/chat_prompt_queue/queue-manual-legacy' && options.method === 'PATCH') {
@@ -2346,6 +2452,7 @@ describe('chat task queue', () => {
         expect(generateBodies[0].prompt_queue_id).toBe('queue-manual-legacy');
         expect(document.querySelector('[data-queue-id="queue-manual-legacy"]')).toBeTruthy();
 
+        terminal = true;
         resolveGenerate();
         await flushMicrotasks();
         await flushMicrotasks();

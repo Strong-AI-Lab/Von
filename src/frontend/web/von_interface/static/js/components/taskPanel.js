@@ -15,6 +15,11 @@ import { renderMarkdownViaServer } from '../markdownUtils.js';
 import { selectBestNameForContext, selectShortestNameForContext } from '../utils/nameSelection.js';
 
 // Task panel state
+const _taskTabs = new Map();
+let _taskTabStackExpanded = false;
+let _taskTabCounter = 0;
+let _taskTabStackEl = null;
+let _taskTabRefreshSequence = 0;
 let _panelEl = null;
 let _taskListEl = null;
 let _globalTasksContainer = null;  // Container for global tasks tab
@@ -185,6 +190,9 @@ async function ensureTaskOrganisationOptionsLoaded() {
 }
 
 function resetTaskPanelScopedState(activeOrganisationConceptId, { actorChanged = false } = {}) {
+    const hadActiveTaskTab = [..._taskTabs.values()].some(tab => tab.content.classList.contains('active'));
+    for (const taskId of [..._taskTabs.keys()]) closeTaskTab(taskId, { activateFallback: false });
+    if (hadActiveTaskTab) activateTab('chatTab');
     _panelTaskIds = null;
     _panelLoadGeneration += 1;
     _taskQueueActivityGeneration += 1;
@@ -397,6 +405,21 @@ function getHiddenBulkTaskCollections(task) {
         && typeof collection.collection_id === 'string'
         && collection.collection_id.trim()
     ));
+}
+
+function projectHomeNotice(project) {
+    const home = project?.write_home;
+    if (!home || home.writable_here) return '';
+    const label = home.state === 'replica' ? 'Read-only project copy.' : 'Project transfer in progress.';
+    const freshness = home.snapshot_at ? ` Snapshot: ${escapeHtml(String(home.snapshot_at))}.` : '';
+    let route = '';
+    try {
+        const url = new URL(home.url);
+        if (['https:', 'http:'].includes(url.protocol)) {
+            route = ` <a href="${escapeHtml(url.href)}" target="_blank" rel="noopener noreferrer">Open the project’s write home</a>`;
+        }
+    } catch (_) { /* A missing route must not break project navigation. */ }
+    return `<span class="task-project-home-notice">${label}${freshness}${route}</span>`;
 }
 
 function normaliseBulkTaskCollectionSummary(collection) {
@@ -722,6 +745,7 @@ function formatDateTimeOrDash(value) {
 }
 
 function getTaskDetailState(taskId) {
+    if (_taskTabs.has(taskId)) return _taskTabs.get(taskId).detailState;
     if (!_taskDetailState[taskId]) {
         _taskDetailState[taskId] = {
             expanded: false,
@@ -1081,7 +1105,7 @@ function renderGlobalTasksTabContent() {
                 </div>
             </div>
             <div id="globalTaskSummary" class="global-task-summary" aria-live="polite"></div>
-            <div id="globalTaskProjectInfo" class="global-task-summary">${escapeHtml(_taskProjects.find((project) => project.concept_id === _selectedProjectId)?.description || '')}</div>
+            <div id="globalTaskProjectInfo" class="global-task-summary">${escapeHtml(_taskProjects.find((project) => project.concept_id === _selectedProjectId)?.description || '')} ${projectHomeNotice(_taskProjects.find((project) => project.concept_id === _selectedProjectId))}</div>
             <div id="globalBulkTaskVisibilityControl" class="bulk-task-visibility-control hidden" aria-live="polite"></div>
             <div id="globalTaskLoadProgress" class="task-load-progress" aria-live="polite"></div>
             <section id="globalTaskQueueActivity" class="task-detail-section" aria-live="polite"></section>
@@ -1170,6 +1194,9 @@ function renderGlobalTasksTabContent() {
                 const details = await getJson(`/api/tasks/projects/${encodeURIComponent(_selectedProjectId)}`);
                 if (generation !== _globalTaskLoadGeneration) return;
                 _projectCollections = details.collections || [];
+                if (details.project) {
+                    _taskProjects = _taskProjects.map((project) => project.concept_id === _selectedProjectId ? details.project : project);
+                }
             } catch (error) {
                 if (generation !== _globalTaskLoadGeneration) return;
                 showToast('Could not load project collections', 'error');
@@ -1234,6 +1261,11 @@ function renderGlobalTasksTabContent() {
     const createBtn = _globalTasksContainer.querySelector('#globalCreateTaskBtn');
     if (createBtn) {
         createBtn.addEventListener('click', handleGlobalCreateTask);
+    }
+    const selectedHome = _taskProjects.find((project) => project.concept_id === _selectedProjectId)?.write_home;
+    if (selectedHome && !selectedHome.writable_here) {
+        _globalTasksContainer.querySelectorAll('.global-tasks-create input, .global-tasks-create textarea, .global-tasks-create select, .global-tasks-create button')
+            .forEach((control) => { control.disabled = true; });
     }
 
     // Update the task list element reference for global mode
@@ -2822,6 +2854,7 @@ async function openTaskWorkProduct(taskId) {
     detailState.productError = '';
     detailState.productHtml = '';
     renderTaskList();
+    renderTaskTab(taskId);
     try {
         const product = await getJson(`/api/tasks/${encodeURIComponent(taskId)}/work-product`);
         if (generation !== _taskQueueActivityGeneration) return;
@@ -2836,7 +2869,10 @@ async function openTaskWorkProduct(taskId) {
         detailState.productError = 'Could not open the current product. Try again.';
     } finally {
         detailState.productLoading = false;
-        if (generation === _taskQueueActivityGeneration) renderTaskList();
+        if (generation === _taskQueueActivityGeneration) {
+            renderTaskList();
+            renderTaskTab(taskId);
+        }
     }
 }
 
@@ -3118,7 +3154,7 @@ function renderTaskExternalResourceActions(task) {
     `;
 }
 
-function renderTaskInspector(task, detailState) {
+function renderTaskInspector(task, detailState, { inTaskTab = false } = {}) {
     const detailTask = detailState?.task || task;
     const taskId = getTaskId(detailTask);
     const sourceSummary = getTaskSourceSummary(detailTask);
@@ -3164,6 +3200,7 @@ function renderTaskInspector(task, detailState) {
                     <span class="task-priority-chip">${escapeHtml(getPriorityInfo(detailTask.priority).label)}</span>
                     ${renderTaskExecuteWithVonButton(detailTask, 'task-inspector-execute-btn')}
                     ${renderTaskDiscussButton(detailTask, 'task-inspector-discuss-btn')}
+                    ${!inTaskTab ? renderOpenTaskTabButton(taskId) : ''}
                 </div>
             </div>
 
@@ -3343,6 +3380,143 @@ function renderTaskInspector(task, detailState) {
             ${renderRetainedSourceAndWorklog(taskId, detailState)}
         </div>
     `;
+}
+
+function renderOpenTaskTabButton(taskId) {
+    return `<button type="button" class="task-open-in-tab-btn btn-mini" data-task-id="${escapeHtml(taskId)}">Open in Tab</button>`;
+}
+
+// Reuse the concept stack presentation, with independent task contents and recency.
+function rebuildTaskTabStack() {
+    if (!_taskTabs.size) {
+        _taskTabStackEl?.remove();
+        _taskTabStackEl = null;
+        _taskTabStackExpanded = false;
+    } else {
+        if (!_taskTabStackEl) {
+            _taskTabStackEl = document.createElement('div');
+            _taskTabStackEl.id = 'taskTabStack';
+            _taskTabStackEl.className = 'concept-tab-bucket task-tab-stack';
+            _taskTabStackEl.setAttribute('role', 'group');
+            _taskTabStackEl.setAttribute('aria-label', 'Open task tabs');
+            const container = document.getElementById('tabContainer');
+            const anchor = container.querySelector('[data-tab="globalTasksTab"]');
+            container.insertBefore(_taskTabStackEl, anchor?.parentElement === container ? anchor : null);
+        }
+        const entries = [..._taskTabs.values()].reverse();
+        const primary = document.createElement('div');
+        primary.className = 'concept-tab-bucket-primary';
+        primary.appendChild(entries[0].button);
+        const overflow = document.createElement('div');
+        overflow.id = 'taskTabStackOverflow';
+        overflow.className = 'concept-tab-bucket-panel';
+        overflow.hidden = !_taskTabStackExpanded;
+        if (entries.length > 1) {
+            const toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.className = 'concept-tab-bucket-toggle';
+            toggle.textContent = `+${entries.length - 1}`;
+            toggle.setAttribute('aria-label', `${_taskTabStackExpanded ? 'Hide' : 'Show'} ${entries.length - 1} more task tabs`);
+            toggle.setAttribute('aria-expanded', String(_taskTabStackExpanded));
+            toggle.setAttribute('aria-controls', overflow.id);
+            toggle.onclick = () => {
+                _taskTabStackExpanded = !_taskTabStackExpanded;
+                rebuildTaskTabStack();
+                _taskTabStackEl.querySelector('.concept-tab-bucket-toggle')?.focus();
+            };
+            primary.appendChild(toggle);
+            entries.slice(1).forEach(entry => overflow.appendChild(entry.button));
+        }
+        _taskTabStackEl.classList.toggle('is-expanded', _taskTabStackExpanded);
+        _taskTabStackEl.replaceChildren(primary, overflow);
+    }
+    document.dispatchEvent(new CustomEvent('von:tab-strip-layout-changed'));
+}
+
+function activateTaskTab(taskId) {
+    const tab = _taskTabs.get(taskId);
+    if (!tab) return;
+    _taskTabs.delete(taskId);
+    _taskTabs.set(taskId, tab);
+    _taskTabStackExpanded = false;
+    rebuildTaskTabStack();
+    activateTab(tab.content.id);
+    tab.button.querySelector('.task-tab-open').focus();
+}
+
+function closeTaskTab(taskId, { activateFallback = true } = {}) {
+    const tab = _taskTabs.get(taskId);
+    if (!tab) return;
+    const wasActive = tab.content.classList.contains('active');
+    tab.button.remove();
+    tab.content.remove();
+    _taskTabs.delete(taskId);
+    rebuildTaskTabStack();
+    if (wasActive && activateFallback) {
+        const remaining = [..._taskTabs.keys()].pop();
+        if (remaining) activateTaskTab(remaining);
+        else {
+            activateTab('globalTasksTab');
+            void showGlobalTasks();
+            document.querySelector('[data-tab="globalTasksTab"]')?.focus();
+        }
+    }
+}
+
+function renderTaskTab(taskId) {
+    const tab = _taskTabs.get(taskId);
+    if (!tab) return;
+    const task = tab.detailState.task || tab.task;
+    const title = task.title || 'Untitled task';
+    tab.button.querySelector('.task-tab-open').textContent = `📋 ${title}`;
+    tab.button.title = title;
+    tab.button.querySelector('.close-tab').setAttribute('aria-label', `Close task tab: ${title}`);
+    tab.content.innerHTML = `<button type="button" class="task-tab-refresh btn-mini">Refresh task</button>${renderTaskInspector(task, tab.detailState, { inTaskTab: true })}`;
+    tab.content.querySelector('.task-tab-refresh').onclick = () => void loadTaskDetails(taskId);
+    attachTaskEventListeners([tab.content]);
+}
+
+export async function openTaskInTab(rawTaskId) {
+    const taskId = normaliseTaskConceptId(rawTaskId);
+    if (!taskId) return;
+    const container = document.getElementById('tabContainer');
+    const area = document.querySelector('.tab-content-area');
+    if (!container || !area) {
+        showToast('Task tabs are unavailable in this view.', 'error');
+        return;
+    }
+    ensureTaskPanelOrganisationSwitchListener();
+    ensureTaskPanelAuthStatusListener();
+    hideTaskPanel({ restoreFocus: false });
+    if (_taskTabs.has(taskId)) {
+        activateTaskTab(taskId);
+        return;
+    }
+    const task = _tasks.find(item => getTaskId(item) === taskId) || { task_concept_id: taskId };
+    const detailState = getTaskDetailState(taskId);
+    const content = document.createElement('div');
+    content.id = `taskTab_${++_taskTabCounter}`;
+    content.className = 'tab-content task-tab-content';
+    content.dataset.taskId = taskId;
+    const button = document.createElement('div');
+    button.className = 'tab-button closable task-tab-button';
+    button.dataset.tab = content.id;
+    button.dataset.taskId = taskId;
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'task-tab-open tab-button-label';
+    open.onclick = () => activateTaskTab(taskId);
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'close-tab';
+    close.textContent = '×';
+    close.onclick = (event) => { event.stopPropagation(); closeTaskTab(taskId); };
+    button.append(open, close);
+    area.appendChild(content);
+    _taskTabs.set(taskId, { task, detailState, button, content });
+    renderTaskTab(taskId);
+    activateTaskTab(taskId);
+    await loadTaskDetails(taskId);
 }
 
 function renderGlobalTaskInspector() {
@@ -3551,7 +3725,8 @@ function renderTaskItem(task) {
                     <button type="button" class="task-detail-toggle-btn" data-task-id="${taskId}" ${!_isGlobalTabMode ? `aria-expanded="${detailState.expanded}"` : ''} title="${_isGlobalTabMode ? 'Inspect task details' : (detailState.expanded ? 'Hide task details' : 'Show task details')}">
                         ${_isGlobalTabMode ? 'Inspect' : (detailState.expanded ? 'Hide details' : 'Show details')}
                     </button>
-                    ${!_isGlobalTabMode ? `<button type="button" class="task-open-in-tab-btn btn-mini" data-task-id="${taskId}">Open in Tasks</button>` : ''}
+                    ${renderOpenTaskTabButton(taskId)}
+                    ${!_isGlobalTabMode ? `<button type="button" class="task-open-in-tasks-btn btn-mini" data-task-id="${taskId}">Open in Tasks</button>` : ''}
                     <select class="task-status-select" data-task-id="${taskId}" title="Change status">
                         ${TASK_STATUS_OPTIONS.map(opt => `
                             <option value="${opt.value}" ${task.status === opt.value ? 'selected' : ''}>
@@ -3583,6 +3758,8 @@ function escapeHtml(str) {
 function replaceCachedTask(updatedTask) {
     const updatedTaskId = getTaskId(updatedTask);
     if (!updatedTaskId) return;
+    const tab = _taskTabs.get(updatedTaskId);
+    if (tab) tab.task = updatedTask;
     const existingIndex = _tasks.findIndex((item) => getTaskId(item) === updatedTaskId);
     if (existingIndex >= 0) {
         _tasks[existingIndex] = updatedTask;
@@ -3593,9 +3770,12 @@ function replaceCachedTask(updatedTask) {
 async function loadTaskDetails(taskId, { refreshList = false } = {}) {
     const detailState = getTaskDetailState(taskId);
     const scopeGenerationAtStart = _taskQueueActivityGeneration;
+    const requestSequence = ++_taskTabRefreshSequence;
+    detailState.requestSequence = requestSequence;
     detailState.loading = true;
     detailState.error = null;
     renderTaskList();
+    renderTaskTab(taskId);
 
     try {
         const [task, commentsResult, attachmentsResult, historyResult, worklogResult] = await Promise.all([
@@ -3605,7 +3785,7 @@ async function loadTaskDetails(taskId, { refreshList = false } = {}) {
             getJson(`/api/tasks/${encodeURIComponent(taskId)}/history?limit=200`),
             getJson(`/api/tasks/${encodeURIComponent(taskId)}/worklog?limit=200`),
         ]);
-        if (scopeGenerationAtStart !== _taskQueueActivityGeneration) return;
+        if (scopeGenerationAtStart !== _taskQueueActivityGeneration || detailState.requestSequence !== requestSequence) return;
         detailState.task = task;
         detailState.comments = commentsResult.comments || [];
         detailState.attachments = attachmentsResult.attachments || [];
@@ -3617,10 +3797,15 @@ async function loadTaskDetails(taskId, { refreshList = false } = {}) {
         }
     } catch (err) {
         console.error('[taskPanel] Failed to load task details:', err);
-        detailState.error = 'Failed to load task details';
+        if (scopeGenerationAtStart === _taskQueueActivityGeneration && detailState.requestSequence === requestSequence) {
+            detailState.error = 'Failed to load task details';
+        }
     } finally {
-        detailState.loading = false;
-        renderTaskList();
+        if (scopeGenerationAtStart === _taskQueueActivityGeneration && detailState.requestSequence === requestSequence) {
+            detailState.loading = false;
+            renderTaskList();
+            renderTaskTab(taskId);
+        }
     }
 }
 
@@ -3664,7 +3849,7 @@ async function saveTaskParityFields(taskId, panelEl) {
     setIfPresent('.task-detail-due-input', 'due_date', localInputValueToIso);
 
     const previousOrganisationId = normaliseTaskConceptId(
-        (_tasks.find((task) => getTaskId(task) === taskId)?.organisation_concept_id) || '',
+        (getTaskDetailState(taskId).task?.organisation_concept_id || _tasks.find((task) => getTaskId(task) === taskId)?.organisation_concept_id) || '',
     );
     const organisationInput = panelEl.querySelector('.task-detail-organisation-input');
     const requestedOrganisationId = normaliseTaskConceptId(
@@ -3676,6 +3861,7 @@ async function saveTaskParityFields(taskId, panelEl) {
     await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, payload);
     showToast('Task fields updated', 'success');
     if (Object.prototype.hasOwnProperty.call(payload, 'organisation_concept_id')) {
+        closeTaskTab(taskId);
         if (_isGlobalTabMode) {
             _selectedTaskId = '';
             delete _taskDetailState[taskId];
@@ -3790,8 +3976,8 @@ async function openTaskConversation(sessionId) {
 /**
  * Attach event listeners to task items.
  */
-function attachTaskEventListeners() {
-    const roots = [
+function attachTaskEventListeners(explicitRoots = null) {
+    const roots = explicitRoots || [
         _taskListEl,
         _globalTasksContainer?.querySelector('#globalTaskInspector'),
     ].filter(Boolean);
@@ -3862,6 +4048,14 @@ function attachTaskEventListeners() {
         });
 
         root.querySelectorAll('.task-open-in-tab-btn').forEach((button) => {
+            button.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void openTaskInTab(button.dataset.taskId);
+            });
+        });
+
+        root.querySelectorAll('.task-open-in-tasks-btn').forEach((button) => {
             button.addEventListener('click', (event) => {
                 event.stopPropagation();
                 const task = _tasks.find(item => getTaskId(item) === button.dataset.taskId);
@@ -4132,6 +4326,7 @@ async function updateTaskStatus(taskId, newStatus) {
         await patchJson(`/api/tasks/${encodeURIComponent(taskId)}`, { status: newStatus });
         showToast('Task updated', 'success');
         await refreshTasks();
+        if (_taskTabs.has(taskId)) await loadTaskDetails(taskId);
     } catch (err) {
         console.error('[taskPanel] Failed to update task:', err);
         showToast('Failed to update task', 'error');
@@ -4146,6 +4341,7 @@ async function deleteTask(taskId) {
         await deleteJson(`/api/tasks/${encodeURIComponent(taskId)}`);
         showToast('Task deleted', 'success');
 
+        closeTaskTab(taskId);
         // Remove from local cache and re-render
         _tasks = _tasks.filter(t => getTaskId(t) !== taskId);
         refreshTaskGroupOptions();

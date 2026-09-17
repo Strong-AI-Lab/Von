@@ -4831,6 +4831,10 @@ def upsert_external_conversation_projection(
         == stored_manifest.get("package_sha256")
         and existing_manifest.get("parser_version")
         == stored_manifest.get("parser_version")
+        and existing_manifest.get("raw_file_copy_concept_id")
+        == stored_manifest.get("raw_file_copy_concept_id")
+        and existing_manifest.get("raw_document_concept_id")
+        == stored_manifest.get("raw_document_concept_id")
     ):
         existing_synchronisation = existing_manifest.get("synchronisation")
         existing_divergence = (
@@ -4853,6 +4857,7 @@ def upsert_external_conversation_projection(
         }
 
     divergence: Dict[str, Any] | None = None
+    corrected_fallback_timestamp_count = 0
     appended_history = prepared_history
     action = "new"
     if existing is not None:
@@ -4920,6 +4925,32 @@ def upsert_external_conversation_projection(
         else:
             action = "refreshed"
 
+        # A missing source timestamp is part of the event fingerprint; its
+        # display fallback is not. Repair only verified, unchanged events.
+        if not divergence:
+            repaired_history = []
+            for entry in existing_history:
+                incoming = incoming_by_id.get(entry.get("external_event_id"))
+                if (
+                    incoming is not None
+                    and "external_source_timestamp_utc" in entry
+                    and entry["external_source_timestamp_utc"] is None
+                    and incoming.get("external_timestamp_source") == "source_file_modified"
+                    and _coerce_datetime(incoming.get("timestamp")) is not None
+                    and (
+                        entry.get("timestamp") != incoming["timestamp"]
+                        or entry.get("external_timestamp_source") != "source_file_modified"
+                    )
+                ):
+                    entry = {
+                        **entry,
+                        "timestamp": incoming["timestamp"],
+                        "external_timestamp_source": "source_file_modified",
+                    }
+                    corrected_fallback_timestamp_count += 1
+                repaired_history.append(entry)
+            existing_history = repaired_history
+
     combined_history = [*existing_history, *appended_history]
     stored_manifest["synchronisation"] = {
         "schema_version": "external_conversation_synchronisation.v1",
@@ -4927,6 +4958,7 @@ def upsert_external_conversation_projection(
         "checked_at_utc": now.isoformat(),
         "appended_message_count": len(appended_history),
         "retained_message_count": len(existing_history),
+        "corrected_fallback_timestamp_count": corrected_fallback_timestamp_count,
         "divergence": divergence,
     }
     search_segments = [
@@ -4974,7 +5006,13 @@ def upsert_external_conversation_projection(
         query[f"{EXTERNAL_CONVERSATION_IMPORT_FIELD}.package_sha256"] = (
             existing_manifest.get("package_sha256")
         )
-        if appended_history:
+        if corrected_fallback_timestamp_count:
+            # Keep the same package compare-and-swap and avoid conflicting
+            # $push/$set updates to the history array.
+            set_fields["history"] = combined_history
+            set_fields["created_at"] = first_message_at
+            set_on_insert.pop("created_at", None)
+        elif appended_history:
             update["$push"] = {"history": {"$each": appended_history}}
     try:
         result = chat_history_coll.update_one(
@@ -5041,6 +5079,7 @@ def upsert_external_conversation_projection(
         "action": action,
         "session_id": session_id,
         "appended_message_count": len(appended_history),
+        "corrected_fallback_timestamp_count": corrected_fallback_timestamp_count,
         "divergence": divergence,
         "canonical_read_back": {
             "session_id": session_id,
@@ -5419,6 +5458,7 @@ def get_chat_history_sessions_older_than_count(
     cutoff: datetime,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    include_imported: bool = True,
     agent_visibility: Any = CHAT_SESSION_AGENT_VISIBILITY_INCLUDE,
 ) -> int:
     """Count actor-owned, untrashed sessions older than a recency cutoff.
@@ -5451,6 +5491,8 @@ def get_chat_history_sessions_older_than_count(
         namespace=namespace,
         include_legacy=include_legacy,
     )
+    if not include_imported:
+        query["origin_kind"] = {"$ne": "external_conversation_import"}
     query["trashed_at"] = None
     clauses: list[Dict[str, Any]] = [
         {
@@ -5808,6 +5850,7 @@ def get_chat_history_session_summaries_page(
     *,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    include_imported: bool = True,
     page_size: int = 100,
     position: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -5833,6 +5876,8 @@ def get_chat_history_session_summaries_page(
         namespace=namespace,
         include_legacy=include_legacy,
     )
+    if not include_imported:
+        base_query["origin_kind"] = {"$ne": "external_conversation_import"}
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     pipeline: List[Dict[str, Any]] = [
         {"$match": base_query},
@@ -5984,6 +6029,7 @@ def _load_chat_history_session_summaries(
     *,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    include_imported: bool = True,
     summary_mode: str = "full",
     metadata_query_limit: int | None = None,
 ) -> List[Dict[str, Any]]:
@@ -6002,6 +6048,9 @@ def _load_chat_history_session_summaries(
     query = build_chat_history_query(
         user_id=user_id, namespace=namespace, include_legacy=include_legacy
     )
+
+    if not include_imported:
+        query["origin_kind"] = {"$ne": "external_conversation_import"}
 
     if light_mode:
         try:
@@ -6184,6 +6233,7 @@ def get_chat_history_session_summaries_result(
     *,
     namespace: Optional[str] = None,
     include_legacy: bool = True,
+    include_imported: bool = True,
     summary_mode: str = "full",
     agent_visibility: Any = CHAT_SESSION_AGENT_VISIBILITY_INCLUDE,
     keep_newest_agent_created: Any = True,
@@ -6203,6 +6253,7 @@ def get_chat_history_session_summaries_result(
         user_id,
         namespace=namespace,
         include_legacy=include_legacy,
+        include_imported=include_imported,
         summary_mode=summary_mode,
         metadata_query_limit=metadata_query_limit,
     )

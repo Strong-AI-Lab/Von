@@ -17941,6 +17941,7 @@ def history_sessions():
         or request.args.get("agent_created_visibility")
         or chat_history_service.CHAT_SESSION_AGENT_VISIBILITY_INCLUDE
     )
+    include_imported = request.args.get("include_imported", "false").lower() == "true"
     keep_newest_agent_created = request.args.get("keep_newest_agent_created")
     recent_window_days = request.args.get("recent_window_days", type=int)
     if recent_window_days is not None:
@@ -17990,6 +17991,7 @@ def history_sessions():
             limit=limit,
             namespace=namespace,
             include_legacy=include_legacy,
+            include_imported=include_imported,
             summary_mode=summary_mode,
             agent_visibility=agent_visibility,
             keep_newest_agent_created=keep_newest_agent_created,
@@ -18004,6 +18006,7 @@ def history_sessions():
                         cutoff=cutoff,
                         namespace=namespace,
                         include_legacy=include_legacy,
+                        include_imported=include_imported,
                         agent_visibility=agent_visibility,
                     )
                 )
@@ -18222,6 +18225,7 @@ def history_sessions():
             session_row
             for session_row in (sessions + shared_sessions)
             if isinstance(session_row, dict)
+            and (include_imported or session_row.get("origin_kind") != "external_conversation_import")
         ]
         try:
             combined = conversation_management_service.apply_conversation_preferences(
@@ -20371,6 +20375,7 @@ def search_conversations():
             sort=request.args.get("sort", "relevance"),
             page_size=request.args.get("page_size", default=20, type=int),
             cursor=request.args.get("cursor"),
+            include_imported=request.args.get("include_imported", "false").lower() == "true",
             include_hidden=request.args.get("include_hidden", "false").lower()
             == "true",
             trashed_only=request.args.get("trashed_only", "false").lower() == "true",

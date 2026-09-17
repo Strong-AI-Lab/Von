@@ -24,7 +24,7 @@ test.each(['popup', 'page'])('%s copies the exact task URL with feedback and no 
     const panel = require(base + 'components/taskPanel.js');
     await panel.openTaskInPanel(taskId);
     if (surface === 'page') {
-        document.querySelector('.task-open-in-tab-btn').click();
+        document.querySelector('.task-open-in-tasks-btn').click();
         await panel.showGlobalTasks();
     }
     const root = document.querySelector(surface === 'popup' ? '#taskPanel' : '#globalTaskInspector');

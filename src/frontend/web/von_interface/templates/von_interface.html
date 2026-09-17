@@ -8,7 +8,7 @@
   <title>Von</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='outage/outage.css') }}">
   <link rel="manifest" href="/von/manifest.webmanifest">
-  <link rel="apple-touch-icon" href="/static/pwa-icon-192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png?v=20260915">
   <meta name="theme-color" content="#245e47">
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='vendor/conversation-visuals/katex.min.css') }}">
@@ -73,6 +73,15 @@
               aria-label="Search results">
             </div>
           </div>
+          <details id="searchContentTypes" class="search-content-types">
+            <summary aria-label="Search content types: all selected">Types <span id="searchContentTypesCount">All</span></summary>
+            <fieldset class="search-content-types-menu">
+              <legend>Search content types</legend>
+              <label><input type="checkbox" value="conversations" checked> Conversations</label>
+              <label><input type="checkbox" value="concepts" checked> Concepts</label>
+              <label><input type="checkbox" value="tasks" checked> Tasks</label>
+            </fieldset>
+          </details>
           <button id="conversationRecoveryButton" class="conversation-recovery-button" type="button" hidden
             aria-label="Open removed conversations" aria-pressed="false" title="Open removed conversations"
             data-keep-title="true">

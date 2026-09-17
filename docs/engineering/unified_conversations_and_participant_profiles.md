@@ -259,3 +259,26 @@ resolution, renamed/reordered sources and unavailable/denied turns;
 `tests/browser/turnReferenceMenu.cjs` checks the production frontend modules in
 a local HTTP fixture with real browser clipboard access and reloads. That
 fixture does not claim live authenticated-server or public deployment acceptance.
+
+### Shared conversation draft editor
+
+Von, Messaging replies and the new-message dialog use `conversationDraft.js`
+for concept autocomplete, cartouche editing, desktop Enter/mobile newline
+behaviour, draft sizing and history navigation. Autocomplete consumes its
+selection keys before history or submission. The shared control presentation
+and compact layout use `conversationDraftControls.js` and `compactComposer.js`;
+Messaging dictation uses the same recorded, streaming and browser controller as
+Von, including finish-before-send, cancellation and retry.
+
+Carrier adapters retain draft scope, attachment ownership and delivery recovery.
+Cartouche IDs are normalised before message and recipient submission. Restoring
+an existing draft refreshes its overlay without invalidating its delivery key.
+Von-only execution actions (model selection, steering, reset and conversational
+voice replies) remain with the Von carrier; direct messages retain addressed
+message delivery rather than acquiring an AI execution session.
+
+Local fixture browser coverage: `tests/browser/messageComposer.cjs` exercises
+production Messaging modules/CSS with fixture APIs at desktop and phone widths.
+It checks concept selection without accidental submission, normalised delivery,
+new-message editing, shared controls and compact layout. This is not evidence of
+public authentication, live recipient delivery or audio-provider availability.
