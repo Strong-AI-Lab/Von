@@ -431,13 +431,27 @@ Queue messages stay with ordinary inbox processing. Steering is reserved before
 dispatch; an acknowledgement is recorded as accepted, never as model consumption.
 Lost acknowledgements remain uncertain and are not retried or converted to Queue.
 
-This is an unactivated transport implementation, not an enabled public feature.
-The message API still rejects Steer and caller-supplied targets. Canonical active
-target publication/admission, the Mac owner adapter and live consumption evidence
-are outstanding in [PR #692](https://github.com/Strong-AI-Lab/Von/pull/692).
-Do not enable message admission from a configuration flag or simulated receipt.
-The local protocol tests start only deterministic fixture executables; they do
-not establish provider identity, production activation or live consumption.
+The existing owner publishes a short-lived operational observation of that exact
+binding and its task delegator. The message API resolves it only for the
+authenticated delegator in the shared organisation and rechecks the canonical
+assignment and current execution attempt before accepting Steer. A browser cannot
+publish a target. The owner refreshes its observation at existing checkpoints;
+withdrawal removes only its own binding. An unavailable owner leaves the draft
+intact and offers Queue explicitly.
+
+Admission stores the intended binding with the original message. Retries retain
+that binding and delivery key, including an ambiguous HTTP result. The owner
+records accepted, not-applied or uncertain receipts on the canonical message;
+retained receipt recovery never replays guidance. The message pane distinguishes
+stored/pending guidance from controller acceptance and does not claim model
+consumption from an acknowledgement.
+
+Production activation and real consumption evidence are separate from these
+code paths. The default `exec` owner and the current Mac stdio-only owner publish
+no target, so those routes continue to offer Queue. A Mac owner adapter/runtime
+choice remains outstanding in [PR #692](https://github.com/Strong-AI-Lab/Von/pull/692).
+Local protocol and browser fixtures do not establish provider identity,
+production activation or live consumption.
 
 The reply prompt permits relevant read-only host/repository inspection. Missing
 supplied facts do not establish that inspection is unavailable. Conditional

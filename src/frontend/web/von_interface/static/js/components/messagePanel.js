@@ -2432,8 +2432,11 @@ async function prepareSteeringPayload(payload, scope) {
         payload.submit_target = attempt.submitTarget;
         return true; // Retry the exact original target; never silently retarget.
     }
+    const generation = _exchangeGeneration;
     const params = new URLSearchParams({ recipient_id: payload.recipient_ids[0], organisation_concept_id: payload.organisation_concept_id || '' });
     const result = await getJson(`/api/messages/steering-target?${params}`);
+    if (getDeliveryAttempt(scope)?.key !== attempt?.key
+        || (scope === COMPOSE_SCOPE_REPLY && generation !== _exchangeGeneration)) return false;
     if (!result.available || !result.submit_target) {
         showToast(result.reason || 'Steering unavailable. Draft retained; choose Queue for separate work.', 'warning');
         return false;

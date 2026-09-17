@@ -576,3 +576,23 @@ test('accepted guidance receipt is displayed without claiming model consumption'
     await require(base + 'components/messagePanel.js').openMessageExchange(row('#V#bob'));
     expect(document.querySelector('.message-steering-status').textContent).toContain('consumption not verified');
 });
+
+
+test('late target discovery cannot overwrite a different exchange delivery attempt', async () => {
+    const api = require(base + 'apiService.js');
+    api.postJsonDetailed.mockClear();
+    const panel = require(base + 'components/messagePanel.js');
+    await panel.openMessageExchange(row('#V#bob'));
+    let found;
+    api.getJson.mockImplementationOnce(() => new Promise(resolve => { found = resolve; }));
+    document.getElementById('messageInput').value = 'Bob guidance';
+    document.getElementById('sendMessageBtn').dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+    await panel.openMessageExchange(row('#V#carol'));
+    document.getElementById('messageInput').value = 'Carol draft';
+    found({ available: true, submit_target: { agent_id: '#V#bob', turn_id: 'old' } });
+    await flush();
+    expect(api.postJsonDetailed).not.toHaveBeenCalled();
+    expect(document.getElementById('messageInput').value).toBe('Carol draft');
+    await panel.openMessageExchange(row('#V#bob'));
+    expect(document.getElementById('messageInput').value).toBe('Bob guidance');
+});
