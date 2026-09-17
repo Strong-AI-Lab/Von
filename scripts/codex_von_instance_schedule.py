@@ -16,6 +16,18 @@ def _quote(value, *, command=False):
     )
 
 
+def _environment_path(value):
+    # EnvironmentFile takes one absolute path, not ExecStart's quoted argv.
+    # systemd otherwise treats a leading quote as a relative path and ignores it.
+    value = str(value)
+    if not Path(value).is_absolute() or any(c in value for c in ("\n", "\r", "\x00")):
+        raise ValueError("Invalid systemd environment path")
+    return "".join(
+        "%%" if c == "%" else "\\x%02x" % ord(c) if c in " \t\\\"'" else c
+        for c in value
+    )
+
+
 def install(spec):
     settings = spec["systemd"]
     root = Path(spec["instance_root"])
@@ -52,7 +64,7 @@ def install(spec):
     for path in settings.get("environment_files", []):
         if not Path(path).is_file():
             raise ValueError("Enrolled environment file is not prepared")
-        service.append("EnvironmentFile=" + _quote(path))
+        service.append("EnvironmentFile=" + _environment_path(path))
     timer = [
         marker,
         "[Unit]",
