@@ -40,6 +40,9 @@ def native_store(monkeypatch):
     db.concepts.create_index("concept_id", unique=True)
     monkeypatch.setattr("src.backend.db.mongo_client.get_db", lambda: db)
     monkeypatch.setattr(
+        "src.backend.services.task_dispatch_authority_service.get_db", lambda: db
+    )
+    monkeypatch.setattr(
         "src.backend.db.mongo_client.get_concepts_collection", lambda: db.concepts
     )
     monkeypatch.setattr(ConceptsRepository, "collection", lambda: db.concepts)
@@ -270,6 +273,141 @@ def test_create_schema_exposes_preferences_without_exposing_trusted_creator(gate
         "requested_reasoning_effort",
     } <= schema["properties"].keys()
     assert "created_by_concept_id" not in schema["properties"]
+
+
+def test_create_contract_distinguishes_source_category_from_external_reference(gateway):
+    definition = gateway.get_method_definition("task_create")
+    schema = _model_visible_input_schema(definition)
+    assert {"task_source_id", "source_id", "notes", "reference_code"} <= schema[
+        "properties"
+    ].keys()
+    for description in (definition.description, definition.input_schema.description):
+        assert "source_id" in description
+        assert "category" in description
+        assert "message ID" in description
+        assert "notes" in description and "reference_code" in description
+
+
+@pytest.mark.parametrize("omit_priority", [False, True])
+def test_message_source_correction_retains_provenance_and_reconciles_final_answer(
+    native_store, gateway, monkeypatch, omit_priority
+):
+    from src.backend.languagemodels.structured_tool_calling.types import (
+        LLMResponse,
+        ToolCall,
+    )
+    from src.backend.services.adaptive_turn_service import execute_adaptive_turn
+    from src.backend.services import turn_execution_record_service as records
+
+    observations = []
+
+    def record_observation(**kwargs):
+        observations.append(deepcopy(kwargs))
+        return {"updated": True, "duplicate": False}
+
+    monkeypatch.setattr(records, "record_effect_observation_phase", record_observation)
+    requested = {
+        "title": "Review the seminar agenda",
+        "description": "Check the agenda and prepare discussion points.",
+        "priority": "high",
+        "due_date": "2026-10-01T12:00:00Z",
+        "notes": "Source: Gmail message fixture-message-001; seminar agenda.",
+        "reference_code": "fixture-message-001",
+        "idempotency_key": "fixture-seminar-agenda",
+    }
+
+    class MessageSourceReplay:
+        call = 0
+        answer = ""
+
+        def generate_with_tools(self, prompt, available_tools, **kwargs):
+            self.call += 1
+            assert self.call <= 4, "unexpected replay model call"
+            if self.call == 4:
+                task_id = native_store.concepts.find_one({})["concept_id"]
+                self.answer = f"Created task {task_id}, retaining the Gmail reference."
+                return LLMResponse(text_response=self.answer)
+            assert native_store.concepts.count_documents({}) == 0
+            arguments = dict(requested)
+            if self.call == 1:
+                arguments["task_source_id"] = "fixture-message-001"
+            if self.call <= 2:
+                arguments["source_id"] = "fixture-message-001"
+            elif omit_priority:
+                arguments.pop("priority")
+            return LLMResponse(
+                text_response="",
+                tool_calls=[
+                    ToolCall(
+                        tool_name="turn_invoke_capability",
+                        call_id=f"source-fixture-{self.call}",
+                        payload={"name": "task_create", "arguments": arguments},
+                    )
+                ],
+            )
+
+    client = MessageSourceReplay()
+    result = execute_adaptive_turn(
+        gateway=gateway,
+        prompt="Create a high-priority task from the seminar email, due 1 October at noon UTC. Retain the Gmail reference.",
+        context=[],
+        llm_client=client,
+        model="fixture-no-model-request",
+        user_namespace="#V#alice@lab",
+        user_concept_id="#V#alice",
+        org_concept_id="#V#lab",
+        conversation_id="fixture-source",
+        turn_id="fixture-message-source-recovery",
+        turn_budget_seconds=20,
+        final_synthesis_reserve_seconds=2,
+    )
+    assert len(result.tool_invocations) == 3
+    first, second, successful = result.tool_invocations
+    for rejected in (first, second):
+        assert rejected["effect_status"] == "failed"
+        assert rejected["changed"] is False
+        assert rejected["error_code"] == "INVALID_DATA"
+        error = rejected["failure_fact"]["error"]
+        assert "Unknown task source: fixture-message-001" in error
+        assert "registered source category" in error
+        assert "alias source_id" in error
+        assert "notes or reference_code" in error
+        assert (rejected.get("recovery_status") == "succeeded") is not omit_priority
+        if not omit_priority:
+            assert rejected["recovered_by_effect_id"] == successful["effect_id"]
+    assert first["effective_arguments"]["task_source_id"] == "fixture-message-001"
+    assert first["effective_arguments"]["source_id"] == "fixture-message-001"
+    assert "task_source_id" not in second["effective_arguments"]
+    assert second["effective_arguments"]["source_id"] == "fixture-message-001"
+    # Finality is a projection; durable failure observations remain unchanged.
+    failures = [
+        item["observation"]
+        for item in observations
+        if item.get("observation", {}).get("effect_status") == "failed"
+    ]
+    assert len(failures) >= 2
+    assert all("recovery_status" not in item for item in failures)
+    assert successful["canonical_readback"]["verified"] is True
+    task_id = successful["canonical_readback"]["task_concept_id"]
+    with override_current_actor("#V#alice", "#V#lab"):
+        task = tasks.get_task(task_id)
+    assert native_store.concepts.count_documents({}) == 1
+    assert task["notes"] == requested["notes"]
+    assert task["reference_code"] == requested["reference_code"]
+    assert task["task_source_id"] == "#V#von_native_task_source"
+    assert task["assignee_concept_id"] == "#V#alice"
+    assert task["organisation_concept_id"] == "#V#lab"
+    assert task["priority"] == ("medium" if omit_priority else "high")
+    assert result.terminal_status == (
+        "effect_partially_completed" if omit_priority else "completed"
+    ), result.response_text
+    if not omit_priority:
+        assert result.response_text == client.answer
+        assert result.response_authority == "model"
+        effects = records._build_tool_authored_mutation_effects(
+            tool_invocations=result.tool_invocations
+        )
+        assert effects and all(effect["status"] == "satisfied" for effect in effects)
 
 
 @pytest.mark.parametrize(

@@ -419,7 +419,15 @@ class WorkflowInstanceManager:
                 require_unexpired=True,
             )
         )
-        return bool(doc and doc.get("task_ownership_active"))
+        from ...services.task_project_home_service import workflow_home_allows_execution
+
+        return bool(
+            doc
+            and doc.get("task_ownership_active")
+            and workflow_home_allows_execution(
+                doc, database=getattr(coll, "database", None)
+            )
+        )
 
     def begin_claim_effect(self, instance_id, worker_id, token, method_name, payload):
         coll = self._get_instances_collection()
@@ -1858,6 +1866,15 @@ class WorkflowInstanceManager:
                 if candidate is None:
                     return None
                 identifier = candidate["instance_id"]
+                from ...services.task_project_home_service import (
+                    workflow_home_allows_execution,
+                )
+
+                if not workflow_home_allows_execution(
+                    candidate, database=getattr(coll, "database", None)
+                ):
+                    excluded.append(identifier)
+                    continue
                 key = task_key(candidate)
                 try:
                     claimed = coll.find_one_and_update(

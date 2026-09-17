@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import mongomock
 
 pytest.importorskip("fcntl", reason="The DGX worker uses a Unix host lock")
 spec = importlib.util.spec_from_file_location(
@@ -46,9 +47,20 @@ def test_result_schema_meets_strict_provider_contract_and_preserves_old_results(
 
 @pytest.fixture(autouse=True)
 def isolated_archive_boundary(monkeypatch):
+    import mongomock
+    from src.backend.services import task_dispatch_authority_service
+
+    collection = mongomock.MongoClient().test.task_dispatch_authorities
+    monkeypatch.setattr(
+        task_dispatch_authority_service, "_collection", lambda: collection
+    )
     # Existing controller tests isolate publication; canonical archive capture
     # and the real launch path are exercised in test_task_run_archives.py.
     monkeypatch.setattr(worker, "archive_checkpoint", lambda *a, **kw: True)
+    db = mongomock.MongoClient().worker_tests
+    monkeypatch.setattr(
+        "src.backend.services.task_dispatch_authority_service.get_db", lambda: db
+    )
 
 
 @pytest.fixture
@@ -223,12 +235,14 @@ def test_deployment_request_and_live_task_authority(
 
 @pytest.mark.parametrize("writer", ["jira", "von", None])
 def test_project_tracking_authority_is_read_live(config, monkeypatch, writer):
-    from src.backend.services import task_project_service
+    from src.backend.services import task_project_service, task_project_home_service
+
+    monkeypatch.setattr(task_project_home_service, "get_project_home", lambda pid: None)
 
     api = object.__new__(worker.Von)
     api.config = config
     monkeypatch.setattr(
-        task_project_service, "get_task_project", lambda pid: {"writer": writer}
+        task_project_service, "task_execution_home", lambda pid: {"writer": writer}
     )
     assert api.native_writer(task(config, project_concept_id="#V#project")) is (
         writer == "von"

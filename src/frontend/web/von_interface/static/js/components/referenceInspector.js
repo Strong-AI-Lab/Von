@@ -1,3 +1,4 @@
+import { readConversationReference } from '../utils/conversationReference.js';
 import { getJsonDetailed } from '../apiService.js';
 import { copyTextWithClipboardFallback } from '../utils/copyJsonButtonState.js';
 import { showToast } from '../utils/toast.js';
@@ -5,6 +6,7 @@ import { showToast } from '../utils/toast.js';
 export const REFERENCE_MANIFEST_SCHEMA_VERSION = 'turn_reference_manifest.v1';
 
 let currentReference = null;
+let returnToSource = null;
 let initialised = false;
 
 function byId(id) {
@@ -404,6 +406,44 @@ function setHeader(reference) {
   if (explanation) explanation.textContent = reference.reference_id;
 }
 
+async function renderConversationTurn(reference) {
+  const page = await readConversationReference({ conversation_ref: reference.reference_id });
+  if (reference !== currentReference) return;
+  if (!page?.success) throw new Error('Conversation or turn unavailable.');
+  const body = clearBody();
+  if (!body) return;
+  byId('conversationReferenceInspectorTitle').textContent = page.session_name || 'Conversation';
+  const appendPage = (result) => {
+    for (const message of result.messages || []) {
+      const section = appendSection(body, message.role || 'Message');
+      section.dataset.turnId = message.turn_id || '';
+      if (message.turn_id === page.turn_id) {
+        section.setAttribute('aria-label', 'Referenced turn');
+        appendText(section, 'strong', '', 'Referenced turn');
+      }
+      appendText(section, 'p', 'chat-reference-text', typeof message.content === 'string' ? message.content : '[Non-text content]');
+    }
+  };
+  appendPage(page);
+  let cursor = page.next_cursor;
+  const more = appendText(body, 'button', 'btn-mini', 'Fetch more context');
+  more.hidden = !cursor;
+  more.addEventListener('click', async () => {
+    more.disabled = true;
+    try {
+      const next = await readConversationReference({ conversation_ref: reference.reference_id, cursor });
+      if (reference !== currentReference) return;
+      if (!next?.success) throw new Error('unavailable');
+      appendPage(next);
+      cursor = next.next_cursor;
+      more.hidden = !cursor;
+      body.append(more);
+    } catch (_) { setStatus('Further context unavailable.'); }
+    finally { more.disabled = false; }
+  });
+  body.querySelector('[aria-label="Referenced turn"]')?.scrollIntoView?.({ block: 'nearest' });
+}
+
 async function loadCurrentReference() {
   const reference = currentReference;
   if (!reference) return;
@@ -413,7 +453,9 @@ async function loadCurrentReference() {
   const body = clearBody();
   if (body) appendText(body, 'p', 'chat-reference-muted', 'Loading…');
   try {
-    if (reference.reference_type === 'turn_evidence') {
+    if (reference.reference_type === 'conversation_turn') {
+      await renderConversationTurn(reference);
+    } else if (reference.reference_type === 'turn_evidence') {
       renderEvidence(reference);
     } else if (reference.reference_type === 'scoped_assertion') {
       const { data } = await getJsonDetailed(
@@ -452,7 +494,8 @@ async function loadCurrentReference() {
   }
 }
 
-export async function openReferenceInspector(reference, { trigger = null } = {}) {
+export async function openReferenceInspector(reference, { trigger = null, onClose = null } = {}) {
+  returnToSource = onClose;
   if (!reference || typeof reference !== 'object') return false;
   const id = clean(reference.reference_id);
   const type = clean(reference.reference_type);
@@ -480,6 +523,9 @@ export function closeReferenceInspector() {
   panel?.classList.add('hidden');
   panel?.removeAttribute('data-reference-id');
   currentReference = null;
+  const returnAction = returnToSource;
+  returnToSource = null;
+  returnAction?.();
 }
 
 export function initializeReferenceInspector() {

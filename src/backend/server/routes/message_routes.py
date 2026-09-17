@@ -1024,6 +1024,7 @@ def unified_conversation_catalogue():
                 limit=request.args.get("limit", 100, type=int),
                 cursor=request.args.get("cursor"),
                 all_contexts=request.args.get("all_contexts") == "true",
+                include_imported=request.args.get("include_imported") == "true",
             )
         )
     except (ValueError, PermissionError) as exc:

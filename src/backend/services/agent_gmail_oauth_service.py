@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from google_auth_oauthlib.flow import Flow
 
@@ -184,7 +184,15 @@ class AgentGmailOAuthService:
         # superset of the requested scopes (e.g., Google returning OIDC scopes).
         # This is benign for our use case; accept and continue.
         with _temporary_env("OAUTHLIB_RELAX_TOKEN_SCOPE", "1"):
-            flow.fetch_token(authorization_response=authorisation_response_url)
+            # A TLS-terminating proxy can make request.url appear to use HTTP.
+            # Use the same operator-configured/start-bound callback as the flow,
+            # preserving the provider's encoded query without trusting callback
+            # Host or forwarded headers to choose the response origin.
+            callback = urlsplit(self._get_redirect_uri(redirect_uri))
+            response_url = callback._replace(
+                query=urlsplit(authorisation_response_url).query, fragment=""
+            ).geturl()
+            flow.fetch_token(authorization_response=response_url)
 
         creds = flow.credentials
         if creds is None:

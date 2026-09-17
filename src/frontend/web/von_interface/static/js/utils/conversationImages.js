@@ -1,8 +1,16 @@
 // Durable attachment descriptors (historical image API); originals remain behind authenticated routes.
+// Draft lifecycle: queued -> uploading -> ready | failed; failed -> retrying
+// -> ready | failed. Removal is terminal and late transport results are ignored.
+// Descriptors are payload, while state alone owns rendering and send readiness.
 const pending = new Map();
 const known = new Map();
 export function imageItems(sessionId) { return pending.get(sessionId) || []; }
-export function imagesBlocked(sessionId) { return imageItems(sessionId).some(x => !x.descriptor); }
+export function imagesBlocked(sessionId) { return imageItems(sessionId).some(x => x.state !== 'ready'); }
+export function attachmentBlockMessage(sessionId) {
+    return imageItems(sessionId).some(x => x.state === 'failed')
+        ? 'Attachment upload failed. Retry or remove the failed attachment before sending.'
+        : 'Wait for the attachment upload to finish before sending.';
+}
 export function renderImageAttachments(parent, images) {
     if (!parent || !Array.isArray(images) || !images.length) return;
     const gallery = document.createElement('div');
@@ -67,8 +75,9 @@ export function renderImageComposer(parent, sessionId, changed) {
     parent.replaceChildren();
     for (const item of imageItems(sessionId)) {
         const card = document.createElement('div');
-        card.style.cssText = 'display:inline-flex;flex-direction:column;gap:4px;margin:6px;max-width:180px;min-width:0;overflow-wrap:anywhere';
-        if (item.descriptor) {
+        card.className = 'conversation-image-draft';
+        card.dataset.attachmentState = item.state;
+        if (item.state === 'ready') {
             renderImageAttachments(card, [item.descriptor]);
             card.querySelectorAll('img').forEach(img => { img.style.maxHeight = '100px'; });
         }
@@ -80,7 +89,7 @@ export function renderImageComposer(parent, sessionId, changed) {
             card.appendChild(preview);
         }
         const label = document.createElement('span');
-        label.textContent = item.error ? `${item.name}: ${item.error}` : (item.descriptor ? item.name : `Uploading ${item.name}…`);
+        label.textContent = item.error ? `${item.name}: ${item.error}` : (item.state === 'ready' ? `Ready: ${item.name}` : `${item.state === 'retrying' ? 'Retrying' : 'Uploading'} ${item.name}…`);
         label.setAttribute('role', item.error ? 'alert' : 'status');
         card.appendChild(label);
         const details = document.createElement('span');
@@ -96,6 +105,8 @@ export function renderImageComposer(parent, sessionId, changed) {
         const remove = document.createElement('button');
         remove.type = 'button'; remove.textContent = 'Remove'; remove.setAttribute('aria-label', `Remove ${item.name}`);
         remove.onclick = () => {
+            item.state = 'removed';
+            item.controller?.abort();
             pending.set(sessionId, imageItems(sessionId).filter(x => x !== item));
             releasePreview(item);
             changed();
@@ -103,9 +114,12 @@ export function renderImageComposer(parent, sessionId, changed) {
         card.appendChild(remove); parent.appendChild(card);
     }
 }
+export function isConversationImageFile(file) {
+    return file.type?.startsWith('image/') || /\.(png|jpe?g|webp|heic|heif|gif|bmp|tiff?|svg)$/i.test(file.name || '');
+}
 export async function uploadConversationImage(file, sessionId, headers, changed) {
     const item = {
-        name: file.name, type: file.type, size: file.size,
+        name: file.name, type: file.type, size: file.size, state: 'queued',
         previewUrl: file.type.startsWith('image/') && typeof URL.createObjectURL === 'function' ? URL.createObjectURL(file) : null,
     };
     item.retry = () => uploadItem(item, file, sessionId, headers, changed);
@@ -117,30 +131,78 @@ function releasePreview(item) {
     item.previewUrl = null;
 }
 async function uploadItem(item, file, sessionId, headers, changed) {
-    if (item.uploading || !imageItems(sessionId).includes(item)) return false;
-    item.uploading = true;
+    if (['uploading', 'retrying', 'ready', 'removed'].includes(item.state) || !imageItems(sessionId).includes(item)) return false;
+    item.state = item.state === 'failed' ? 'retrying' : 'uploading';
+    item.controller = new AbortController();
     item.error = null;
     changed();
     try {
         if (imageItems(sessionId).length > 8) throw new Error('At most eight attachments per message. Remove an attachment before sending.');
+        const isImage = isConversationImageFile(file);
+        if (isImage) {
+            if (!file.size || file.size > 8 * 1024 * 1024) throw new Error('Images must be nonempty and at most 8 MiB.');
+            if (file.type && !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+                throw new Error('Use a still PNG, JPEG or WebP image. Convert HEIC or other formats before attaching.');
+            }
+        }
         const form = new FormData(); form.append('file', file, file.name || 'image.png');
         form.append('conversation_attachment', '1');
-        const endpoint = file.type.startsWith('image/') ? '/von/api/images/upload' : '/von/api/files/upload';
-        const response = await fetch(endpoint, {method:'POST', headers, body:form});
-        const result = await response.json();
+        const endpoint = isImage ? '/von/api/images/upload' : '/von/api/files/upload';
+        const response = await fetch(endpoint, {method:'POST', headers, body:form, signal:item.controller.signal});
+        const result = await response.json().catch(() => ({}));
         const descriptor = result.image_attachment || (result.uploaded?.concept_id ? {...result.uploaded, filename: file.name, content_type: file.type || 'application/octet-stream', size_bytes: file.size} : null);
         if (!response.ok || !descriptor) throw new Error(result.message || result.error || 'Attachment upload failed');
         // Removing an in-flight upload must not restore it when the response arrives.
-        if (imageItems(sessionId).includes(item)) {
+        if (item.state !== 'removed' && imageItems(sessionId).includes(item)) {
+            if (typeof descriptor.concept_id !== 'string' || !/^#V#\S+$/.test(descriptor.concept_id)) throw new Error('Upload returned no valid attachment identifier');
             item.descriptor = descriptor;
+            item.state = 'ready';
             item.retry = () => Promise.resolve(true);
             known.set(item.descriptor.concept_id, item);
         }
         releasePreview(item);
-    } catch (error) { item.error = String(error.message || error); }
-    item.uploading = false;
+    } catch (error) {
+        if (item.state !== 'removed' && item.state !== 'ready') {
+            item.state = 'failed';
+            item.error = String(error.message || error);
+        }
+    }
+    item.controller = null;
     changed();
-    return Boolean(item.descriptor);
+    return item.state === 'ready';
+}
+// Both controls use the existing session-bound upload path supplied by chatTab.
+export function initialiseImagePicker(upload, status) {
+    const input = document.getElementById('attachImageInput');
+    const button = document.getElementById('attachImageButton');
+    const paste = document.getElementById('pasteImageButton');
+    if (button && input) {
+        button.addEventListener('click', () => input.click());
+        input.addEventListener('change', () => {
+            const files = Array.from(input.files || []);
+            input.value = '';
+            if (files.length) void upload(files);
+        });
+        input.addEventListener('cancel', () => status('Image selection cancelled. Your draft is unchanged.'));
+    }
+    paste?.addEventListener('click', async () => {
+        if (!navigator.clipboard?.read) {
+            status('Clipboard images are unavailable here. Use Attach image, or paste into the message field.', 'error');
+            return;
+        }
+        try {
+            const items = await navigator.clipboard.read();
+            const files = [];
+            for (const item of items) {
+                const type = item.types.find(value => value.startsWith('image/'));
+                if (type) files.push(new File([await item.getType(type)], `pasted-image-${files.length + 1}.${type.split('/')[1]}`, {type}));
+            }
+            if (files.length) await upload(files);
+            else status('No image found on the clipboard. Use Attach image to choose a photo.', 'error');
+        } catch (_) {
+            status('Clipboard access was unavailable or cancelled. Use Attach image, or paste into the message field.', 'error');
+        }
+    });
 }
 export function takeImages(sessionId) {
     if (imagesBlocked(sessionId)) throw new Error('Attachment preparation failed or is still running. Remove or finish the upload before sending.');
@@ -170,7 +232,10 @@ export function bindAttachmentComposer(root, input, sessionKey, headers, changed
     const picker = document.createElement('input');
     picker.type = 'file'; picker.multiple = true; picker.hidden = true;
     const button = document.createElement('button');
-    button.type = 'button'; button.textContent = 'Attach files';
+    button.type = 'button'; button.textContent = '+';
+    button.className = 'message-attachment-button';
+    button.title = 'Attach files';
+    button.setAttribute('aria-label', 'Attach files');
     button.onclick = () => picker.click();
     const pendingRoot = document.createElement('div');
     pendingRoot.className = 'pending-message-attachments';
@@ -180,7 +245,18 @@ export function bindAttachmentComposer(root, input, sessionKey, headers, changed
         for (const file of files) await uploadConversationImage(file, key, headers(), refresh);
     };
     picker.onchange = () => { void upload(Array.from(picker.files)); picker.value = ''; };
-    root.append(button, picker, pendingRoot);
+    // Reply already has a row shared with Send; the new-message modal needs
+    // the same inline attachment affordance beside its text field.
+    let row = input.parentElement;
+    if (!row.classList.contains('message-compose-row')) {
+        row = document.createElement('div');
+        row.className = 'message-attachment-input-row';
+        input.before(row);
+        row.append(input);
+    }
+    row.classList.add('message-attachment-input-row');
+    input.before(button);
+    root.append(picker, pendingRoot);
     input.addEventListener('paste', event => {
         const files = Array.from(event.clipboardData?.files || []).filter(f => f.type.startsWith('image/'));
         if (!files.length) return;

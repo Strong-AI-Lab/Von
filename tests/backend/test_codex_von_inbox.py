@@ -4,9 +4,20 @@ import copy
 from types import SimpleNamespace
 
 import pytest
+import mongomock
 
 from scripts import codex_von_inbox as inbox
 from scripts import codex_von_worker as worker
+
+
+@pytest.fixture(autouse=True)
+def isolated_dispatch_authority(monkeypatch):
+    # Assignment checks now read this operational store as well as task data.
+    # Keep the real check, with an empty isolated store for these native tasks.
+    db = mongomock.MongoClient().inbox_tests
+    monkeypatch.setattr(
+        "src.backend.services.task_dispatch_authority_service.get_db", lambda: db
+    )
 
 
 @pytest.fixture

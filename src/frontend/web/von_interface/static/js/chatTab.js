@@ -1,20 +1,25 @@
+import { initialiseDraftControls } from './components/conversationDraftControls.js';
+import { initialiseConversationDraft, resizeConversationDraft, navigateConversationDraftHistory } from './components/conversationDraft.js';
+import { createTurnModelPicker } from './components/turnModelPicker.js';
+import { copyCompactConversationReference, isConversationConceptReference, conversationReferenceMetadata, readConversationReference } from './utils/conversationReference.js';
 import { bindConversationRowMenu } from './components/conversationRowMenu.js';
 import { initialiseConversationActions } from './components/conversationActions.js';
 import { createLatestMessageButton, setNavigationVisible, focusConversationTarget } from './components/conversationNavigation.js';
-import { initialiseCompactChatComposer, isCompactComposer, resizeCompactDraft, shouldSubmitComposerKey } from './components/compactComposer.js';
+import { initialiseCompactChatComposer, isCompactComposer } from './components/compactComposer.js';
 import { updateExecutionCost } from './components/executionCost.js';
 import { canUseWorkflowStudio } from './workflowStudioAccess.js';
 import { createChatSteeringControls } from './components/chatSteeringControls.js';
-import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows, catalogueSearchActive, rankCatalogueSearchRows } from './components/conversationCatalogue.js';
+import { directConversationRows, activeMessageConversationId, showChatConversation, resetConversationCatalogue, renderMessageConversationRow, mountCatalogueControls, initialiseConversationCatalogue, selectMessageConversation, filterCatalogueRows, importedConversationsVisible, catalogueSearchActive, rankCatalogueSearchRows } from './components/conversationCatalogue.js';
 import { catalogueHasMore } from './components/conversationCatalogue.js';
 import { profileButton, participantAvatar, participantIdentityAvatar } from './components/participantProfile.js';
+import { importedConversationAvatar } from './components/importedConversationAvatar.js';
 import { setButtonLabel } from './utils/buttonLabel.js';
 import { createConversationTray } from './components/conversationTray.js';
 import { CONVERSATION_LAYOUT_KEY, CONVERSATION_LAYOUT_KEYS, CONVERSATION_NARROW_QUERY, loadConversationLayoutPreferences, normaliseConversationLayout, saveConversationLayoutPreference } from './utils/conversationLayoutPreferences.js';
 import { createVoiceConversation } from './voiceConversation.js';
 import { getClientContext } from './clientContext.js';
 import { createDictationController } from './dictation.js';
-import { renderImageAttachments, renderImageComposer, uploadConversationImage, imagesBlocked, imageItems, takeImages, restoreImages, descriptorsForIds } from "./utils/conversationImages.js";
+import { isConversationImageFile, initialiseImagePicker, renderImageAttachments, renderImageComposer, uploadConversationImage, attachmentBlockMessage, imagesBlocked, imageItems, takeImages, restoreImages, descriptorsForIds } from "./utils/conversationImages.js";
 // Chat Tab Module
 import { annotateTurn, fetchWithTimeout, getJsonDetailed, getUserContext, getWindowSessionId, postJson, WINDOW_SESSION_HEADER } from './apiService.js';
 import {
@@ -23,10 +28,9 @@ import {
     isPremiumModelProvider,
     resolveLocalRequestedLlm,
 } from './utils/localModelPreferences.js';
-import { initializeConceptAutocomplete } from './components/conceptAutocomplete.js';
 import { initializeMessagePanel, loadUnreadCount } from './components/messagePanel.js';
 import { loadMyOrganisations, synchroniseOrganisationContext } from './components/orgSelector.js';
-import { initializePromptCartoucheOverlay, normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
+import { normaliseVontologyIdsForBackend } from './components/promptCartoucheOverlay.js';
 import { initializeTaskPanel, isTaskPanelVisible, setCurrentSession as setTaskPanelSession, toggleTaskPanel } from './components/taskPanel.js';
 import {
     decorateInspectableReferences,
@@ -68,7 +72,6 @@ import {
     parseIsoTimestampMs,
     selectConversationHistorySessions
 } from './utils/conversationHistoryPreferences.js';
-import { buildConversationReferencePayload as buildSharedConversationReferencePayload } from './utils/conversationReference.js';
 import {
     confirmConceptQaFormalisation,
     conceptQaActionAllowed,
@@ -186,6 +189,10 @@ const turnEditHistory = new Map();
 let historySegmentsShown = 1;
 let totalHistorySegments = 1;
 let activeChatSessionId = null;
+// Unsent text belongs to a conversation in this tab, not the shared textarea.
+// It is not history and is not automatically restored after a page reload.
+const composerDraftsBySession = new Map();
+let turnModelPicker = null;
 let activeChatSessionName = null;
 let activeChatSessionOwnerId = null;
 const conceptQaSessionsByChatSession = new Map();
@@ -1605,6 +1612,7 @@ function buildChatSessionTabsFetchUrl() {
     const conversationHistorySettings = loadConversationHistorySettings((key) => safeLocalStorageGet(key));
     params.set('limit', String(CHAT_SESSION_TABS_FETCH_LIMIT));
     params.set('summary', 'light');
+    params.set('include_imported', String(importedConversationsVisible()));
     params.set('agent_visibility', showAgentCreatedSessions ? 'include' : 'exclude');
     params.set('keep_newest_agent_created', 'true');
     params.set('recent_window_days', String(conversationHistorySettings.recentWindowDays));
@@ -1879,31 +1887,12 @@ function toggleConversationPinned(sessionId) {
     pinConversation(sessionId);
 }
 
-function buildConversationReferencePayload(session) {
-    const orgContext = getSessionScopedOrgContext();
-    return buildSharedConversationReferencePayload(session, {
-        currentUserConceptId: getCurrentUserConceptId() || null,
-        namespace: getSessionScopedNamespace() || null,
-        organisationConceptId: (
-            typeof orgContext?.concept_id === 'string' && orgContext.concept_id.trim()
-                ? orgContext.concept_id.trim()
-                : (typeof orgContext?.id === 'string' && orgContext.id.trim() ? orgContext.id.trim() : null)
-        ),
-    });
-}
-
 async function copyConversationReferenceToClipboard(session) {
-    const payload = buildConversationReferencePayload(session);
-    if (!payload) {
-        showToast('No conversation ID is available.', 'info');
-        return false;
-    }
     let text;
     try {
-        text = JSON.stringify(payload, null, 2);
-    } catch (err) {
-        console.error('[chatTab] Failed to serialize conversation reference:', err);
-        showToast('Failed to prepare conversation reference.', 'error');
+        text = await copyCompactConversationReference(session);
+    } catch (_) {
+        showToast('Conversation reference unavailable. Please retry.', 'error');
         return false;
     }
     const copied = await copyTextToClipboard(text);
@@ -2529,6 +2518,24 @@ async function deleteConversation(sessionId) {
         console.error('[chatTab] moveConversationToTrash error:', e);
         showToast('Failed to move conversation to Trash', 'error');
         return false;
+    }
+}
+
+export async function openConversationConceptReference(reference) {
+    try {
+        const result = await readConversationReference({ conversation_ref: reference });
+        if (!result?.success) throw new Error('unavailable');
+        if (!result.turn_id) return openConversationSearchResult(result);
+        const previousTab = document.querySelector('.tab-button.active')?.dataset.tab;
+        activateTab('chatTab');
+        const { openReferenceInspector } = await import('./components/referenceInspector.js');
+        return openReferenceInspector({
+            reference_id: reference, reference_type: 'conversation_turn',
+            label: result.session_name || 'Conversation turn',
+        }, { onClose: () => { if (previousTab) activateTab(previousTab); } });
+    } catch (_) {
+        showToast('Conversation or turn unavailable.', 'info');
+        return { ok: false };
     }
 }
 
@@ -6667,7 +6674,7 @@ function updateExternalConversationUi() {
                 : promptInput.dataset.nativePlaceholder
         );
     }
-    [resetButton, uploadButton, dictateButton].forEach((button) => {
+    [resetButton, uploadButton, dictateButton, document.getElementById('attachImageButton'), document.getElementById('pasteImageButton')].forEach((button) => {
         if (button) {
             button.disabled = readOnly;
         }
@@ -6801,9 +6808,9 @@ function updateSendButtonForCurrentChatState() {
     if (queueSubmissionInFlight) {
         sendButton.title = 'Saving this prompt to the conversation queue.';
     } else if (imagePreparationBlocked && !uploadInFlight) {
-        sendButton.title = 'Remove the failed image attachment before sending.';
+        sendButton.title = attachmentBlockMessage(activeChatSessionId);
     } else if (uploadInFlight) {
-        sendButton.title = ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE;
+        sendButton.title = attachmentBlockMessage(activeChatSessionId);
     } else {
         sendButton.title = sessionBusy
             ? 'Queue a separate request after the current turn finishes. Use Steer to guide the active turn.'
@@ -21302,55 +21309,14 @@ function rehydrateLastSubmittedUserPromptFromHistory(historyMessages) {
 }
 
 function handlePromptInputHistoryNavigation(event) {
-    if (!event) return;
-    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
-    if (event.ctrlKey || event.altKey || event.metaKey) return;
-
-    const promptInput = event.currentTarget || getPromptInputElement();
-    if (!promptInput) return;
-
-    const history = getPromptHistoryForActiveSession();
-    if (history.length === 0) return;
-
-    let cursor = getPromptHistoryCursorForActiveSession();
-    let nextValue;
-    const isShiftJump = event.shiftKey;
-    const promptValue = String(promptInput.value || '');
-    const isCurrentHistoryValue = cursor >= 0 && cursor < history.length && history[cursor] === promptValue;
-    const allowsHistoryNavigation = promptValue === '' || isCurrentHistoryValue;
-    if (!allowsHistoryNavigation) return;
-
-    if (event.key === 'ArrowUp') {
-        cursor = isShiftJump ? 0 : Math.max(0, cursor - 1);
-        nextValue = history[cursor];
-    } else {
-        if (isShiftJump) {
-            cursor = Math.max(0, history.length - 1);
-        } else {
-            if (cursor >= history.length) return;
-            cursor = cursor + 1;
-        }
-        if (cursor >= history.length) {
-            setPromptHistoryCursorForActiveSession(cursor);
-            event.preventDefault();
-            setPromptComposerValue('', { promptInput });
-            return;
-        }
-        nextValue = history[cursor];
-    }
-
-    if (!nextValue) return;
-
-    setPromptHistoryCursorForActiveSession(cursor);
-
-    event.preventDefault();
-    setPromptComposerValue(nextValue, { promptInput });
-    try {
-        const len = promptInput.value.length;
-        promptInput.setSelectionRange(len, len);
-    } catch (_) {
-        // Ignore browsers/environments without setSelectionRange support.
-    }
+    const input = event?.currentTarget || getPromptInputElement();
+    if (!input) return;
+    const next = navigateConversationDraftHistory(event, input,
+        getPromptHistoryForActiveSession(), getPromptHistoryCursorForActiveSession());
+    if (!next) return;
+    setPromptHistoryCursorForActiveSession(next.cursor);
+    setPromptComposerValue(next.value, { promptInput: input });
+    input.setSelectionRange(input.value.length, input.value.length);
 }
 
 function dispatchPromptComposerInputEvent(promptInput = getPromptInputElement()) {
@@ -21364,6 +21330,14 @@ function dispatchPromptComposerInputEvent(promptInput = getPromptInputElement())
     }
 }
 
+function clearSubmittedComposerDraft(sessionId, submittedText) {
+    const input = activeChatSessionId === sessionId ? getPromptInputElement() : null;
+    const draft = input ? input.value : composerDraftsBySession.get(sessionId);
+    if (draft !== submittedText) return;
+    composerDraftsBySession.delete(sessionId);
+    if (input) setPromptComposerValue('');
+}
+
 function setPromptComposerValue(value, options = {}) {
     const promptInput = options.promptInput || getPromptInputElement();
     if (!promptInput) {
@@ -21371,6 +21345,7 @@ function setPromptComposerValue(value, options = {}) {
     }
 
     promptInput.value = typeof value === 'string' ? value : '';
+    composerDraftsBySession.set(activeChatSessionId, promptInput.value);
     if (!promptInput.value) dictationController?.clearAttemptIds?.();
     dispatchPromptComposerInputEvent(promptInput);
 
@@ -21491,9 +21466,6 @@ let uploadUiState = {
 };
 
 const PENDING_FILE_COPY_SESSION_FALLBACK_KEY = '__pending_chat_session__';
-const ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE = (
-    'Wait for the attachment upload to finish before sending.'
-);
 const pendingFileCopyConceptIdsBySession = new Map();
 const pendingFileCopyDisplayNamesBySession = new Map();
 const uploadStatesBySession = new Map();
@@ -21501,7 +21473,8 @@ const uploadStatesBySession = new Map();
 function getInFlightUploadStateForSession(sessionId = activeChatSessionId) {
     const sessionKey = getPendingFileCopySessionKey(sessionId);
     const uploadState = uploadStatesBySession.get(sessionKey) || null;
-    return uploadState?.inFlight === true ? uploadState : null;
+    // Once registered, individual attachments own readiness, not the batch promise.
+    return uploadState?.inFlight === true && !uploadState.itemsRegistered ? uploadState : null;
 }
 
 function normaliseTrustedUploadedFileCopyConceptId(value) {
@@ -21568,12 +21541,12 @@ function refreshConversationImages() {
         syncConversationAttachmentWorkflowBinding(activeChatSessionId);
         renderPendingAttachmentState();
     });
-    updateSendButtonForCurrentChatState();
+    renderActiveUploadUi();
 }
 
 function syncConversationAttachmentWorkflowBinding(sessionId) {
     const key = getPendingFileCopySessionKey(sessionId);
-    const last = imageItems(sessionId).filter(item => item.descriptor && !item.type.startsWith('image/')).at(-1);
+    const last = imageItems(sessionId).filter(item => item.descriptor && !isConversationImageFile(item)).at(-1);
     if (last) {
         pendingFileCopyConceptIdsBySession.set(key, last.descriptor.concept_id);
         pendingFileCopyDisplayNamesBySession.set(key, last.name);
@@ -21608,24 +21581,6 @@ function renderPendingAttachmentState() {
     el.title = 'This attachment will be sent with the next accepted prompt.';
     el.classList.remove('hidden');
     refreshAttachmentStatusRegionVisibility();
-}
-
-function rememberPendingUploadedFileCopyConceptId(
-    conceptId,
-    sessionId = activeChatSessionId,
-    displayName = null
-) {
-    const normalisedConceptId = normaliseTrustedUploadedFileCopyConceptId(conceptId);
-    if (!normalisedConceptId) return;
-    const targetKey = getPendingFileCopySessionKey(sessionId);
-    pendingFileCopyConceptIdsBySession.set(targetKey, normalisedConceptId);
-    const normalisedDisplayName = normalisePendingAttachmentDisplayName(displayName);
-    if (normalisedDisplayName) {
-        pendingFileCopyDisplayNamesBySession.set(targetKey, normalisedDisplayName);
-    } else {
-        pendingFileCopyDisplayNamesBySession.delete(targetKey);
-    }
-    renderPendingAttachmentState();
 }
 
 function takePendingUploadedFileCopyBinding(sessionId) {
@@ -21710,11 +21665,18 @@ function renderUploadStatus(message, type = 'info') {
 function renderActiveUploadUi() {
     const activeSessionKey = getPendingFileCopySessionKey(activeChatSessionId);
     const activeUploadState = uploadStatesBySession.get(activeSessionKey) || null;
-    renderUploadStatus(
-        activeUploadState?.message || '',
-        activeUploadState?.tone || 'info'
-    );
-    setUploadButtonBusy(activeUploadState?.inFlight === true);
+    const items = imageItems(activeChatSessionId);
+    const unfinished = items.filter(item => item.state !== 'ready');
+    const preparing = !!getInFlightUploadStateForSession(activeChatSessionId);
+    const uploading = unfinished.some(item => ['queued', 'uploading', 'retrying'].includes(item.state));
+    const failed = unfinished.some(item => item.state === 'failed');
+    const message = preparing ? activeUploadState.message
+        : failed ? attachmentBlockMessage(activeChatSessionId)
+            : uploading ? `Uploading: ${unfinished.map(item => item.name).join(', ')}`
+                : items.length ? `Upload complete: ${items.length} ready.`
+                    : activeUploadState?.tone === 'error' ? activeUploadState.message : '';
+    renderUploadStatus(message, failed ? 'error' : (preparing || uploading) ? 'uploading' : 'success');
+    setUploadButtonBusy(preparing || uploading);
     updateSendButtonForCurrentChatState();
 }
 
@@ -21929,29 +21891,14 @@ async function performUploadFilesToVon(list, uploadState) {
         rekeyUploadStateForSession(uploadState, uploadTargetSessionId);
     }
 
-    let successCount = 0;
-    let failureCount = 0;
-
-    for (const file of list) {
-        const uploaded = await uploadConversationImage(file, uploadTargetSessionId, buildChatFetchHeaders(), () => {
-            syncConversationAttachmentWorkflowBinding(uploadTargetSessionId);
-            renderPendingAttachmentState();
-        });
-        if (uploaded) {
-            successCount += 1;
-            if (!file.type.startsWith('image/')) {
-                const item = imageItems(uploadTargetSessionId).findLast(item => item.name === file.name && item.descriptor);
-                if (item) rememberPendingUploadedFileCopyConceptId(item.descriptor.concept_id, uploadTargetSessionId, file.name);
-            }
-        } else failureCount += 1;
-    }
-
-    const summary = `Upload complete: ${successCount} succeeded${failureCount ? `, ${failureCount} failed` : ''}.`;
-    setUploadStatusForState(
-        uploadState,
-        summary,
-        failureCount ? 'error' : 'success'
-    );
+    // Register all files before yielding so unstarted members cannot escape the gate.
+    const uploads = list.map(file => uploadConversationImage(file, uploadTargetSessionId, buildChatFetchHeaders(), () => {
+        syncConversationAttachmentWorkflowBinding(uploadTargetSessionId);
+        renderPendingAttachmentState();
+    }));
+    uploadState.itemsRegistered = true;
+    renderActiveUploadUi();
+    await Promise.all(uploads);
     clearUploadStatusAfterDelay(uploadState);
 }
 
@@ -21972,10 +21919,14 @@ function uploadFilesToVon(files) {
     const sessionKey = getPendingFileCopySessionKey(targetSessionId);
     const selectionFingerprint = buildUploadSelectionFingerprint(list);
     const existingState = uploadStatesBySession.get(sessionKey) || null;
-    if (existingState?.inFlight && existingState.promise) {
+    if (existingState?.promise && (getInFlightUploadStateForSession(targetSessionId)
+        || imageItems(targetSessionId).some(item => ['queued', 'uploading', 'retrying'].includes(item.state)))) {
         const repeatedSelection = (
             existingState.selectionFingerprint === selectionFingerprint
         );
+        if (!repeatedSelection) {
+            showToast('Another upload is already in progress; this additional selection was not uploaded.', 'info');
+        }
         setUploadStatusForState(
             existingState,
             repeatedSelection
@@ -23017,10 +22968,8 @@ function setVonMessageRenderMode(messageTextEl, mode, originalText, _debugData) 
         });
 }
 
-// =============================================================================
-// JVNAUTOSCI-1043: User editing of AI outputs
-// =============================================================================
-
+// ======================================================================// JVNAUTOSCI-1043: User editing of AI outputs
+// ======================================================================
 /**
  * Enter edit mode for an assistant message.
  * Replaces rendered content with a plain-text textarea for editing.
@@ -23412,6 +23361,7 @@ function normaliseKindClass(kind) {
 }
 
 async function fetchConceptMetaForChat(fullId, generation = chatConceptMetaHydrationGeneration) {
+    if (isConversationConceptReference(fullId)) return conversationReferenceMetadata(fullId);
     try {
         // Prefer an exact lookup rather than fuzzy search: avoids incorrect labels.
         const nodeUrl = `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(fullId)}&raw_only=1&soft=1`;
@@ -23500,6 +23450,7 @@ async function fetchConceptMetaForChat(fullId, generation = chatConceptMetaHydra
 }
 
 async function fetchConceptMetaForChatNodeOnly(fullId, generation = chatConceptMetaHydrationGeneration) {
+    if (isConversationConceptReference(fullId)) return conversationReferenceMetadata(fullId);
     try {
         const nodeUrl = `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(fullId)}&raw_only=1&soft=1`;
         const nodeRes = await fetchOptionalChatConceptResource(
@@ -23567,6 +23518,11 @@ async function fetchAndCacheConceptMetaForChat(
     const conceptId = normalisePotentialConceptId(fullId);
     if (!conceptId) {
         return null;
+    }
+
+    if (isConversationConceptReference(conceptId)) {
+        const meta = await conversationReferenceMetadata(conceptId);
+        return isChatConceptMetaHydrationCurrent(generation) ? meta : null;
     }
 
     if (chatConceptMetaCache.has(conceptId)) {
@@ -24494,6 +24450,7 @@ let queuedChatPromptCounter = 0;
 let chatPromptQueuePollTimerId = null;
 let chatPromptQueuePollInFlight = false;
 let chatPromptQueuePollAbortController = null;
+let chatPromptQueueRefreshSequence = 0;
 const queuedChatPromptClaimsInFlight = new Set();
 const queuedChatPromptSubmissionsInFlight = new Map();
 const queuedChatPromptSyncTimers = new Map();
@@ -25137,6 +25094,8 @@ function updateHistoryBanner() {
 
 function setActiveChatSession(sessionId, sessionName, externalConversation = undefined) {
     const previousSessionId = activeChatSessionId;
+    const composer = getPromptInputElement();
+    if (composer) composerDraftsBySession.set(previousSessionId, composer.value);
     activeChatSessionId = (typeof sessionId === 'string' && sessionId.trim())
         ? sessionId.trim()
         : null;
@@ -25160,6 +25119,13 @@ function setActiveChatSession(sessionId, sessionName, externalConversation = und
     renderActiveChatSessionFocusChips(activeChatSessionFocus);
 
     if (previousSessionId !== activeChatSessionId) {
+        // The first session adopts an unbound draft (e.g. an initial upload).
+        const draft = composerDraftsBySession.get(activeChatSessionId)
+            ?? (previousSessionId === null ? composerDraftsBySession.get(null) : '')
+            ?? '';
+        composerDraftsBySession.delete(null);
+        setPromptComposerValue(draft);
+        if (previousSessionId) turnModelPicker?.clear();
         setSelectedChatPromptQueueEntryId(null);
         chatSessionSelectionGeneration += 1;
         synchroniseLlmExecutionContext({ reason: 'conversation_session_changed' });
@@ -27552,7 +27518,9 @@ function renderChatSessionTabs(sessions, activeSessionId) {
 
         const header = document.createElement('span');
         header.className = 'chat-session-tab-header';
-        header.append(participantAvatar({ display_name: session.external_conversation ? displayName : 'Von', avatar_url: session.external_conversation ? null : '/static/VonImageBig.png' }));
+        header.append(session.external_conversation
+            ? importedConversationAvatar(session.external_conversation.provider, displayName, { sidebar: true })
+            : participantAvatar({ display_name: 'Von', avatar_url: '/static/VonImageBig.png' }));
 
         const pinToggle = document.createElement('button');
         pinToggle.type = 'button';
@@ -28472,6 +28440,8 @@ async function createChatSession(sessionName, options = {}) {
         throw new Error(msg);
     }
 
+    const preservedComposerValue = options.preserveComposerDraft
+        ? String(getPromptInputElement()?.value || '') : '';
     setActiveChatSession(data?.session_id, data?.session_name);
     const createdFocus = getFocusFromPayload(data);
     if (data?.session_id) {
@@ -28546,10 +28516,7 @@ async function createChatSession(sessionName, options = {}) {
         });
     }
 
-    const composerValue = options.preserveComposerDraft
-        ? String(getPromptInputElement()?.value || '')
-        : '';
-    setPromptComposerValue(composerValue, { focus: true });
+    setPromptComposerValue(preservedComposerValue, { focus: true });
 
     document.dispatchEvent(new CustomEvent('von:contextReset', {
         detail: { trigger: 'chat_new_session', session_id: effectiveSessionId, session_name: effectiveName || null }
@@ -31001,7 +30968,22 @@ function ensureScrollToEndButton(scrollableField = null) {
     }
 
     const wrapper = targetField.closest('.content-wrapper') || targetField.parentElement;
-    const controlHost = wrapper?.querySelector('.chat-composer') || wrapper;
+    let controlHost = wrapper?.querySelector('.chat-composer') || wrapper;
+    if (!isCompactComposer()) {
+        controlHost = wrapper?.querySelector('.chat-transcript-navigation');
+        if (!controlHost && wrapper) {
+            controlHost = document.createElement('nav');
+            controlHost.className = 'chat-transcript-navigation';
+            controlHost.setAttribute('aria-label', 'Conversation navigation');
+            targetField.after(controlHost);
+            if (typeof ResizeObserver === 'function') {
+                const observer = new ResizeObserver(() => updateScrollToEndButtonVisibility(targetField));
+                observer.observe(targetField);
+                const composer = wrapper.querySelector('.chat-composer');
+                if (composer) observer.observe(composer);
+            }
+        }
+    }
     if (!(controlHost instanceof HTMLElement)) {
         return null;
     }
@@ -31035,8 +31017,24 @@ function isScrollableFieldNearBottom(scrollableField, thresholdPx = CHAT_SCROLL_
     const clientHeight = getConversationPageViewportHeight();
     const scrollHeight = getConversationPageScrollHeight();
     const scrollTop = getConversationPageScrollTop();
+    if (!isCompactComposer()) {
+        return Math.abs(getDesktopConversationEndScrollTop(scrollableField) - scrollTop)
+            <= Math.max(0, Number(thresholdPx) || 0);
+    }
     const distanceToBottom = scrollHeight - (scrollTop + clientHeight);
     return distanceToBottom <= Math.max(0, Number(thresholdPx) || 0);
+}
+
+// Account for the sticky draft and footer instead of scrolling into the page's
+// trailing layout space below the conversation.
+function getDesktopConversationEndScrollTop(scrollableField) {
+    const viewport = getConversationPageViewportHeight();
+    const composer = scrollableField.closest('.content-wrapper')?.querySelector('.chat-composer');
+    const draftSpace = (composer?.getBoundingClientRect().height || 0)
+        + (composer ? parseFloat(getComputedStyle(composer).bottom) || 0 : 0);
+    const transcriptEnd = scrollableField.getBoundingClientRect().bottom + getConversationPageScrollTop();
+    const desiredTop = transcriptEnd + draftSpace + 24 - viewport;
+    return Math.max(0, Math.min(desiredTop, getConversationPageScrollHeight() - viewport));
 }
 
 function getConversationPageScrollTop() {
@@ -31075,7 +31073,9 @@ function scrollConversationToEnd(scrollableField, options = {}) {
     }
 
     const smooth = options?.smooth !== false;
-    const top = getConversationPageScrollHeight();
+    const top = isCompactComposer()
+        ? getConversationPageScrollHeight()
+        : getDesktopConversationEndScrollTop(scrollableField);
     scrollConversationPageTo(top, { smooth });
 
     const schedule = (typeof window !== 'undefined' && typeof window.setTimeout === 'function')
@@ -31104,6 +31104,14 @@ function updateScrollToEndButtonVisibility(scrollableField = null) {
         return;
     }
 
+    if (!isCompactComposer()) {
+        const composer = targetField.closest('.content-wrapper')?.querySelector('.chat-composer');
+        const clearance = composer
+            ? getConversationPageViewportHeight() - composer.getBoundingClientRect().top + 12
+            : 16;
+        button.parentElement.style.bottom = `${Math.max(16, clearance)}px`;
+    }
+
     const hasOverflow = (getConversationPageScrollHeight() - getConversationPageViewportHeight()) > 1;
     const nearBottom = isScrollableFieldNearBottom(targetField);
     const shouldShow = hasOverflow && !nearBottom;
@@ -31125,14 +31133,7 @@ function handleConversationScrollPositionChange(scrollableField) {
 }
 
 function resizePromptComposer(promptInput) {
-    if (!(promptInput instanceof HTMLTextAreaElement)) return;
-    if (isCompactComposer()) { resizeCompactDraft(promptInput); return; }
-    promptInput.style.height = 'auto';
-    const minHeight = 44;
-    const maxHeight = 144;
-    const nextHeight = Math.min(maxHeight, Math.max(minHeight, Number(promptInput.scrollHeight) || minHeight));
-    promptInput.style.height = `${nextHeight}px`;
-    promptInput.style.overflowY = (Number(promptInput.scrollHeight) || 0) > maxHeight ? 'auto' : 'hidden';
+    resizeConversationDraft(promptInput);
 }
 
 function setLatestUnreadBoundary(messageElement) {
@@ -33610,6 +33611,8 @@ function startOrganisationSwitchForChatTab(detail = {}) {
     transcriptTurns.length = 0;
     turnEditHistory.clear();
     clearLlmDebugDataEntries();
+    setPromptComposerValue('');
+    composerDraftsBySession.clear();
     setActiveChatSession(null, null);
     displayedHistorySessionId = null;
     historySegmentsShown = 0;
@@ -33805,12 +33808,46 @@ function handleAuthStatusChangeForChatTab(detail) {
     publishRealtimeConnectionTelemetry('auth_status_changed');
 }
 
+export async function retryConversationReadsAfterConnectionRecovery() {
+    if (pendingChatOrganisationSwitchId !== null) return;
+    const organisationGeneration = chatOrganisationGeneration;
+    await refreshChatSessionTabs();
+    if (!isChatOrganisationRequestCurrent(organisationGeneration)) return;
+    // Do not replay a send or replace a live answer. Retry only a failed/missing
+    // transcript; the composer, attachments and current selection stay in place.
+    if (!activeHistoryRequest && !getLiveChatRequestForSession(activeChatSessionId)
+        && (historyLoadState.degraded || displayedHistorySessionId !== activeChatSessionId)) {
+        await loadChatHistory({ scrollToBottom: false, preserveScroll: true });
+    }
+}
+
 export function initializeChatTab() {
     if (chatTabInitialised) {
         console.warn('[chatTab] initializeChatTab called more than once; skipping duplicate initialisation.');
         return;
     }
     chatTabInitialised = true;
+    document.addEventListener('von:connectionRestored', () => {
+        void retryConversationReadsAfterConnectionRecovery().catch(error => {
+            console.warn('[chatTab] Connection recovered; conversation retry failed:', error);
+        });
+    });
+    const turnModelSelect = document.getElementById('turnModelSelect');
+    if (turnModelSelect) {
+        turnModelPicker = createTurnModelPicker({
+            select: turnModelSelect,
+            status: document.getElementById('turnModelStatus'),
+            clearButton: document.getElementById('clearTurnModelButton'),
+            loadModels: async provider => {
+                const response = await fetch(`/api/settings/models/${provider}`, { headers: buildChatFetchHeaders() });
+                if (!response.ok) throw new Error('Model catalogue unavailable');
+                return response.json();
+            }
+        });
+        turnModelSelect.closest('details')?.addEventListener('toggle', event => {
+            if (event.target.open) void turnModelPicker.load();
+        });
+    }
     initialiseConversationCatalogue({ render: (fresh) => { if (fresh === true) reconcileServerConversationPreferences(directConversationRows()); renderChatSessionTabs(sessionTabsCache, activeChatSessionId); }, acceptChats: (rows) => {
         serverAgentCreatedSessionVisibilityState = null;
         const selected = sessionTabsCache.find(row => row.session_id === activeChatSessionId);
@@ -34019,6 +34056,8 @@ export function initializeChatTab() {
             }
         });
     }
+
+    initialiseImagePicker(uploadFilesToVon, renderUploadStatus);
 
     if (uploadFileButton && uploadFileInput) {
         uploadFileButton.addEventListener('click', () => {
@@ -34253,6 +34292,7 @@ export function initializeChatTab() {
     }
 
     // Shared mobile/desktop recording lifecycle; browser recognition is explicit.
+    initialiseDraftControls({ sendButton, attachmentButton: document.getElementById('attachImageButton'), dictateButton });
     dictationController?.dispose();
     if (dictateButton && promptInput) {
         dictationController = createDictationController({
@@ -34283,7 +34323,7 @@ export function initializeChatTab() {
             }
         },
         onSubmit: async (text, speech) => {
-            const envelope = buildChatPromptExecutionEnvelope();
+            const envelope = buildChatPromptExecutionEnvelope({ modelFields: turnModelPicker?.take() });
             envelope.client_context = { ...envelope.client_context,
                 speech_attempt_ids: [speech.attemptId], speech_item_id: speech.itemId };
             const row = await queuePromptForLater(text, { sessionId: activeChatSessionId,
@@ -34304,7 +34344,7 @@ export function initializeChatTab() {
         updateSendButtonForCurrentChatState();
         if (!chatSteeringControls?.activate(event)) void handleSendPrompt();
     };
-    sendButton.addEventListener('click', submitComposer);
+
     resetButton.addEventListener('click', handleResetContext);
 
     ensureAbortButtonBound();
@@ -34316,29 +34356,18 @@ export function initializeChatTab() {
         setSelectedChatPromptQueueEntryId(null);
     });
 
-    promptInput.addEventListener('input', function () {
-        setSelectedChatPromptQueueEntryId(null);
-        resizePromptComposer(promptInput);
-        updateSendButtonDraftReadiness();
+    if (composerDraftsBySession.has(activeChatSessionId)) {
+        setPromptComposerValue(composerDraftsBySession.get(activeChatSessionId), { promptInput });
+    }
+    initialiseConversationDraft({
+        input: promptInput, sendButton, onSubmit: submitComposer,
+        onInput: () => {
+            composerDraftsBySession.set(activeChatSessionId, promptInput.value);
+            setSelectedChatPromptQueueEntryId(null);
+            updateSendButtonDraftReadiness();
+        },
+        onHistory: handlePromptInputHistoryNavigation
     });
-    resizePromptComposer(promptInput);
-
-    promptInput.addEventListener('keypress', function (event) {
-        if (shouldSubmitComposerKey(event)) {
-            event.preventDefault();
-            submitComposer(event);
-        }
-    });
-
-    // JVNAUTOSCI-2128/2163: ArrowUp/ArrowDown on an empty composer recalls
-    // historical submitted prompts with cursor navigation.
-    promptInput.addEventListener('keydown', handlePromptInputHistoryNavigation);
-
-    // Initialize concept autocomplete for #V# trigger
-    initializeConceptAutocomplete(promptInput);
-
-    // Render non-trigger (#V\u200B#...) concept tokens as cartouches in the prompt.
-    initializePromptCartoucheOverlay(promptInput);
 
     void Promise.allSettled([
         loadRecentChatPair({
@@ -35789,12 +35818,14 @@ async function refreshChatPromptQueueFromServer(options = {}) {
         return false;
     }
     const organisationGenerationAtStart = chatOrganisationGeneration;
+    const refreshSequence = ++chatPromptQueueRefreshSequence;
     const previousEntries = [...queuedChatPrompts];
     try {
         const data = await fetchChatPromptQueueJson('', {
             signal: options.signal
         });
-        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)) {
+        if (!isChatOrganisationRequestCurrent(organisationGenerationAtStart)
+            || refreshSequence !== chatPromptQueueRefreshSequence) {
             return false;
         }
         chatPromptQueueAdmissionServerInstanceId = (
@@ -35854,7 +35885,9 @@ async function refreshChatPromptQueueFromServer(options = {}) {
         renderChatTaskQueuePanel();
         refreshChatSessionTabActivityIndicators();
         updateSendButtonForCurrentChatState();
-        syncServerDispatchedRetryObserver();
+        if (options.observeRetries !== false) {
+            syncServerDispatchedRetryObserver();
+        }
         syncChatPromptQueuePolling();
         if (shouldRefreshActiveHistory) {
             refreshActiveConversationHistoryAfterQueueChange();
@@ -35880,7 +35913,8 @@ function buildChatPromptExecutionEnvelope({
     fileCopyConceptId = null,
     imageAttachmentIds = [],
     turnKind = null,
-    initiationId = null
+    initiationId = null,
+    modelFields = null
 } = {}) {
     const userContext = getUserContext() || {};
     const localModelRequestFields = buildLocalModelRequestFields(
@@ -35894,7 +35928,7 @@ function buildChatPromptExecutionEnvelope({
         language: (typeof userContext.language === 'string' && userContext.language.trim())
             ? userContext.language.trim()
             : 'en-NZ',
-        ...localModelRequestFields,
+        ...(modelFields || localModelRequestFields),
         ...(fileCopyConceptId ? {
             workflow_inputs: {
                 file_copy_concept_id: fileCopyConceptId
@@ -37090,7 +37124,7 @@ async function sendQueuedChatPromptEntry(entryId) {
         return false;
     }
 
-    if (getUnavailableLocalModelPreferenceForChat()) {
+    if (!nextEntry.executionEnvelope?.model && getUnavailableLocalModelPreferenceForChat()) {
         nextEntry.syncError = LOCAL_MODEL_UNAVAILABLE_CHAT_MESSAGE;
         renderChatTaskQueuePanel();
         refreshChatSessionTabActivityIndicators();
@@ -37136,6 +37170,7 @@ async function sendQueuedChatPromptEntry(entryId) {
             clientRequestId: nextEntry.clientRequestId || null,
             attemptId: nextEntry.attemptId || null,
             fileCopyConceptId: nextEntry.fileCopyConceptId || null,
+            executionEnvelope: nextEntry.executionEnvelope,
             queuedSourceEntryId: cleanEntryId
         });
         return true;
@@ -37249,7 +37284,7 @@ async function handleSendPrompt(options = {}) {
         directComposerSubmission
         && (getInFlightUploadStateForSession(targetSessionId) || imagesBlocked(targetSessionId))
     ) {
-        showToast(ATTACHMENT_UPLOAD_SEND_BLOCK_MESSAGE, 'info');
+        showToast(attachmentBlockMessage(targetSessionId), 'info');
         updateSendButtonForCurrentChatState();
         return;
     }
@@ -37280,7 +37315,9 @@ async function handleSendPrompt(options = {}) {
         return;
     }
 
-    if (!observeServerDispatch && getUnavailableLocalModelPreferenceForChat()) {
+    if (!observeServerDispatch && !options?.executionEnvelope?.model
+        && !(directComposerSubmission && turnModelPicker?.peek())
+        && getUnavailableLocalModelPreferenceForChat()) {
         if (!fromQueue) {
             notifyUnavailableLocalModelForChat();
         }
@@ -37343,11 +37380,12 @@ async function handleSendPrompt(options = {}) {
         );
         const executionEnvelope = buildChatPromptExecutionEnvelope({
             fileCopyConceptId: queuedFileCopyConceptId,
-            imageAttachmentIds: takeImages(targetSessionId)
+            imageAttachmentIds: takeImages(targetSessionId),
+            modelFields: directComposerSubmission ? turnModelPicker?.take() : null
         });
         refreshConversationImages();
         rememberLastSubmittedUserPrompt(promptRaw);
-        setPromptComposerValue('', { promptInput });
+        clearSubmittedComposerDraft(targetSessionId, promptRaw);
         updateSendButtonForCurrentChatState();
         try {
             await queuePromptForLater(promptRaw, {
@@ -37415,7 +37453,12 @@ async function handleSendPrompt(options = {}) {
         fileCopyConceptId: pendingFileCopyConceptId,
         imageAttachmentIds: options?.executionEnvelope?.image_attachment_ids || (fromQueue ? [] : takeImages(targetSessionId)),
         turnKind,
-        initiationId
+        initiationId,
+        modelFields: options?.executionEnvelope?.model ? {
+            model: options.executionEnvelope.model,
+            model_provider: options.executionEnvelope.model_provider,
+            model_parameters: options.executionEnvelope.model_parameters || {}
+        } : (directComposerSubmission && !assistantOpening ? turnModelPicker?.take() : null)
     });
     refreshConversationImages();
     const claimedAtMs = Date.parse(String(options?.claimedAt || ''));
@@ -37583,8 +37626,10 @@ async function handleSendPrompt(options = {}) {
         if (!claimForegroundDelivery()) {
             return false;
         }
-        if (request.executionEnvelope?.image_attachment_ids?.length && isRequestVisible() && promptInput.value === request.promptRaw) {
-            setPromptComposerValue('', { promptInput });
+        if (!fromQueue && request.executionEnvelope?.image_attachment_ids?.length) {
+            // Completion can arrive after a switch or an editor remount. Clear
+            // only the submitted draft, never a newer edit or another session.
+            clearSubmittedComposerDraft(request.sessionId, request.promptRaw);
         }
         _acceptConversationSituationPayload(data, request.sessionId);
         const responsePresenterState = resolveResponsePresenterState(data);
@@ -37863,7 +37908,7 @@ async function handleSendPrompt(options = {}) {
         if (promptText) {
             rememberLastSubmittedUserPrompt(promptRaw);
         }
-        if (!request.executionEnvelope?.image_attachment_ids?.length) setPromptComposerValue('', { promptInput });
+        if (!request.executionEnvelope?.image_attachment_ids?.length) clearSubmittedComposerDraft(targetSessionId, promptRaw);
     }
 
     let generateTransportInterrupted = false;
@@ -38122,6 +38167,12 @@ async function handleSendPrompt(options = {}) {
         scheduleChatSessionTabsRefresh(true);
         if (request.serverQueueTerminalObserved) {
             publishChatPromptQueueChange('turn_terminal');
+            // Storage events notify other tabs only. Reconcile this tab too,
+            // using canonical state rather than inferring completion for any
+            // other queued prompt. Starting this read also retires older reads.
+            // A task result can arrive before its queue projection catches up;
+            // do not immediately attach another observer to that same attempt.
+            void refreshChatPromptQueueFromServer({ silent: true, observeRetries: false });
         }
         syncChatPromptQueuePolling();
     }
@@ -38208,6 +38259,49 @@ function formatChatTimestamp(isoString) {
     }
 }
 
+function createTurnReferenceCopyButton(sourceSessionId, turnId) {
+    const referenceButton = document.createElement('button');
+    referenceButton.type = 'button';
+    referenceButton.className = 'btn-mini conversation-turn-copy';
+    referenceButton.textContent = '⧉';
+    referenceButton.title = 'Copy turn link';
+    referenceButton.setAttribute('aria-label', 'Copy turn link');
+    referenceButton.addEventListener('click', async () => {
+        try {
+            const reference = await copyCompactConversationReference({ session_id: sourceSessionId }, turnId);
+            const copied = await copyTextToClipboard(reference);
+            showToast(copied ? 'Copied turn reference.' : 'Could not copy turn reference.', copied ? 'success' : 'error');
+        } catch (_) { showToast('This entry has no available stored turn reference.', 'info'); }
+    });
+    return referenceButton;
+}
+
+function bindTurnReferenceMenu(container) {
+    const copyButton = container.querySelector('.conversation-turn-copy');
+    if (!copyButton) return;
+    container.tabIndex = 0;
+    container.setAttribute('aria-haspopup', 'menu');
+    container.setAttribute('aria-expanded', 'false');
+    container.setAttribute('aria-keyshortcuts', 'Shift+F10');
+    container.setAttribute('aria-description', 'Right-click or press Shift+F10 for turn options.');
+    const open = event => {
+        // Preserve native link, input and selected-text menus inside a turn.
+        if (event.target.closest('a, input, textarea, select, [contenteditable="true"]')
+            || window.getSelection()?.toString()) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const rect = container.getBoundingClientRect();
+        const pointer = event.type === 'contextmenu' && (event.clientX || event.clientY);
+        openChatSessionMenu(pointer ? event.clientX : rect.left, pointer ? event.clientY : rect.bottom, [
+            { label: 'Copy turn reference', onClick: () => copyButton.click() }
+        ], { returnFocus: container, focusFirst: true });
+    };
+    container.addEventListener('contextmenu', open);
+    container.addEventListener('keydown', event => {
+        if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) open(event);
+    });
+}
+
 function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory = false, timestampStr = null, fastpathMeta = null, ttsText = null, messageOptions = null) {
     const scrollableField = document.getElementById('scrollableField');
     if (!scrollableField) {
@@ -38256,10 +38350,7 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             if (options.contributionTimestamp || timestampStr) messageContainer.dataset.contributionTimestamp = options.contributionTimestamp || timestampStr;
             let assistantAvatar;
             if (externalActor) {
-                assistantAvatar = document.createElement('span');
-                assistantAvatar.className = 'chat-imported-actor-avatar';
-                assistantAvatar.textContent = String(sender || 'Agent').trim().slice(0, 1).toUpperCase() || 'A';
-                assistantAvatar.setAttribute('aria-label', `${sender} (imported actor)`);
+                assistantAvatar = importedConversationAvatar(externalActor.source_actor_id, sender);
             } else {
                 assistantAvatar = document.createElement('img');
                 assistantAvatar.src = '/static/VonImageBig.png';
@@ -38725,7 +38816,10 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
             messageContainer.appendChild(assistantAvatar);
             messageContainer.appendChild(messageContent);
 
-            if (turnId) messageContainer.dataset.turnId = turnId;
+            if (turnId) {
+                messageContainer.dataset.turnId = turnId;
+                messageHeader.appendChild(createTurnReferenceCopyButton(activeChatSessionId, turnId));
+            }
             scrollableField.appendChild(messageContainer);
         } else {
             // For user messages and errors, use simpler styling
@@ -38865,12 +38959,16 @@ function appendMessage(sender, message, turnId, hasLlmDebug = false, isHistory =
                 thinkingCardSlot.className = 'thinking-card-inline-slot';
                 messageContainer.appendChild(thinkingCardSlot);
             }
-            if (turnId) messageContainer.dataset.turnId = turnId;
+            if (turnId) {
+                messageContainer.dataset.turnId = turnId;
+                messageHeader.appendChild(createTurnReferenceCopyButton(activeChatSessionId, turnId));
+            }
             scrollableField.appendChild(messageContainer);
         }
 
         const renderedTurn = turnId ? Array.from(scrollableField.querySelectorAll('[data-turn-id]')).find(el => el.dataset.turnId === turnId) : null;
         if (renderedTurn) {
+            bindTurnReferenceMenu(renderedTurn);
             const liveRequest = liveChatRequestsBySession.get(getChatRequestSessionKey(activeChatSessionId));
             const attachments = options.imageAttachments || (sender === 'User' ? descriptorsForIds(liveRequest?.executionEnvelope?.image_attachment_ids) : []);
             renderImageAttachments(renderedTurn, attachments);
@@ -41936,6 +42034,7 @@ export function __testOnly_handleChatPromptQueueStorageEvent(event) {
     handleChatPromptQueueStorageEvent(event);
 }
 export function __testOnly_resetChatRequestState() {
+    chatPromptQueueRefreshSequence += 1;
     chatSteeringControls?.dispose();
     chatSteeringControls = null;
     chatSteeringSendButton = null;
@@ -42001,6 +42100,7 @@ export function __testOnly_resetChatRequestState() {
     lastFinishedThinkingCard = null;
     newChatCreationInFlight = null;
     activeChatSessionId = null;
+    composerDraftsBySession.clear();
     activeChatSessionName = null;
     activeChatSessionOwnerId = null;
     chatSessionFocusCache.clear();
@@ -42183,3 +42283,5 @@ export function __testOnly_resetExternalConversationBulkImport() {
     externalConversationBulkImportPanelHidden = false;
 }
 export { formatChatTimestamp, showLlmDebugPopup, switchToChatSession, updateHistoryLength };
+
+export function __testOnly_setTurnModelPicker(picker) { turnModelPicker = picker; }

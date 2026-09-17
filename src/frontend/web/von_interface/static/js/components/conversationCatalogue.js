@@ -1,12 +1,11 @@
 /** Message-source adapter for the existing conversation tray. */
 import { bindConversationRowMenu, createSelectedConversationOptions } from './conversationRowMenu.js';
 import { copyTextWithClipboardFallback } from '../utils/copyJsonButtonState.js';
-import { buildMessageStreamReference } from '../utils/messageStreamReference.js';
 import { showToast } from '../utils/toast.js';
 import { getJson, postJson } from '../apiService.js';
 import { getSessionScopedOrgId } from '../utils/sessionScopedStorage.js';
 import { participantAvatar, openParticipantProfile } from './participantProfile.js';
-import { openMessageExchange, refreshOpenMessageExchange, showMessageComposer, resetMessagePanelContext } from './messagePanel.js';
+import { openMessageExchange, refreshOpenMessageExchange, showMessageComposer, resetMessagePanelContext, captureMessageExchangeUnreadRefresh } from './messagePanel.js';
 
 let rows = [];
 let catalogueRows = [];
@@ -23,6 +22,8 @@ const sourceLimit = 100;
 let filterText = '';
 let unreadOnly = false;
 let allContexts = false;
+let showImported = false;
+export function importedConversationsVisible() { return showImported; }
 let onChange = () => {};
 let chatReadObserver = null;
 let chatReadPending = false;
@@ -56,6 +57,7 @@ export function filterCatalogueRows(input) {
     if (filterText) searchRows.forEach(row => combined.set(row.session_id, { ...row, ...combined.get(row.session_id), match: row.match }));
     const matchedIds = new Set(searchRows.map(row => row.session_id));
     return rankCatalogueSearchRows([...combined.values()].filter(row => (!unreadOnly || row.shared_unread_count > 0)
+        && (showImported || row.origin_kind !== 'external_conversation_import')
         && (!filterText || metadataMatch(row) || matchedIds.has(row.session_id))));
 }
 
@@ -71,6 +73,7 @@ export async function searchCatalogueContent({ append = false } = {}) {
     onChange();
     try {
         const params = new URLSearchParams({ q: query, match_mode: 'hybrid', sort: 'relevance', page_size: '100' });
+        params.set('include_imported', String(showImported));
         if (cursor) params.set('cursor', cursor);
         const data = await getJson(`/von/api/session/conversation_search?${params}`);
         if (expected !== searchGeneration || contextGeneration !== generation || org !== getSessionScopedOrgId()) return;
@@ -103,7 +106,7 @@ export function showChatConversation() {
     workspace?.classList.remove('show-message-exchange');
 }
 
-export function resetConversationCatalogue() {
+export function resetConversationCatalogue({ preserveSearch = false } = {}) {
     generation += 1;
     searchGeneration += 1;
     clearTimeout(searchTimer);
@@ -111,27 +114,29 @@ export function resetConversationCatalogue() {
     searchCursor = null;
     searchStatus = '';
     searchPending = false;
-    filterText = '';
+    if (!preserveSearch) filterText = '';
     const searchInput = document.querySelector('.catalogue-filters input[type="search"]');
-    if (searchInput) searchInput.value = '';
+    if (searchInput && !preserveSearch) searchInput.value = '';
     rows = [];
     catalogueRows = [];
     nextCursor = null;
-    resetMessagePanelContext();
+    if (!preserveSearch) resetMessagePanelContext();
     profiles.clear();
     refreshPromise = null;
-    showChatConversation();
+    if (!preserveSearch) showChatConversation();
 }
 
 export async function refreshMessageCatalogue() {
     if (refreshPromise) return refreshPromise;
+    const reconcileUnread = captureMessageExchangeUnreadRefresh();
     const expected = generation;
     const org = getSessionScopedOrgId();
     refreshPromise = (async () => {
         try {
-            const data = await getJson(`/api/messages/conversation-catalogue?limit=${sourceLimit}&all_contexts=${allContexts}`);
+            const data = await getJson(`/api/messages/conversation-catalogue?limit=${sourceLimit}&all_contexts=${allContexts}&include_imported=${showImported}`);
             if (expected !== generation || org !== getSessionScopedOrgId()) return;
             const incomingRows = data.conversations || [];
+            reconcileUnread(incomingRows);
             more = data.has_more === true;
             if (!nextCursor || catalogueRows.length <= sourceLimit) nextCursor = data.next_cursor;
             sourceError = data.coverage_complete === false ? `Could not refresh ${Object.entries(data.coverage || {}).filter(([, ok]) => !ok).map(([name]) => name).join(' and ')}. The other conversations remain available; refresh to retry.` : '';
@@ -230,7 +235,7 @@ export function renderMessageConversationRow(row, { selected = false, pinned = f
 export function buildMessageConversationMenuItems(row, { pinned, togglePin, hide, hidden } = {}) {
     const items = [
         { label: 'Open conversation', onClick: () => void selectMessageConversation(row) },
-        { label: 'Copy Concept ID', onClick: async () => {
+        { label: 'Copy conversation reference', onClick: async () => {
             try {
                 const result = await postJson('/api/messages/exchange/reference', {
                     participant_ids: row.participant_ids,
@@ -241,15 +246,7 @@ export function buildMessageConversationMenuItems(row, { pinned, togglePin, hide
                 showToast(copied ? 'Copied conversation Concept ID.' : 'Failed to copy Concept ID.', copied ? 'success' : 'error');
             } catch (_) { showToast('Conversation Concept ID is unavailable. Try again.', 'error'); }
         } },
-        { label: 'Copy conversation reference', onClick: async () => {
-            const reference = buildMessageStreamReference({
-                currentUserId: row.viewer_id, otherUserId: row.other_participant_ids[0] || row.viewer_id,
-                participantIds: row.participant_ids, organisationConceptId: row.organisation_concept_id,
-                displayName: row.session_name,
-            });
-            const copied = reference && await copyTextWithClipboardFallback(JSON.stringify(reference, null, 2));
-            showToast(copied ? 'Copied conversation reference.' : 'Failed to copy conversation reference.', copied ? 'success' : 'error');
-        } },
+
     ];
     if (togglePin) items.push({ label: pinned ? 'Unpin conversation' : 'Pin conversation', onClick: togglePin });
     if (hide) items.push({ label: hidden ? 'Unhide conversation' : 'Hide conversation', onClick: hide });
@@ -273,7 +270,7 @@ export function mountCatalogueControls(container) {
             const expected = generation;
             moreButton.disabled = true;
             try {
-                const page = await getJson(`/api/messages/conversation-catalogue?limit=${sourceLimit}&cursor=${encodeURIComponent(nextCursor)}&all_contexts=${allContexts}`);
+                const page = await getJson(`/api/messages/conversation-catalogue?limit=${sourceLimit}&cursor=${encodeURIComponent(nextCursor)}&all_contexts=${allContexts}&include_imported=${showImported}`);
                 if (expected !== generation) return;
                 catalogueRows = [...new Map([...catalogueRows, ...(page.conversations || [])].map(row => [row.session_id, row])).values()];
                 rows = catalogueRows.filter(row => row.source_kind === 'message_exchange');
@@ -323,7 +320,19 @@ export function initialiseConversationCatalogue({ render, acceptChats, currentCh
     unread.onclick = () => { unreadOnly = !unreadOnly; unread.setAttribute('aria-pressed', String(unreadOnly)); render(); };
     const contexts = document.createElement('button'); contexts.type = 'button'; contexts.textContent = 'All organisations'; contexts.title = 'Include your message exchanges from other organisations'; contexts.setAttribute('aria-pressed', 'false');
     contexts.onclick = () => { allContexts = !allContexts; contexts.setAttribute('aria-pressed', String(allContexts)); resetConversationCatalogue(); void refreshMessageCatalogue(); void searchCatalogueContent(); };
-    controls.append(filter, unread, contexts);
+    const imported = document.createElement('button'); imported.type = 'button'; imported.textContent = 'Show imported';
+    showImported = false;
+    imported.title = 'Include imported conversations in this list and its search results';
+    imported.setAttribute('aria-pressed', 'false');
+    imported.onclick = () => {
+        showImported = !showImported;
+        imported.setAttribute('aria-pressed', String(showImported));
+        resetConversationCatalogue({ preserveSearch: true });
+        render();
+        void refreshMessageCatalogue();
+        void searchCatalogueContent();
+    };
+    controls.append(filter, unread, contexts, imported);
     document.querySelector('.conversation-tray-header')?.after(controls);
     const refresh = async () => {
         if (document.visibilityState === 'hidden') return;

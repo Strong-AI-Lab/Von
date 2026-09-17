@@ -3,6 +3,7 @@
 const chatTabModulePath = '../../src/frontend/web/von_interface/static/js/chatTab.js';
 
 jest.mock('../../src/frontend/web/von_interface/static/js/apiService.js', () => ({
+    WINDOW_SESSION_HEADER: 'X-Von-Window-Session',
     annotateTurn: jest.fn(),
     getUserContext: jest.fn(),
     getWindowSessionId: jest.fn(() => 'window-attachment-test')
@@ -30,6 +31,7 @@ jest.mock('../../src/frontend/web/von_interface/static/js/utils/textDecorator.js
 
 describe('chat attachment workflow input binding', () => {
     beforeEach(() => {
+        jest.resetModules();
         window.scrollTo = jest.fn();
         document.body.innerHTML = `
             <div id="scrollableField"></div>
@@ -73,6 +75,260 @@ describe('chat attachment workflow input binding', () => {
         chatTab.__testOnly_resetChatRequestState();
         jest.restoreAllMocks();
         delete global.fetch;
+    });
+
+    test.each(['visible', 'background', 'remounted', 'edited'])(
+        'successful image submission clears only its own unchanged draft: %s', async mode => {
+            const { __testOnly_uploadFilesToVon, __testOnly_setActiveChatSession: select, sendMessage } = require(chatTabModulePath);
+            let finish;
+            global.fetch = jest.fn(async (url, options = {}) => {
+                if (url === '/von/api/images/upload') return { ok: true, json: async () => ({ image_attachment: { concept_id: '#V#draft-image', filename: 'draft.png' } }) };
+                if (url === '/von/generate') return new Promise(resolve => { finish = resolve; });
+                if (String(url).startsWith('/von/history/length')) return { ok: true, json: async () => ({ history_length: 0, authenticated: true }) };
+                if (String(url).startsWith('/von/api/render_markdown')) return { ok: true, json: async () => ({ html: JSON.parse(options.body).text || '' }) };
+                return { ok: true, json: async () => ({}) };
+            });
+            await __testOnly_uploadFilesToVon([new File(['png'], 'draft.png', { type: 'image/png' })]);
+            let input = document.getElementById('promptInput');
+            input.value = 'Submitted caption\nwith multiple lines.';
+            const pending = sendMessage();
+            for (let i = 0; i < 50 && !finish; i++) await new Promise(resolve => setTimeout(resolve, 5));
+            expect(finish).toBeDefined();
+            if (mode === 'background') {
+                select('other-session', 'Other');
+                expect(input.value).toBe('');
+                input.value = 'Other conversation draft';
+            } else if (mode === 'remounted') {
+                const replacement = input.cloneNode(true);
+                replacement.value = input.value;
+                input.replaceWith(replacement);
+                input = replacement;
+            } else if (mode === 'edited') input.value = 'Next intentional draft';
+            finish({ ok: true, json: async () => ({ response: 'Received.', llm_debug: { model: 'test-model' } }) });
+            await pending;
+            if (mode === 'background') {
+                expect(input.value).toBe('Other conversation draft');
+                select('attachment-session', 'Attachment test');
+            }
+            expect(input.value).toBe(mode === 'edited' ? 'Next intentional draft' : '');
+            select('other-session', 'Other');
+            expect(input.value).toBe(mode === 'background' ? 'Other conversation draft' : '');
+            select('attachment-session', 'Attachment test');
+            expect(input.value).toBe(mode === 'edited' ? 'Next intentional draft' : '');
+        }
+    );
+
+    test('successful text-only submission stays cleared after switching away and back', async () => {
+        const { __testOnly_setActiveChatSession: select, sendMessage } = require(chatTabModulePath);
+        global.fetch = jest.fn(async (url, options = {}) => ({ ok: true, json: async () => {
+            if (url === '/von/generate') return { response: 'Received.', llm_debug: { model: 'test-model' } };
+            if (String(url).startsWith('/von/api/render_markdown')) return { html: JSON.parse(options.body).text || '' };
+            if (String(url).startsWith('/von/history/length')) return { history_length: 0, authenticated: true };
+            return {};
+        } }));
+        const input = document.getElementById('promptInput');
+        input.value = 'Text-only prompt';
+        await sendMessage();
+        expect(input.value).toBe('');
+        select('other-session', 'Other');
+        input.value = 'Unsent follow-up';
+        select('attachment-session', 'Attachment test');
+        expect(input.value).toBe('');
+        select('other-session', 'Other');
+        expect(input.value).toBe('Unsent follow-up');
+    });
+
+    test('unsent drafts are isolated across navigation and cleared on organisation change', () => {
+        const { __testOnly_setActiveChatSession: select, __testOnly_startOrganisationSwitchForChatTab: switchOrg } = require(chatTabModulePath);
+        const input = document.getElementById('promptInput');
+        input.value = 'First draft';
+        select('second', 'Second');
+        expect(input.value).toBe('');
+        input.value = 'Second draft';
+        select('attachment-session', 'Attachment test');
+        expect(input.value).toBe('First draft');
+        select('second', 'Second');
+        expect(input.value).toBe('Second draft');
+        switchOrg({ switch_id: 'draft-org-switch' });
+        expect(input.value).toBe('');
+        select('attachment-session', 'Attachment test');
+        expect(input.value).toBe('');
+    });
+
+    test('failed image send retains its scoped caption and attachment for a successful retry', async () => {
+        const { __testOnly_uploadFilesToVon, __testOnly_setActiveChatSession: select, sendMessage } = require(chatTabModulePath);
+        const bodies = [];
+        global.fetch = jest.fn(async (url, options = {}) => {
+            if (url === '/von/api/images/upload') return { ok: true, json: async () => ({ image_attachment: { concept_id: '#V#retry-draft-image', filename: 'retry.png' } }) };
+            if (url === '/von/generate') {
+                bodies.push(JSON.parse(options.body));
+                return bodies.length === 1
+                    ? { ok: false, status: 400, json: async () => ({ error: 'Fixture rejection' }) }
+                    : { ok: true, json: async () => ({ response: 'Received.', llm_debug: { model: 'test-model' } }) };
+            }
+            if (String(url).startsWith('/von/history/length')) return { ok: true, json: async () => ({ history_length: 0, authenticated: true }) };
+            if (String(url).startsWith('/von/api/render_markdown')) return { ok: true, json: async () => ({ html: JSON.parse(options.body).text || '' }) };
+            return { ok: true, json: async () => ({}) };
+        });
+        await __testOnly_uploadFilesToVon([new File(['png'], 'retry.png', { type: 'image/png' })]);
+        const input = document.getElementById('promptInput');
+        input.value = 'Retain this caption';
+        await sendMessage();
+        expect(input.value).toBe('Retain this caption');
+        select('other-session', 'Other');
+        expect(input.value).toBe('');
+        select('attachment-session', 'Attachment test');
+        expect(input.value).toBe('Retain this caption');
+        await sendMessage();
+        expect(input.value).toBe('');
+        expect(bodies).toHaveLength(2);
+        expect(bodies[1].image_attachment_ids).toEqual(['#V#retry-draft-image']);
+    });
+
+    test('removing the second uploading PDF unblocks the ready PDF before late completion', async () => {
+        const { __testOnly_uploadFilesToVon, sendMessage } = require(chatTabModulePath);
+        const { imageItems } = require('../../src/frontend/web/von_interface/static/js/utils/conversationImages.js');
+        const bodies = [];
+        let finish;
+        global.fetch = jest.fn(async (url, options = {}) => {
+            if (url === '/von/api/files/upload') {
+                if (options.body.get('file').name === 'program.pdf') return new Promise(resolve => { finish = resolve; });
+                return { ok: true, json: async () => ({ uploaded: { concept_id: '#V#poster' } }) };
+            }
+            if (String(url).startsWith('/von/generate')) {
+                bodies.push(JSON.parse(options.body));
+                return { ok: true, json: async () => ({ response: 'Received.', llm_debug: { model: 'test-model' } }) };
+            }
+            if (String(url).startsWith('/von/history/length')) return { ok: true, json: async () => ({ history_length: 0, authenticated: true }) };
+            return { ok: true, json: async () => ({}) };
+        });
+        document.getElementById('promptInput').value = 'Tell me about these talks';
+        const upload = __testOnly_uploadFilesToVon([
+            new File(['poster'], 'poster.pdf', { type: 'application/pdf' }),
+            new File(['program'], 'program.pdf', { type: 'application/pdf' })
+        ]);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(document.getElementById('pendingAttachmentStatus').textContent).toContain('poster.pdf');
+        expect(document.getElementById('sendButton').disabled).toBe(true);
+        await sendMessage();
+        expect(bodies).toHaveLength(0);
+        document.querySelector('[aria-label="Remove program.pdf"]').click();
+        expect(document.getElementById('sendButton').disabled).toBe(false);
+        expect(document.getElementById('uploadFileStatus').textContent).not.toContain('Uploading');
+        await sendMessage();
+        expect(bodies[0].image_attachment_ids).toEqual(['#V#poster']);
+        expect(bodies[0].workflow_inputs.file_copy_concept_id).toBe('#V#poster');
+        finish({ ok: true, json: async () => ({ uploaded: { concept_id: '#V#late-program' } }) });
+        await upload;
+        expect(imageItems('attachment-session')).toEqual([]);
+        expect(document.getElementById('pendingAttachmentStatus').classList.contains('hidden')).toBe(true);
+    }, 15000);
+
+    test('failed PDF gives a retry gate and successful retry immediately enables send', async () => {
+        const { __testOnly_uploadFilesToVon, sendMessage } = require(chatTabModulePath);
+        let attempt = 0;
+        const bodies = [];
+        global.fetch = jest.fn(async (url, options = {}) => {
+            if (url === '/von/api/files/upload') {
+                if (++attempt === 1) throw new Error('Connection lost');
+                return { ok: true, json: async () => ({ uploaded: { concept_id: '#V#retry-pdf' } }) };
+            }
+            if (String(url).startsWith('/von/generate')) {
+                bodies.push(JSON.parse(options.body));
+                return { ok: true, json: async () => ({ response: 'Received.', llm_debug: { model: 'test-model' } }) };
+            }
+            return { ok: true, json: async () => ({ history_length: 0, authenticated: true }) };
+        });
+        await __testOnly_uploadFilesToVon([new File(['pdf'], 'retry.pdf', { type: 'application/pdf' })]);
+        const send = document.getElementById('sendButton');
+        expect(send.disabled).toBe(true);
+        expect(send.title).toContain('Retry or remove');
+        expect(document.getElementById('uploadFileStatus').textContent).toContain('Retry or remove');
+        document.getElementById('promptInput').value = 'Read the PDF';
+        await sendMessage();
+        expect(bodies).toHaveLength(0);
+        document.querySelector('[aria-label="Retry upload of retry.pdf"]').click();
+        expect(send.disabled).toBe(true);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        expect(send.disabled).toBe(false);
+        await sendMessage();
+        expect(bodies[0].image_attachment_ids).toEqual(['#V#retry-pdf']);
+    }, 15000);
+
+    test('phone image without MIME binds only to its next request, after preview and removal', async () => {
+        const { __testOnly_uploadFilesToVon, sendMessage } = require(chatTabModulePath);
+        const bodies = [];
+        let uploaded = 0;
+        global.fetch = jest.fn(async (url, options = {}) => {
+            if (url === '/von/api/images/upload') return {ok:true, json:async () => ({image_attachment:{concept_id:`#V#phone-${++uploaded}`, filename:'phone.png'}})};
+            if (String(url).startsWith('/von/generate')) {
+                bodies.push(JSON.parse(options.body));
+                return {ok:true, json:async () => ({response:'Image received.', llm_debug:{model:'test-model'}})};
+            }
+            if (String(url).startsWith('/von/history/length')) return {ok:true, json:async () => ({history_length:0, authenticated:true})};
+            if (String(url).startsWith('/von/api/render_markdown')) return {ok:true, json:async () => ({html:JSON.parse(options.body).text || ''})};
+            return {ok:true, json:async () => ({})};
+        });
+        await __testOnly_uploadFilesToVon([new File(['png'], 'phone.png')]);
+        expect(document.querySelector('#conversationImageComposer img')).not.toBeNull();
+        document.querySelector('#conversationImageComposer button[aria-label^=Remove]').click();
+        await __testOnly_uploadFilesToVon([new File(['png'], 'replacement.png')]);
+        document.querySelector('#promptInput').value = 'Describe this screenshot';
+        await sendMessage();
+        expect(bodies[0].image_attachment_ids).toEqual(['#V#phone-2']);
+        expect(bodies[0]).not.toHaveProperty('workflow_inputs');
+        document.querySelector('#promptInput').value = 'Now a text-only question';
+        await sendMessage();
+        expect(bodies[1]).not.toHaveProperty('image_attachment_ids');
+        expect(fetch.mock.calls.some(([url]) => url === '/von/api/files/upload')).toBe(false);
+    });
+
+    test('explicit clipboard image preserves caption and binds to only the next message', async () => {
+        const { __testOnly_uploadFilesToVon, sendMessage } = require(chatTabModulePath);
+        const { initialiseImagePicker } = require('../../src/frontend/web/von_interface/static/js/utils/conversationImages.js');
+        document.body.insertAdjacentHTML('beforeend', '<button id="pasteImageButton">Paste image</button>');
+        const bodies = [];
+        global.fetch = jest.fn(async (url, options = {}) => {
+            if (url === '/von/api/images/upload') return {ok:true, json:async () => ({image_attachment:{concept_id:'#V#clipboard-image', filename:'pasted-image-1.png'}})};
+            if (String(url).startsWith('/von/generate')) {
+                bodies.push(JSON.parse(options.body));
+                return {ok:true, json:async () => ({response:'Image received.', llm_debug:{model:'test-model'}})};
+            }
+            if (String(url).startsWith('/von/history/length')) return {ok:true, json:async () => ({history_length:0, authenticated:true})};
+            if (String(url).startsWith('/von/api/render_markdown')) return {ok:true, json:async () => ({html:JSON.parse(options.body).text || ''})};
+            return {ok:true, json:async () => ({})};
+        });
+        const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+        Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{
+            read:jest.fn(async () => [{types:['text/plain', 'image/png'], getType:async () => new Blob(['image'], {type:'image/png'})}])
+        }});
+        try {
+            let finishUpload;
+            const uploaded = new Promise(resolve => { finishUpload = resolve; });
+            initialiseImagePicker(async files => {
+                await __testOnly_uploadFilesToVon(files);
+                finishUpload();
+            }, jest.fn());
+            const input = document.querySelector('#promptInput');
+            input.value = 'Describe this screenshot\nKeep the caption';
+            document.querySelector('#pasteImageButton').click();
+            await uploaded;
+            expect(input.value).toBe('Describe this screenshot\nKeep the caption');
+            expect(document.querySelector('#conversationImageComposer img')).not.toBeNull();
+            const upload = fetch.mock.calls.find(([url]) => url === '/von/api/images/upload');
+            expect(upload[1].body.get('file').type).toBe('image/png');
+            expect(upload[1].headers['X-Von-Window-Session']).toBe('window-attachment-test');
+            await sendMessage();
+            expect(bodies[0].image_attachment_ids).toEqual(['#V#clipboard-image']);
+            expect(bodies[0]).not.toHaveProperty('workflow_inputs');
+            input.value = 'Next text-only question';
+            await sendMessage();
+            expect(bodies[1]).not.toHaveProperty('image_attachment_ids');
+            expect(fetch.mock.calls.some(([url]) => url === '/von/api/files/upload')).toBe(false);
+        } finally {
+            if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+            else delete navigator.clipboard;
+        }
     });
 
     test('normal upload binds its trusted file-copy id to the next generate request', async () => {
@@ -217,7 +473,7 @@ describe('chat attachment workflow input binding', () => {
         expect(promptInput.value).toBe('Keep this draft exactly as written.');
         expect(document.getElementById('chatAttachmentStatus').classList.contains('hidden')).toBe(false);
         expect(document.getElementById('uploadFileStatus').textContent).toContain(
-            'already in progress'
+            'Uploading: slow-supervision.xlsx'
         );
         expect(document.getElementById('uploadFileButton').disabled).toBe(true);
 

@@ -438,9 +438,11 @@ def authorise_source(config, api, message):
     ):
         raise PermissionError("Inbound message no longer available to this worker")
     projection = api.messages.project_direct_message(current)
-    if projection["content"] != message["content"] or projection.get(
-        "submit_mode", "queue"
-    ) != message.get("submit_mode", "queue"):
+    if (
+        projection["content"] != message["content"]
+        or projection.get("submit_mode", "queue") != message.get("submit_mode", "queue")
+        or projection.get("submit_target") != message.get("submit_target")
+    ):
         raise PermissionError("Inbound message changed during reply")
     allowed, _ = api.messages.authorise_direct_message_participants(
         sender_id=config["agent_id"],
@@ -747,6 +749,13 @@ def tick(config, api, lock_fd):
     directory.mkdir(parents=True, exist_ok=True)
     for path in sorted(directory.glob("*.json")):
         state = json.loads(path.read_text())
+        if state["phase"] == "steering_reserved":
+            try:
+                from .codex_von_steering import recover_delivery
+            except ImportError:
+                from codex_von_steering import recover_delivery
+            recover_delivery(state)
+            write_json(path, state)
         if state["phase"] == "running":
             recover(state)
             write_json(path, state)

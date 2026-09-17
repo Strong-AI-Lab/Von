@@ -417,6 +417,23 @@ instruction does not authorise deployment of newly requested work.
 Several follow-ups queued before a coding run retain all their instructions
 and source-message identities, rather than replacing one another.
 
+The optional `codex_transport: "app-server"` replaces the coding task's `exec`
+child with one controller-owned stdio app-server under the same inherited lock.
+The default remains `exec`. The owner records the exact task/attempt/thread/turn
+in `active_turn`, preserves the configured model, effort and permission profile,
+and checks for explicitly bound steering during existing activity checkpoints.
+Queue messages stay with ordinary inbox processing. Steering is reserved before
+dispatch; an acknowledgement is recorded as accepted, never as model consumption.
+Lost acknowledgements remain uncertain and are not retried or converted to Queue.
+
+This is an unactivated transport implementation, not an enabled public feature.
+The message API still rejects Steer and caller-supplied targets. Canonical active
+target publication/admission, the Mac owner adapter and live consumption evidence
+are outstanding in [PR #692](https://github.com/Strong-AI-Lab/Von/pull/692).
+Do not enable message admission from a configuration flag or simulated receipt.
+The local protocol tests start only deterministic fixture executables; they do
+not establish provider identity, production activation or live consumption.
+
 The reply prompt permits relevant read-only host/repository inspection. Missing
 supplied facts do not establish that inspection is unavailable. Conditional
 coding requests are interpreted after that inspection; the inbox has no

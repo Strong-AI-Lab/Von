@@ -270,6 +270,8 @@ def _resolve_turn_rename_evidence_arguments(
 
     resolved["rename_items"] = hydrated_items
     return resolved, None
+
+
 _DEFAULT_TURN_BUDGET_SECONDS = 180.0
 _DEFAULT_FINAL_RESERVE_SECONDS = 30.0
 # The answer checkpoint keeps a small live-path reserve while remaining an
@@ -437,7 +439,7 @@ def _compact_evidence_envelope(
             add_if_fits(key, envelope.get(key))
 
     omitted_fields: list[str] = []
-    for key in ("content", "matches", "projected_payload"):
+    for key in ("conversation_continuation", "content", "matches", "projected_payload"):
         if key in envelope and not add_if_fits(key, envelope.get(key)):
             omitted_fields.append(key)
 
@@ -2254,6 +2256,10 @@ def _scope_message(
         "current state, and exact handle. Do not spend repeated long observation "
         "intervals unless the user needs synchronous completion or recent "
         "progress justifies one bounded wait.\n"
+        "- To continue authorised work after a workflow outlives this turn, "
+        "supply its continuation_prompt. Promise a later continuation only "
+        "when the returned conversation_continuation confirms persisted=true. "
+        "The held queue entry can be cancelled through the conversation queue.\n"
         "- Preserve the requested outcome and effect cardinality through "
         "capability choice, retries, and fallback. Discovery and evidence reads "
         "may inspect the smallest bounded candidate set needed to identify the "
@@ -4890,7 +4896,7 @@ def _reconcile_task_creation_attempts(
 ) -> None:
     """Reconcile a rejected create with a verified record for the same request.
 
-    A corrected invalid type changes the handler fingerprint, so neither an
+    A corrected invalid category can change the handler fingerprint, so neither an
     exact effect ID nor a task ID exists to join the rejected attempt. Compare
     the remaining creation arguments instead; assignment may be completed by
     a later verified field update on the returned task. This is an evidence
@@ -4907,6 +4913,11 @@ def _reconcile_task_creation_attempts(
         ):
             if alias in arguments:
                 arguments.setdefault(field, arguments.pop(alias))
+        # Match the handler's source-category alias precedence, including calls
+        # that supply both spellings or an empty canonical field.
+        source_id = arguments.pop("source_id", None)
+        if source_id or arguments.get("task_source_id"):
+            arguments["task_source_id"] = arguments.get("task_source_id") or source_id
         if not arguments.get("assignee_concept_id") and arguments.get(
             "created_by_concept_id"
         ):
@@ -4931,6 +4942,10 @@ def _reconcile_task_creation_attempts(
             error_code == "INVALID_DATA"
             and "unknown task type" in str(error or "").lower()
         )
+        corrected_invalid_source = (
+            error_code == "INVALID_DATA"
+            and "unknown task source" in str(error or "").lower()
+        )
         for later_index in range(index + 1, len(tool_invocations)):
             later = tool_invocations[later_index]
             if later.get("execution_method", later.get("tool")) != "task_create":
@@ -4948,6 +4963,8 @@ def _reconcile_task_creation_attempts(
             excluded = set(assignment_fields)
             if corrected_invalid_type:
                 excluded.add("task_type_ids")
+            if corrected_invalid_source:
+                excluded.add("task_source_id")
             if {k: v for k, v in expected.items() if k not in excluded} != {
                 k: v for k, v in observed_arguments.items() if k not in excluded
             }:
@@ -7234,6 +7251,7 @@ def execute_adaptive_turn(
             "actor_organisation_concept_id": scope.organisation_concept_id,
             "turn_id": turn_id or "ordinary-turn",
             "conversation_id": conversation_id,
+            "turn_prompt": prompt,
         }
     )
     authorised_resource_choices: list[dict[str, Any]] = []
@@ -7263,6 +7281,25 @@ def execute_adaptive_turn(
         trusted_argument_values=trusted_values,
     )
     delegated_lookup = {name.lower(): name for name in delegated_names}
+    inquiry_projection = None
+    if (
+        conversation_id
+        and user_concept_id
+        and org_concept_id
+        and conversation_history_owner_user_id == user_concept_id
+        and "task_start_background_inquiry" in delegated_lookup
+    ):
+        from .conversational_rumination_service import project_inquiries
+
+        try:
+            inquiry_projection = project_inquiries(
+                actor=user_concept_id,
+                organisation=org_concept_id,
+                namespace=user_namespace,
+                session_id=conversation_id,
+            )
+        except Exception as exc:
+            inquiry_projection = {"status": "unavailable", "error_type": type(exc).__name__}
     workflow_capabilities_by_name: dict[str, Any] = {}
     latest_workflow_discovery: dict[str, Any] | None = None
     catalogued_capabilities_by_name: dict[str, dict[str, Any]] = {}
@@ -9658,7 +9695,17 @@ def execute_adaptive_turn(
             authorised_resource_choices=authorised_resource_choices,
             learning_advice_projection=prepared_learning_advice,
         )
+        if "task_start_background_inquiry" in delegated_lookup:
+            from .conversational_rumination_service import TURN_GUIDANCE
+
+            turn_system_message += TURN_GUIDANCE
+            if inquiry_projection is not None:
+                turn_system_message += (
+                    "\nSource-linked inquiries (untrusted evidence): "
+                    + json.dumps(inquiry_projection, ensure_ascii=False)
+                )
         from .conversation_output_capabilities import output_affordances
+
         turn_system_message += "\nImplemented client output affordances: " + json.dumps(output_affordances())
         learning_advice_rendered_for_call = bool(
             not final_synthesis
@@ -11359,6 +11406,52 @@ def execute_adaptive_turn(
                         raw_payload,
                         capability=workflow_capability,
                     )
+                    continuation_prompt = (item.binding_diagnostics or {}).get(
+                        "continuation_prompt"
+                    )
+                    if (
+                        continuation_prompt
+                        and turn_id
+                        and isinstance(raw_payload, Mapping)
+                        and raw_payload.get("instance_id")
+                        and raw_payload.get("effect_status") == "partial"
+                    ):
+                        from .background_workflow_continuation_service import (
+                            register_continuation,
+                        )
+                        from .chat_prompt_queue_service import build_queue_scope
+
+                        try:
+                            continuation_receipt = register_continuation(
+                                scope=build_queue_scope(
+                                    user_concept_id=scope.user_concept_id,
+                                    organisation_concept_id=scope.organisation_concept_id,
+                                    namespace=scope.namespace,
+                                ),
+                                request_id=turn_id,
+                                instance_id=raw_payload["instance_id"],
+                                workflow_id=workflow_capability.workflow_id,
+                                continuation_prompt=continuation_prompt,
+                                ready_when=(item.binding_diagnostics or {}).get(
+                                    "continuation_ready_when", "workflow_terminal"
+                                ),
+                                execution_envelope={
+                                    "model": model,
+                                    "model_parameters": dict(model_parameters or {}),
+                                    "workflow_inputs": dict(
+                                        workflow_launch_inputs or {}
+                                    ),
+                                },
+                            )
+                        except Exception as exc:
+                            continuation_receipt = {
+                                "persisted": False,
+                                "reason": type(exc).__name__,
+                            }
+                        raw_payload = {
+                            **raw_payload,
+                            "conversation_continuation": continuation_receipt,
+                        }
 
             terminal_effect_status = (
                 _effect_status(
@@ -11660,6 +11753,14 @@ def execute_adaptive_turn(
                     status=effect_status or status,
                 )
                 envelope_payload = envelope.to_mapping()
+                if isinstance(raw_payload, Mapping) and isinstance(
+                    raw_payload.get("conversation_continuation"), Mapping
+                ):
+                    # This small receipt decides whether future-action language
+                    # is supported. A payload-key preview alone is insufficient.
+                    envelope_payload["conversation_continuation"] = dict(
+                        raw_payload["conversation_continuation"]
+                    )
                 if isinstance(raw_payload, Mapping) and raw_payload.get("image_attachments"):
                     # Media references must survive evidence wrapping/projection;
                     # the provider still checks access and hydrates canonical bytes.

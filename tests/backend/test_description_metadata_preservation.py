@@ -28,6 +28,12 @@ def test_update_concept_description_preserves_existing_structured_metadata(monke
     captured = {}
 
     monkeypatch.setattr(
+        text_value_service.TextValuesRepository,
+        "find_one_by_fingerprint",
+        lambda *args, **kwargs: None,
+    )
+
+    monkeypatch.setattr(
         concept_service.ConceptsRepository,
         "find_one",
         lambda *args, **kwargs: {"_id": ObjectId()},

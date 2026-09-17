@@ -58,6 +58,37 @@ receipts can be fetched again from the server.
 
 ## State and persistence
 
+### Background workflow continuation
+
+Ordinary represented-workflow calls may supply `continuation_prompt` to describe
+remaining authorised work. If the workflow is still pending, the adapter
+registers one held successor in the existing prompt queue before returning a
+`conversation_continuation.persisted` receipt. That receipt, including a failed
+registration, survives the model's evidence projection. A workflow terminal
+observation alone does not promise another turn.
+
+The dispatcher polls persisted dependencies after the original turn completes,
+reads its recorded effects, and releases the same successor once. Normal queue
+cancellation, reservation fencing, organisation membership and conversation
+authorisation still apply. Failed source turns are not automatically replayed.
+TaskExecution-backed work retains the separate task continuation path.
+
+`continuation_ready_when` defaults to `workflow_terminal`. A consumer that only
+needs extracted file content can select `source_text_available`; canonical
+`hasContent` or the bounded byte projection then permits continuation while
+indexing remains pending, including interpretations that do not persist text.
+Cached attachment text uses the same owner/archive binding checks as bytes.
+Workflow launches also project explicit file-copy inputs into source data for consumers
+that read `prompt`/`user_prompt`. Existing extracted text is preferred; otherwise
+the bounded, effect-free byte reader is used. Source references, truncation and
+scoped failures are retained, and document text is not instruction authority.
+
+Local queue/adapter fixtures cover these paths. They do not establish live
+activation, stochastic event representation, or recovery of a historical turn
+that never registered a continuation. Historical recovery requires current
+actor-scoped conversation, workflow and event read-back before a controller
+submits any remaining work.
+
 `/von/api/chat_prompt_queue/<queue_id>/steering` supports POST, GET and DELETE.
 It reuses the queue's authenticated actor/organisation scope. A POST also names
 the exact admitted attempt and a client-generated idempotency ID. Body identity

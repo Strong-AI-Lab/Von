@@ -187,15 +187,29 @@ def require_task_execution_preferences(task):
 
 
 def authorised_task(task, config):
-    return (
-        task.get("assignee_concept_id") == config["agent_id"]
+    if (
+        task.get("assignee_concept_id") != config["agent_id"]
+        or task.get("organisation_concept_id") not in (None, config["organisation_id"])
+    ):
+        return False
+    if not config.get("supervision_enabled") and task.get(
+        "report_to_concept_id"
+    ) not in (None, config["delegator_id"]):
+        return False
+    from src.backend.services.task_dispatch_authority_service import (
+        has_assignment_record,
+        is_authorised_assignment,
+    )
+    if (
+        not task.get("federation")
         and task.get("organisation_concept_id") == config["organisation_id"]
         and task.get("created_by_concept_id") == config["delegator_id"]
-        and (
-            config.get("supervision_enabled")
-            or task.get("report_to_concept_id") in (None, config["delegator_id"])
-        )
-    )
+        and not has_assignment_record(task["task_concept_id"])
+    ):
+        return True
+    if not task.get("dispatch_requested"):
+        return False
+    return is_authorised_assignment(task, config["delegator_id"])
 
 
 def referenced_tasks(config, api, supplied, task_ids=()):
@@ -435,8 +449,8 @@ def check_task(config, api, task_id):
     while True:
         page = api.tasks.search_tasks(
             assignee_concept_id=config["agent_id"],
-            created_by_concept_id=config["delegator_id"],
             organisation_concept_id=config["organisation_id"],
+            organisation_scope_mode="current_plus_unscoped",
             statuses=[task["status"]],
             limit=200,
             offset=offset,
@@ -504,10 +518,18 @@ class Von:
     def native_writer(self, task):
         project_id = task.get("project_concept_id")
         if project_id:
-            from src.backend.services.task_project_service import get_task_project
+            from src.backend.services.task_project_service import task_execution_home
 
-            project = get_task_project(project_id)
-            return bool(project and project.get("writer") == "von")
+            project = task_execution_home(task["task_concept_id"])
+            home = project.get("write_home") if project else None
+            return bool(
+                project
+                and project.get("writer") == "von"
+                and (
+                    home is None
+                    or home.get("writable_here") is True
+                )
+            )
         return not task.get("is_imported_jira_task", False)
 
     def pending(self):
@@ -515,8 +537,8 @@ class Von:
         while True:
             page = self.tasks.search_tasks(
                 assignee_concept_id=self.config["agent_id"],
-                created_by_concept_id=self.config["delegator_id"],
                 organisation_concept_id=self.config["organisation_id"],
+                organisation_scope_mode="current_plus_unscoped",
                 statuses=sorted(ACTIVE),
                 limit=200,
                 offset=offset,
@@ -1003,6 +1025,8 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         "capture_provenance",
         "archive_pending_reported",
         "finished_at",
+        "active_turn",
+        "steering_poll_error",
     ):
         state.pop(key, None)
     state.pop("result", None)
@@ -1084,6 +1108,14 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
     environment = {
         k: os.environ[k] for k in ("HOME", "PATH", "LANG", "TERM") if k in os.environ
     }
+    transport = config.get("codex_transport", "exec")
+    if transport not in {"exec", "app-server"}:
+        raise ValueError("Unsupported Codex transport")
+    if transport == "app-server":
+        launch_app_server(
+            config, api, state, state_path, settings, prompt, environment, lock_fd
+        )
+        return
     args = [
         config["codex_command"],
         "exec",
@@ -1140,6 +1172,71 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
     )
     recover_result(state)
     write_json(state_path, state)
+
+
+def launch_app_server(
+    config, api, state, state_path, settings, prompt, environment, lock_fd
+):
+    """Opt-in owner transport; the normal exec route remains unchanged.
+
+    Public message admission is a separate capability and remains unavailable.
+    The controller alone may publish an exact target and admit canonical inputs.
+    """
+    try:
+        from .codex_von_app_server import run_turn
+        from .codex_von_steering import ActiveInbox
+    except ImportError:
+        from codex_von_app_server import run_turn
+        from codex_von_steering import ActiveInbox
+
+    run_dir = Path(state["run_dir"])
+    save = lambda: write_json(state_path, state)
+    inputs = ActiveInbox(config, api, state, save)
+
+    def checkpoint():
+        archive_checkpoint(config, state)
+        save()
+
+    returncode = 1
+    with (
+        (run_dir / "events.jsonl").open("a") as events,
+        (run_dir / "stderr.log").open("w") as errors,
+    ):
+        try:
+            result = run_turn(
+                command=config["codex_command"],
+                cwd=state["worktree"],
+                model=settings["model"],
+                effort=settings["reasoning_effort"],
+                prompt=prompt,
+                schema=RESULT_SCHEMA,
+                environment=environment,
+                lock_fd=lock_fd,
+                events=events,
+                errors=errors,
+                permission_profile=config.get("permission_profile"),
+                checkpoint=checkpoint,
+                on_active=inputs.active,
+                steering=inputs.pending,
+                on_delivery=inputs.delivered,
+                interval=ACTIVITY_CHECKPOINT_SECONDS,
+            )
+            (run_dir / "result.json").write_text(result)
+            returncode = 0
+        except Exception as exc:
+            # Keep the outcome recoverable without copying backend/transport
+            # exception strings, which can include private connection details.
+            write_json(
+                run_dir / "launch-error.json",
+                {"error_type": type(exc).__name__, "transport": "app-server"},
+            )
+    state["finished_at"] = datetime.now(UTC).isoformat()
+    write_json(
+        run_dir / "exit.json",
+        {"returncode": returncode, "finished_at": state["finished_at"]},
+    )
+    recover_result(state)
+    save()
 
 
 def recover_result(state):

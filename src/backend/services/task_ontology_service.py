@@ -511,7 +511,14 @@ def normalise_task_source_id(
 
     resolved = _TASK_SOURCE_BY_SLUG.get(cleaned.lower()) or cleaned
     if resolved not in _TASK_SOURCE_IDS:
-        raise ValueError(f"Unknown task source: {cleaned}")
+        raise ValueError(
+            f"Unknown task source: {cleaned}. task_source_id (alias source_id) "
+            "must identify a registered source category: "
+            + ", ".join(item["slug"] for item in TASK_SOURCE_DEFINITIONS)
+            + ". It is not an external message ID or URL. For a task created "
+            "from a message, omit the source category to use von_native and "
+            "retain the external reference in notes or reference_code."
+        )
     return resolved
 
 

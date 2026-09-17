@@ -55,7 +55,8 @@ async function mount(page) {
             await mount(page);
             const input = page.locator('#messageInput');
             const button = page.locator('#sendMessageBtn');
-            const menu = page.locator('#messageComposeArea .message-submit-actions');
+            const menu = page.locator('#messageComposeArea .chat-composer-more-actions');
+            const mode = menu.locator('.message-submit-options select');
             await input.fill('Keep my multiline\ndraft unchanged.');
             await expect(button).toHaveAttribute('data-submit-mode', 'queue');
             const bounds = await button.boundingBox();
@@ -65,12 +66,13 @@ async function mount(page) {
             assert.equal(submitted.length, 0);
             await expect(input).toHaveValue('Keep my multiline\ndraft unchanged.');
             await menu.locator('summary')[touch ? 'tap' : 'click']();
-            await menu.locator('select').selectOption('steer');
+            await mode.selectOption('steer');
             await expect(button).toHaveAccessibleName(/Steering unavailable/);
-            const panelBounds = await menu.locator('.conversation-actions-panel').boundingBox();
+            const panelBounds = await menu.locator('.composer-options-panel').boundingBox();
             assert(panelBounds.x >= 0 && panelBounds.x + panelBounds.width <= width);
+            await mode.scrollIntoViewIfNeeded();
             await page.screenshot({ path: path.join(evidence, `options-${width}.png`) });
-            await menu.locator('select').focus(); await page.keyboard.press('Escape');
+            await mode.focus(); await page.keyboard.press('Escape');
             await expect(menu.locator('summary')).toBeFocused();
             await button[touch ? 'tap' : 'click']();
             assert.equal(submitted.length, 0);

@@ -6,6 +6,11 @@ import pytest
 from src.backend.services import task_project_service as projects
 
 
+@pytest.fixture(autouse=True)
+def no_registered_homes(monkeypatch):
+    monkeypatch.setattr(projects, "project_home_summaries", lambda ids: {})
+
+
 def test_project_catalogue_does_not_grow_with_retained_source_history(monkeypatch):
     record = {
         "name": "Research project",
@@ -151,3 +156,32 @@ def test_private_view_does_not_break_shared_project_navigation(monkeypatch):
     assert projects.list_project_collections(
         {"collection_concept_ids": ["#V#private", "#V#shared"]}
     ) == [{"concept_id": "#V#shared"}]
+
+
+def test_assigned_task_home_projection_does_not_expose_private_project(monkeypatch):
+    import mongomock
+
+    database = mongomock.MongoClient().test
+    database.concepts.insert_one(
+        {
+            "concept_id": "#V#private_project",
+            "attributes": {
+                "task_project": {"writer": "von", "description": "Private project body"}
+            },
+        }
+    )
+    monkeypatch.setattr(
+        projects.ConceptsRepository, "collection", lambda: database.concepts
+    )
+    monkeypatch.setattr(
+        projects.ConceptsRepository,
+        "find_one",
+        lambda *a, **k: {"metadata": {"project_concept_id": "#V#private_project"}},
+    )
+    assert projects.task_execution_home("#V#assigned_task") == {
+        "writer": "von",
+        "write_home": None,
+    }
+    monkeypatch.setattr(projects.ConceptsRepository, "find_one", lambda *a, **k: None)
+    with pytest.raises(ValueError, match="not accessible"):
+        projects.task_execution_home("#V#unshared_task")

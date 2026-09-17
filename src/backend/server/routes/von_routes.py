@@ -6008,6 +6008,49 @@ def _load_authorised_file_copy_concept_doc(
 
 @von_bp.route("/api/files/<path:file_copy_concept_id>/download", methods=["GET"])
 def download_file_copy(file_copy_concept_id: str):
+    return _serve_file_copy(file_copy_concept_id)
+
+
+@von_bp.route("/api/files/<path:file_copy_concept_id>/preview", methods=["GET"])
+def preview_file_copy(file_copy_concept_id: str):
+    """Render a file through the same actor-authorised read as download."""
+    response = make_response(_serve_file_copy(file_copy_concept_id, preview=True))
+    if response.is_json:
+        error = (response.get_json() or {}).get("error")
+        messages = {
+            "missing_user_context": "Sign in to Von, then reload this preview.",
+            "unsupported_preview": "Preview is currently available for Markdown files only. Download this file to open it.",
+            "invalid_text_encoding": "This file is not UTF-8 Markdown. Download it to open it.",
+            "file_too_large": "This file is too large to preview. Download it to open it.",
+        }
+        response.set_data(
+            render_template(
+                "file_preview.html",
+                title="File preview",
+                body=None,
+                error=messages.get(
+                    error, "This file is unavailable or you do not have access."
+                ),
+                download_url=url_for(
+                    "von.download_file_copy", file_copy_concept_id=file_copy_concept_id
+                ),
+            )
+        )
+        response.content_type = "text/html; charset=utf-8"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    # Files are untrusted documents, never application code. No scripts,
+    # embedded resources or forms; ordinary links and downloads still work.
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'self'; "
+        "base-uri 'none'; form-action 'none'; "
+        "sandbox allow-popups allow-popups-to-escape-sandbox allow-downloads"
+    )
+    return response
+
+
+def _serve_file_copy(file_copy_concept_id: str, *, preview: bool = False):
     """Download an uploaded file-copy by its Vontology concept id.
 
     Security: user identity is derived server-side via get_effective_user_concept_id().
@@ -6033,7 +6076,11 @@ def download_file_copy(file_copy_concept_id: str):
         )
 
     # Allow query-parameter override so callers don't need to place the full id in the path.
-    concept_id = request.args.get("concept_id") or file_copy_concept_id
+    concept_id = (
+        file_copy_concept_id
+        if preview
+        else (request.args.get("concept_id") or file_copy_concept_id)
+    )
     concept_id = unquote(str(concept_id or ""))
     concept_id = str(concept_id or "").strip()
     if not concept_id:
@@ -6053,7 +6100,8 @@ def download_file_copy(file_copy_concept_id: str):
     result = fetch_file_copy_bytes(
         file_copy_concept_id=concept_id,
         user_concept_id=user_concept_id,
-        allow_large=True,
+        allow_large=not preview,
+        max_bytes=2 * 1024 * 1024 if preview else None,
         logger=current_app.logger,
     )
     if not isinstance(result, dict) or result.get("success") is not True:
@@ -6084,6 +6132,28 @@ def download_file_copy(file_copy_concept_id: str):
     mimetype = "application/octet-stream"
     if info is not None and getattr(info, "content_type", None):
         mimetype = str(info.content_type)
+    if preview:
+        if not (
+            download_name.lower().endswith((".md", ".markdown", ".mdown"))
+            or mimetype.split(";", 1)[0].strip().lower()
+            in {"text/markdown", "text/x-markdown"}
+        ):
+            return jsonify({"error": "unsupported_preview"}), 415
+        try:
+            text = data_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return jsonify({"error": "invalid_text_encoding"}), 415
+        from ...services.markdown_render_service import render_markdown_to_safe_html
+
+        return render_template(
+            "file_preview.html",
+            title=download_name,
+            body=render_markdown_to_safe_html(text),
+            error=None,
+            download_url=url_for(
+                "von.download_file_copy", file_copy_concept_id=concept_id
+            ),
+        )
     resp = send_file(
         io.BytesIO(data_bytes),
         mimetype=mimetype,
@@ -11713,6 +11783,15 @@ def submit_server_dispatched_chat_prompt(
                 error="organisation membership was revoked before dispatch",
             )
         role_in_org = _normalise_non_empty_text(membership.get("role")) or "member"
+
+    from ...services.background_workflow_continuation_service import (
+        validate_continuation_dispatch,
+    )
+
+    try:
+        validate_continuation_dispatch(record)
+    except ValueError as exc:
+        return ChatPromptDispatchOutcome(accepted=False, error=str(exc))
 
     raw_envelope = record.get("execution_envelope")
     if not isinstance(raw_envelope, Mapping):
@@ -17862,6 +17941,7 @@ def history_sessions():
         or request.args.get("agent_created_visibility")
         or chat_history_service.CHAT_SESSION_AGENT_VISIBILITY_INCLUDE
     )
+    include_imported = request.args.get("include_imported", "false").lower() == "true"
     keep_newest_agent_created = request.args.get("keep_newest_agent_created")
     recent_window_days = request.args.get("recent_window_days", type=int)
     if recent_window_days is not None:
@@ -17911,6 +17991,7 @@ def history_sessions():
             limit=limit,
             namespace=namespace,
             include_legacy=include_legacy,
+            include_imported=include_imported,
             summary_mode=summary_mode,
             agent_visibility=agent_visibility,
             keep_newest_agent_created=keep_newest_agent_created,
@@ -17925,6 +18006,7 @@ def history_sessions():
                         cutoff=cutoff,
                         namespace=namespace,
                         include_legacy=include_legacy,
+                        include_imported=include_imported,
                         agent_visibility=agent_visibility,
                     )
                 )
@@ -18143,6 +18225,7 @@ def history_sessions():
             session_row
             for session_row in (sessions + shared_sessions)
             if isinstance(session_row, dict)
+            and (include_imported or session_row.get("origin_kind") != "external_conversation_import")
         ]
         try:
             combined = conversation_management_service.apply_conversation_preferences(
@@ -19847,6 +19930,117 @@ def continue_external_conversation_route():
         )
 
 
+@von_bp.route("/api/session/conversation_reference", methods=["POST"])
+def conversation_reference_route():
+    """Lazily copy or dereference a source identity under the browser actor."""
+    from ...integrations.internal_mcp.catalogue import (
+        _conversation_transcript_page_source,
+        _resolve_chat_history_read_target,
+    )
+    from ...security.access_control import override_current_actor
+    from ...services.conversation_concept_service import (
+        get_or_create_conversation_concept,
+    )
+    from ...services.conversation_reference_service import build_turn_reference
+
+    actor = session.get("user_concept_id")
+    if not actor:
+        return jsonify({"error": "Not authenticated"}), 401
+    data = request.get_json(silent=True) or {}
+    effective = get_effective_context(
+        request.headers.get("X-Von-Window-Session"),
+        dict(session),
+        actor,
+    )
+    scope = {
+        "acting_user_concept_id": actor,
+        "namespace": effective.get("namespace"),
+        "organisation_concept_id": effective.get("organisation_id"),
+    }
+    with override_current_actor(actor, effective.get("organisation_id")):
+        if data.get("conversation_ref"):
+            result = _conversation_transcript_page_source(
+                **scope,
+                conversation_ref=data["conversation_ref"],
+                page_size=12,
+                cursor=data.get("cursor"),
+            )
+        else:
+            access = _resolve_chat_history_read_target(
+                {**scope, "session_id": data.get("session_id")}
+            )
+            if not access.get("success"):
+                return jsonify({"error": "Conversation unavailable"}), 404
+            source = access["session_id"]
+            from ...services.conversation_concept_service import (
+                get_source_conversation_identity_for_authorisation,
+            )
+
+            # The accepted participant can reference an authorised source while
+            # its derived concept remains private to the source owner. Never
+            # copy a title or widen memberships to make that reference work.
+            concept_id = get_source_conversation_identity_for_authorisation(source)
+            if not concept_id:
+                try:
+                    concept_id = get_or_create_conversation_concept(
+                        source,
+                        owner_concept_id=access["read_user_id"],
+                        namespace=access.get("read_namespace"),
+                        organisation_concept_id=effective.get("organisation_id"),
+                    )
+                except Exception:
+                    # A concurrent participant may have created the same private
+                    # identity, which the current concept visibility cannot read.
+                    concept_id = get_source_conversation_identity_for_authorisation(
+                        source
+                    )
+                    if not concept_id:
+                        return (
+                            jsonify(
+                                {
+                                    "error": "Conversation identity temporarily unavailable"
+                                }
+                            ),
+                            503,
+                        )
+            turn_id = data.get("turn_id")
+            if turn_id is not None:
+                try:
+                    concept_id = build_turn_reference(concept_id, turn_id)
+                except ValueError:
+                    return jsonify({"error": "Stored turn ID required"}), 400
+            result = _conversation_transcript_page_source(
+                **scope, conversation_ref=concept_id, page_size=12
+            )
+        if not result.get("success"):
+            return jsonify({"error": "Conversation or turn unavailable"}), 404
+        if data.get("metadata_only") is True:
+            from ...services.conversation_management_service import (
+                apply_conversation_preferences,
+            )
+
+            canonical_name = result.get("session_name")
+            result = apply_conversation_preferences(
+                actor_user_id=actor, conversations=[result]
+            )[0]
+            result["canonical_session_name"] = canonical_name
+            result.setdefault("session_name_source", "chat_history")
+            result = {
+                key: result.get(key)
+                for key in (
+                    "success",
+                    "concept_reference",
+                    "session_id",
+                    "session_name",
+                    "canonical_session_name",
+                    "session_name_source",
+                    "turn_id",
+                    "open_action",
+                )
+            }
+        return jsonify(result), 200
+
+
 @von_bp.route("/api/session/create_chat_session", methods=["POST"])
 def create_chat_session():
     """Create and switch to a new chat session for the current user."""
@@ -20181,6 +20375,7 @@ def search_conversations():
             sort=request.args.get("sort", "relevance"),
             page_size=request.args.get("page_size", default=20, type=int),
             cursor=request.args.get("cursor"),
+            include_imported=request.args.get("include_imported", "false").lower() == "true",
             include_hidden=request.args.get("include_hidden", "false").lower()
             == "true",
             trashed_only=request.args.get("trashed_only", "false").lower() == "true",

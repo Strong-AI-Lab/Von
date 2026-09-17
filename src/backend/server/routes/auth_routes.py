@@ -77,6 +77,9 @@ def _clear_scope_if_authenticated_identity_changes(
         session.get(key) is not None for key in _ACTOR_SCOPE_SESSION_KEYS
     )
     if (had_previous_identity and not same_actor) or has_stale_scope_without_identity:
+        from .web_push_routes import revoke_browser_notifications
+
+        revoke_browser_notifications()
         for key in _ACTOR_SCOPE_SESSION_KEYS:
             session.pop(key, None)
 
@@ -630,6 +633,12 @@ def browser_test_login():
 @auth_bp.route("/api/auth/logout", methods=["POST"])
 def logout():
     """Log out the current user by clearing their session."""
+    from .web_push_routes import revoke_browser_notifications
+
+    try:
+        revoke_browser_notifications()
+    except Exception:
+        return jsonify(error="Notification opt-out unavailable; retry logout"), 503
     cloudflare_logout = session.get("auth_provider") == "cloudflare_access"
     user_email = session.get("user_email")
     user_id = (

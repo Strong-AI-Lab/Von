@@ -922,6 +922,7 @@ def test_service_rejects_steer_before_storage_or_workflow(idempotent):
 def test_projection_preserves_recorded_mode_and_actor_scope(mode):
     from src.backend.services.message_service import project_direct_message
 
+    target = {"task_id": "#V#task", "attempt": "original-attempt", "thread_id": "original-thread", "turn_id": "original-turn"}
     row = project_direct_message(
         {
             "concept_id": "#V#message",
@@ -930,12 +931,13 @@ def test_projection_preserves_recorded_mode_and_actor_scope(mode):
                 PREDICATE_RECIPIENT: ["#V#worker"],
             },
             "concept_data": {
-                "metadata": {"submit_mode": mode},
+                "metadata": {"submit_mode": mode, "submit_target": target},
                 "organisation_concept_id": "#V#lab",
             },
         }
     )
     assert row["submit_mode"] == mode
+    assert row["submit_target"] == target
     assert row["sender_id"] == "#V#alice"
     assert row["recipient_ids"] == ["#V#worker"]
     assert row["organisation_concept_id"] == "#V#lab"

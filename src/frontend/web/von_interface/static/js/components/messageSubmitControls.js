@@ -2,14 +2,21 @@ import { getSubmitMode, setSubmitMode, selectedSubmitMode, presentSubmitMode, su
 
 // This route currently has no verified live-turn transport. Never relabel queue
 // acceptance as steering; retain the draft so the sender can choose separate work.
-export function createMessageSubmitControls({ button, getActor, onSubmit, onUnavailable }) {
+export function createMessageSubmitControls({ button, optionsPanel, getActor, onSubmit, onUnavailable }) {
     button.innerHTML = submitArrowMarkup;
-    const menu = document.createElement('details');
-    menu.className = 'message-submit-actions conversation-actions';
-    const summary = document.createElement('summary');
-    summary.textContent = 'Submit options';
-    const panel = document.createElement('div');
-    panel.className = 'conversation-actions-panel';
+    const menu = optionsPanel?.closest('details') || document.createElement('details');
+    const optionsName = optionsPanel ? 'More actions' : 'Submit options';
+    const summary = menu.querySelector('summary') || document.createElement('summary');
+    const panel = document.createElement(optionsPanel ? 'section' : 'div');
+    panel.className = optionsPanel ? 'composer-options-section message-submit-options' : 'conversation-actions-panel';
+    if (!optionsPanel) {
+        menu.className = 'message-submit-actions conversation-actions';
+        summary.textContent = 'Submit options';
+        menu.append(summary, panel);
+        button.parentElement.after(menu);
+    } else {
+        optionsPanel.append(panel);
+    }
     const label = document.createElement('label');
     label.textContent = 'Default action (shared with chat in this browser): ';
     const select = document.createElement('select');
@@ -31,8 +38,6 @@ export function createMessageSubmitControls({ button, getActor, onSubmit, onUnav
         actions.push(action);
     }
     panel.prepend(label, help);
-    menu.append(summary, panel);
-    button.parentElement.after(menu);
     const status = document.createElement('span');
     status.className = 'sr-only';
     status.setAttribute('role', 'status');
@@ -48,7 +53,7 @@ export function createMessageSubmitControls({ button, getActor, onSubmit, onUnav
         const description = mode === 'steer' ? 'Steering unavailable; draft will be retained' : 'Submit separate message';
         presentSubmitMode(button, mode, {
             label: pending ? 'Submitting message' : description,
-            help: `${description}. Shift-click for the opposite action once. Submit options contains both actions and the shared default.`,
+            help: `${description}. Shift-click for the opposite action once. ${optionsName} contains both actions and the shared default.`,
             pending
         });
     }
@@ -56,7 +61,7 @@ export function createMessageSubmitControls({ button, getActor, onSubmit, onUnav
         if (pending || button.disabled) return;
         const mode = explicitMode || selectedSubmitMode(getActor(), event);
         if (mode === 'steer') {
-            status.textContent = 'Active steering is unavailable on this route. Draft and attachments retained; choose Queue this message in Submit options for separate work.';
+            status.textContent = `Active steering is unavailable on this route. Draft and attachments retained; choose Queue this message in ${optionsName} for separate work.`;
             onUnavailable(status.textContent);
             return;
         }
@@ -65,10 +70,16 @@ export function createMessageSubmitControls({ button, getActor, onSubmit, onUnav
         button.focus();
         onSubmit();
     }
-    menu.addEventListener('keydown', event => {
+    const onKeyDown = event => {
         if (event.key === 'Escape') { event.preventDefault(); menu.open = false; summary.focus(); }
-    });
+    };
+    menu.addEventListener('keydown', onKeyDown);
     const unsubscribe = subscribeSubmitMode(() => update());
     update();
-    return { activate, update, dispose() { unsubscribe(); menu.remove(); status.remove(); } };
+    return { activate, update, dispose() {
+        unsubscribe();
+        menu.removeEventListener('keydown', onKeyDown);
+        if (optionsPanel) panel.remove(); else menu.remove();
+        status.remove();
+    } };
 }

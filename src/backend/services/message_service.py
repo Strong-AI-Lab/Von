@@ -392,6 +392,7 @@ def project_direct_message(message_doc: Dict[str, Any]) -> Dict[str, Any]:
         # Unknown/unsupported recorded modes must reach controllers unchanged;
         # dropping them would turn old steering intents into new queued work.
         "submit_mode": metadata.get("submit_mode", "queue"),
+        "submit_target": metadata.get("submit_target"),
     }
 
 

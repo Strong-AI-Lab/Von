@@ -19,9 +19,11 @@ from urllib.parse import urlparse
 try:
     from . import deploy_local_main as runtime
     from . import codex_von_release as releases
+    from . import codex_von_maintenance as maintenance
 except ImportError:
     import deploy_local_main as runtime
     import codex_von_release as releases
+    import codex_von_maintenance as maintenance
 
 
 @contextmanager
@@ -170,6 +172,7 @@ def execute(config, commit, receipt_path, *, recover_only=False):
                 # immutable checkout cannot affect the loaded controller/backend.
                 receipt["previous_worker_release"] = str(previous_worker)
                 releases.prepare(primary, config["worker_release_root"], commit)
+            maintenance.record_publication(config, receipt, "planned")
             save(receipt_path, receipt)
             try:
                 runtime.deploy(
@@ -182,6 +185,7 @@ def execute(config, commit, receipt_path, *, recover_only=False):
                 verification = verify(config, commit)
                 select_worker(config, receipt)
                 receipt.update(status="deployed", verification=verification)
+                maintenance.record_publication(config, receipt, "ready")
                 save(receipt_path, receipt)
                 return receipt
             except (runtime.DeploymentError, OSError, ValueError, KeyError) as exc:
@@ -201,6 +205,7 @@ def execute(config, commit, receipt_path, *, recover_only=False):
                         )
                 select_worker(config, receipt)
                 receipt.update(status="deployed", verification=verification)
+                maintenance.record_publication(config, receipt, "ready")
                 save(receipt_path, receipt)
                 return receipt
         except (runtime.DeploymentError, OSError, ValueError, KeyError) as exc:
@@ -223,6 +228,9 @@ def execute(config, commit, receipt_path, *, recover_only=False):
             )
         if receipt.get("worker_recovery_failure_type"):
             receipt["status"] = "recovery_failed"
+        maintenance.record_publication(
+            config, receipt, "ready" if receipt["status"] == "rolled_back" else "failed"
+        )
         save(receipt_path, receipt)
         return receipt
 

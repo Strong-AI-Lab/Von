@@ -1,3 +1,4 @@
+import { isConversationConceptReference, conversationReferenceMetadata } from './conversationReference.js';
 import { getPreferredLanguage, selectBestNameForContext, selectShortestNameForContext } from './nameSelection.js';
 import { applyCartoucheAppearance, getCartoucheAppearanceSettings } from './textDecorator.js';
 import { showToast } from './toast.js';
@@ -414,6 +415,7 @@ async function fetchConceptMetadata(conceptId, fetchFn) {
     const id = normaliseVontologyId(conceptId);
     if (!id) return null;
 
+    if (isConversationConceptReference(id)) return conversationReferenceMetadata(id);
     const url = `/vontology/api/vontology/node_content?identifier=${encodeURIComponent(id)}&raw_only=1`;
     let res;
     try {
@@ -1101,6 +1103,11 @@ export async function handleSelectConceptByIdDetail(detail, deps) {
 
     const id = normaliseVontologyId(conceptIdRaw);
     if (!id) return;
+
+    if (isConversationConceptReference(id)) {
+        const chat = await import('../chatTab.js');
+        return chat.openConversationConceptReference(id);
+    }
 
     const fetchFn = deps?.fetchFn || fetch;
 

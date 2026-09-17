@@ -5,7 +5,7 @@ import { profileButton } from './components/participantProfile.js';
 // Removed imported populateContentSection to avoid duplicate with local implementation below
 
 import { initializeAnnotationTab } from './annotationTab.js';
-import { getJsonDetailed } from './apiService.js';
+import { getJsonDetailed, postJsonDetailed } from './apiService.js';
 import { fetchConceptListWithSuffix, fetchSubtypesWithSuffix, initializeNamesForm, loadConceptAttributes, loadConceptNames, selectConceptWithSuffix } from './conceptTab.js';
 import { getCurrentUserConceptId } from './domUtils.js';
 import { isAnnotationEnabled } from './featureFlags.js';
@@ -2115,6 +2115,50 @@ function closeDynamicAnnotationTab(tabId) {
     }
 }
 
+const filePreviewTabs = new Map();
+let filePreviewCounter = 0;
+
+export function filePreviewUrl(conceptId) {
+    return `/von/api/files/${encodeURIComponent(conceptId)}/preview`;
+}
+
+export function openFilePreviewTab(conceptId, name = 'File') {
+    const existing = filePreviewTabs.get(conceptId);
+    if (existing) {
+        activateTab(existing.content.id);
+        return existing.content.id;
+    }
+    const tabId = `filePreviewTab_${++filePreviewCounter}`;
+    const previousTabId = document.querySelector('.tab-button.active')?.dataset.tab || 'chatTab';
+    const button = document.createElement('div');
+    button.className = 'tab-button closable';
+    button.dataset.tab = tabId;
+    button.appendChild(document.createTextNode(`Preview: ${name}`));
+    const content = document.createElement('div');
+    content.id = tabId;
+    content.className = 'tab-content file-preview-tab';
+    const frame = document.createElement('iframe');
+    frame.title = `File preview: ${name}`;
+    frame.src = filePreviewUrl(conceptId);
+    frame.setAttribute('sandbox', 'allow-popups allow-popups-to-escape-sandbox allow-downloads');
+    frame.style.cssText = 'width:100%;height:100%;min-height:60vh;border:0;display:block';
+    content.appendChild(frame);
+    const close = () => {
+        const wasActive = button.classList.contains('active');
+        frame.src = 'about:blank';
+        removeTabElements(button, content, { animate: false });
+        filePreviewTabs.delete(conceptId);
+        if (wasActive) activateTab(document.getElementById(previousTabId) ? previousTabId : 'chatTab');
+    };
+    button.appendChild(createCloseTabButton('Close file preview', close));
+    button.addEventListener('click', () => activateTab(tabId));
+    filePreviewTabs.set(conceptId, { content, close });
+    insertTabButton(button);
+    insertTabContent(content);
+    activateTab(tabId);
+    return tabId;
+}
+
 // Create and load a dynamic annotation tab
 function createAnnotationTab(text, conceptName, source) {
     if (!annotationEnabled) {
@@ -3101,6 +3145,14 @@ async function initializeDynamicConceptTab(conceptId, uniqueIdSuffix) {
 export function initializeDynamicTabs() {
     console.log('[dynamicTabs] Initializing dynamic tabs functionality');
 
+    document.addEventListener('authStatusChanged', () => {
+        for (const preview of filePreviewTabs.values()) preview.close();
+    });
+    document.addEventListener('open-file-preview', (event) => {
+        const { conceptId, name } = event.detail || {};
+        if (conceptId) openFilePreviewTab(conceptId, name);
+    });
+
     // Static concept-tab markup is needed on every concept open. Begin its
     // retryable preload while the rest of the application initialises.
     void loadConceptTabTemplate().catch((error) => {
@@ -3570,32 +3622,26 @@ async function adaptIndividualConceptTabUI(conceptId, suffix) {
 }
 
 // Unified description: ensure the typeDescriptionSection exists under Step1 for any concept
-// Export for testing: dual-write description updater (JVNAUTOSCI-570)
+// Export for testing: governed description updater.
 export async function updateConceptDescription(conceptId, description) {
+    if (!conceptId || typeof description !== 'string') return false;
     try {
-        if (!conceptId || typeof description !== 'string') return false;
-        const encodedId = encodeURIComponent(conceptId);
-        const resp = await conceptApiFetch(`/api/concepts/${encodedId}/description`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ description })
-        });
-        if (resp.ok) {
-            const data = await resp.json().catch(() => ({}));
-            return !data.error;
-        }
-        // Fallback: legacy endpoint (will eventually be removed)
-        if (resp.status === 404 || resp.status === 405) {
-            const legacy = await fetch('/vontology/api/vontology/update_description', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ identifier: conceptId, description })
-            });
-            const legacyData = await legacy.json().catch(() => ({}));
-            return legacy.ok && legacyData && legacyData.success;
-        }
-        return false;
+        const { data } = await postJsonDetailed(
+            `/api/concepts/${encodeURIComponent(conceptId)}/description`,
+            { description },
+            { method: 'PATCH' }
+        );
+        return !!data && !data.error && data.success !== false;
     } catch (e) {
+        if (e.payload?.effect_status === 'indeterminate') {
+            const receiptId = e.payload.authority_receipt?.receipt_id;
+            throw new Error(
+                'The description may have been saved, but verification is incomplete. '
+                + 'Your draft is retained. Check the saved description before trying again.'
+                + (receiptId ? ` Receipt: ${receiptId}` : ''),
+                { cause: e }
+            );
+        }
         return false;
     }
 }
@@ -5052,8 +5098,9 @@ async function populateTypeDescription(conceptId, suffix, options = {}) {
                 return;
             }
             statusEl.textContent = 'Saving...';
+            newSave.disabled = true;
             try {
-                // JVNAUTOSCI-570 regression fix: use dedicated dual-write description endpoint
+                // Keep the draft until the governed write is verified.
                 const ok = await updateConceptDescription(conceptId, rawText);
                 if (!ok) throw new Error('Failed to persist description');
                 await loadDescription();
@@ -5067,6 +5114,8 @@ async function populateTypeDescription(conceptId, suffix, options = {}) {
                 delete textarea.dataset.originalContent;
             } catch (e) {
                 statusEl.textContent = `Error: ${e.message}`;
+            } finally {
+                newSave.disabled = false;
             }
         });
 
@@ -7880,6 +7929,7 @@ export function deriveFileCopyActionState(nodePayload = null) {
 
     return {
         isFileCopyConcept: looksLikeFileCopyType || hasResolvableBlobRef,
+        displayName: attributes.original_filename || rawDoc.name || 'File',
         hasResolvableBlobRef,
         showFileActions: hasResolvableBlobRef && (looksLikeFileCopyType || hasResolvableBlobRef),
     };
@@ -7987,6 +8037,25 @@ function attachDeleteConceptButton(headerDiv, conceptId, kind, fileCopyActionSta
         if (!headerDiv || !conceptId) return;
         if (headerDiv.querySelector('.delete-concept-button')) return; // already added
         const fileActionsEnabled = !!(fileCopyActionState && fileCopyActionState.showFileActions);
+
+        if (fileActionsEnabled && !headerDiv.querySelector('.preview-file-copy-button')) {
+            const previewButton = document.createElement('button');
+            previewButton.className = 'preview-file-copy-button';
+            previewButton.textContent = 'Preview in Von';
+            previewButton.addEventListener('click', (event) => {
+                event.stopPropagation();
+                openFilePreviewTab(conceptId, fileCopyActionState.displayName);
+            });
+            const browserLink = document.createElement('a');
+            browserLink.className = 'preview-file-copy-browser-link';
+            browserLink.textContent = 'Preview in browser tab';
+            browserLink.href = filePreviewUrl(conceptId);
+            browserLink.target = '_blank';
+            browserLink.rel = 'noopener noreferrer';
+            browserLink.style.marginLeft = '8px';
+            browserLink.addEventListener('click', (event) => event.stopPropagation());
+            headerDiv.append(previewButton, browserLink);
+        }
 
         if (fileActionsEnabled && !headerDiv.querySelector('.download-file-copy-button')) {
             const downloadBtn = document.createElement('button');

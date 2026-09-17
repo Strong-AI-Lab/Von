@@ -72,6 +72,7 @@ export function createDictationController({ input, button, status, cancelButton,
             : voiceActive
                 ? 'Voice conversation is active. Click to switch to dictation. Shift-click or long-press to end voice.'
                 : 'Click to dictate into your draft. Shift-click or long-press to start a voice conversation: speech is sent automatically and Von replies aloud.';
+        if (!onAlternateClick) button.title = next === 'recording' ? 'Finish dictation and add it to your draft' : 'Dictate into your draft';
         button.classList.toggle('dictation-recording', next === 'recording');
         button.classList.toggle('active-voice', voiceActive);
         button.disabled = next === 'transcribing' || next === 'requesting';
