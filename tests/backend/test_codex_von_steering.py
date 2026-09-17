@@ -210,3 +210,33 @@ def test_late_guidance_has_not_applied_receipt_without_model(receiver):
         "status": "not_applied",
         "binding": active.binding,
     }
+
+
+def test_retained_transport_receipt_finishes_through_real_inbox_reporter(receiver):
+    active, rows, _ = receiver
+    selected = list(active.pending())[0]
+    active.delivered(selected, "accepted")
+    path = inbox.state_path(active.config, rows[0]["message_id"])
+    retained = json.loads(path.read_text())
+    # Exact live regression: earlier transport states contain only the message.
+    retained["context"].pop("tasks", None)
+    sent = []
+
+    def send(**kwargs):
+        sent.append(kwargs)
+        reply = {
+            "message_id": "#V#reply",
+            "concept_id": "#V#reply",
+            "content": kwargs["content"],
+        }
+        rows.append(reply)
+        return SimpleNamespace(message=reply)
+
+    active.api.messages.create_message_idempotently = send
+    inbox.finish(active.config, active.api, retained, path)
+    assert retained["phase"] == "done"
+    assert retained["context"]["tasks"] == []
+    assert retained["reply_id"] == "#V#reply"
+    assert len(sent) == 1
+    assert "consumption has not been verified" in sent[0]["content"]
+    assert sent[0]["reply_to_id"] == selected["message_id"]

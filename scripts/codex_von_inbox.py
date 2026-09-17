@@ -521,10 +521,11 @@ def finish(config, api, state, path):
     authorise_source(config, api, message)
     if state.get("steering_delivery"):
         try:
-            from .codex_von_steering import reconcile_receipt
+            from .codex_von_steering import recover_delivery, reconcile_receipt
         except ImportError:
-            from codex_von_steering import reconcile_receipt
+            from codex_von_steering import recover_delivery, reconcile_receipt
         state["effect_stage"] = "steering_receipt"
+        recover_delivery(state)
         reconcile_receipt(api, state, path)
     # Check again at the effect boundary, including recovered on-disk states.
     result = state["result"] = validate_result(state["result"], state["context"])

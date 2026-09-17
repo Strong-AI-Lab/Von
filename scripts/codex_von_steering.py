@@ -20,6 +20,9 @@ except ImportError:
 
 def recover_delivery(state):
     """A process loss never converts reserved guidance into a new request."""
+    # A transport receipt is a reply only, with no task action authority.
+    # Restore this for retained states created before the receipt reporter ran.
+    state["context"]["tasks"] = []
     receipt = state["steering_delivery"]
     status = receipt["status"]
     if status == "reserved":
