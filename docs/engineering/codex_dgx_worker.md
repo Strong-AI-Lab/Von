@@ -865,7 +865,9 @@ An ordinary coding worker keeps workspace confinement, disabled Von MCP and
 controller-mediated effects. A prepared trusted SAIL operator instance may opt
 in with an owner-installed `operator_access` object containing `enabled: true`
 and an absolute `mcp_command` argument array. Both coding and inbox launches then
-use host access (`danger-full-access`) and that principal-bound MCP command.
+use host access (`danger-full-access`) and that principal-bound MCP command
+under a dedicated `von_operator` server entry. The ordinary `von` entry stays
+disabled, so its inherited read-only tool filter cannot hide operator tools.
 This is deliberate host-operator authority, comparable to an authorised local
 interactive coding session; it is not a sandbox or hostile-process isolation.
 Do not enable it merely because an agent is called a manager.
