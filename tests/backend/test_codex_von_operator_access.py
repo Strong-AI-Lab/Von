@@ -113,6 +113,91 @@ def test_only_installed_methods_reach_canonical_gateway():
 
 def test_conflicting_actor_is_rejected_before_canonical_call():
     catalogue = SimpleNamespace(get=lambda name: None)
-    gateway = SimpleNamespace(invoke=lambda *a: pytest.fail("conflicting actor reached handler"))
-    bound = BoundTools({"actor_id": "#V#manager", "organisation_id": "#V#org", "methods": ["task_get"]}, catalogue, gateway)
-    assert bound.call("task_get", {"acting_user_concept_id": "#V#owner"}) == {"success": False, "error_code": "operator_actor_mismatch"}
+    gateway = SimpleNamespace(
+        invoke=lambda *a: pytest.fail("conflicting actor reached handler")
+    )
+    bound = BoundTools(
+        {
+            "actor_id": "#V#manager",
+            "organisation_id": "#V#org",
+            "methods": ["task_get"],
+        },
+        catalogue,
+        gateway,
+    )
+    assert bound.call("task_get", {"acting_user_concept_id": "#V#owner"}) == {
+        "success": False,
+        "error_code": "operator_actor_mismatch",
+    }
+
+
+@pytest.mark.parametrize("operator", [True, False])
+def test_real_gateway_preserves_installed_operator_task_authority(
+    monkeypatch, operator
+):
+    from contextlib import nullcontext
+    from src.backend.integrations.internal_mcp.catalogue import (
+        _authorise_task_actor_mutation,
+    )
+    from src.backend.integrations.internal_mcp.gateway import (
+        InternalMCPGateway,
+        MethodCatalogue,
+        MethodDefinition,
+        INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE,
+        bind_internal_mcp_actor_context_source,
+    )
+    from src.backend.integrations.internal_mcp.schemas import Schema
+    from src.backend.integrations.internal_mcp.transport import InternalMCPTransport
+    from src.backend.security.access_control import override_current_actor
+    from src.backend.services import task_management_service
+
+    task = {
+        "task_concept_id": "#V#task",
+        "organisation_concept_id": "#V#org",
+        "assignee_concept_id": "#V#other_agent",
+        "created_by_concept_id": "#V#owner",
+    }
+    monkeypatch.setattr(task_management_service, "get_task", lambda _: task)
+
+    def handler(**kwargs):
+        actor, found, error = _authorise_task_actor_mutation(
+            kwargs, surface="task_add_comment"
+        )
+        return error or {
+            "success": True,
+            "actor": actor.user_concept_id,
+            "task": found["task_concept_id"],
+        }
+
+    catalogue = MethodCatalogue()
+    catalogue.register(
+        MethodDefinition(
+            name="task_authority_probe",
+            handler=handler,
+            input_schema=Schema(required={}, optional={}, allow_unknown=True),
+        )
+    )
+    gateway = InternalMCPGateway(
+        catalogue=catalogue, transport=InternalMCPTransport(), enabled=True
+    )
+    provenance = (
+        bind_internal_mcp_actor_context_source(
+            INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE,
+            preexisting_actor_context=("#V#manager", "#V#org"),
+        )
+        if operator
+        else nullcontext()
+    )
+    with override_current_actor("#V#manager", "#V#org"), provenance:
+        result = gateway.invoke(
+            "task_authority_probe",
+            {
+                "task_concept_id": "#V#task",
+                "actor_context_source": INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE,
+            },
+        ).payload
+    if operator:
+        assert result == {"success": True, "actor": "#V#manager", "task": "#V#task"}
+    else:
+        assert result["success"] is False
+        assert result["error_code"] == "task_actor_scope_denied"
