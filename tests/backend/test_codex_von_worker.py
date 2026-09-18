@@ -472,9 +472,7 @@ def test_interrupted_clone_recovers_with_independent_metadata_and_no_service_sec
     )
     run(["git", "-C", str(source), "remote", "add", "origin", str(source)])
     fake = tmp_path / "fake-codex"
-    fake.write_text(
-        f"#!{sys.executable}\n"
-        + """import json, os, sys
+    fake.write_text(f"#!{sys.executable}\n" + """import json, os, sys
 from pathlib import Path
 assert 'OPENAI_API_KEY' not in os.environ
 assert 'MONGO_URI' not in os.environ
@@ -484,8 +482,7 @@ assert sys.argv[sys.argv.index('--model') + 1] == 'gpt-6-astra'
 assert 'model_reasoning_effort="high"' in sys.argv
 result = Path(sys.argv[sys.argv.index('--output-last-message') + 1])
 result.write_text(json.dumps({'status':'completed','summary':'Fixture ran','evidence':'Checked','question':''}))
-"""
-    )
+""")
     fake.chmod(0o700)
     monkeypatch.setenv("OPENAI_API_KEY", "test-sentinel")
     monkeypatch.setenv("MONGO_URI", "test-sentinel")
@@ -718,6 +715,7 @@ def test_task_context_includes_operator_note_provenance_and_attachment_limits(
     ):
         assert inputs[key] == row[key]
     assert inputs["context_provenance"]["task_id"] == row["task_concept_id"]
+    assert inputs["context_provenance"]["worker_identity"] == config["agent_id"]
     assert inputs["attachments"]["omitted"] == 1
     assert inputs["attachments"]["content_available"] is False
     assert inputs["followup"]["content"] == "Continue with this change"
@@ -953,3 +951,26 @@ def test_source_images_require_explicit_current_task_delegation(
         assert item["authorisation_reference"] == "operator-grant"
     else:
         assert "local_path" not in item
+
+
+def test_self_authored_operator_comment_does_not_invalidate_deployment_inputs():
+    inputs = {"context_provenance": {"worker_identity": "#V#manager"}, "comments": []}
+    original = worker.input_fingerprint(inputs)
+    inputs["comments"].append(
+        {"author_concept_id": "#V#manager", "body": "Acceptance receipt retained"}
+    )
+    assert worker.input_fingerprint(inputs) == original
+    # The same comment is new supervisory input to a distinct coding worker.
+    inputs["context_provenance"]["worker_identity"] = "#V#coding_worker"
+    assert worker.input_fingerprint(inputs) != original
+    inputs["context_provenance"]["worker_identity"] = "#V#manager"
+    inputs["comments"].append(
+        {"author_concept_id": "#V#owner", "body": "Do not deploy"}
+    )
+    assert worker.input_fingerprint(inputs) != original
+
+
+def test_legacy_unattributed_comments_still_change_instruction_fingerprint():
+    assert worker.input_fingerprint(
+        {"comments": [{"body": "changed"}]}
+    ) != worker.input_fingerprint({"comments": []})
