@@ -43,13 +43,13 @@ class BoundTools:
 
     @contextmanager
     def actor(self):
-        from src.backend.security.access_control import (
-            override_current_actor,
-            force_access_control_enforcement,
-        )
         from src.backend.integrations.internal_mcp.gateway import (
-            bind_internal_mcp_actor_context_source,
             INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE,
+            bind_internal_mcp_actor_context_source,
+        )
+        from src.backend.security.access_control import (
+            force_access_control_enforcement,
+            override_current_actor,
         )
 
         actor, org = self.binding["actor_id"], self.binding["organisation_id"]
@@ -95,7 +95,8 @@ class BoundTools:
 async def serve(bound):
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
-    from mcp.types import Tool, TextContent
+    from mcp.types import TextContent, Tool
+
     from src.backend.integrations.internal_mcp.schemas import schema_to_json_schema
 
     app = Server("von-coding-operator")
@@ -128,7 +129,7 @@ async def serve(bound):
     async def call_tool(name, arguments):
         try:
             result = await asyncio.to_thread(bound.call, name, arguments)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - redact all backend exceptions at the transport boundary
             # Raw backend exceptions can contain connection strings. Private logs
             # and canonical typed errors retain diagnosis without leaking secrets.
             result = {
