@@ -433,6 +433,15 @@ existing canonical task fingerprint keyed by source message and configured
 participants, followed by assignment/text read-back and a provenance comment.
 A retry reuses that assignment without resetting an already progressed task.
 
+New and resumed coding follow-ups also carry `agent_analysis`: the inbox answer
+bound to its source message, configured agent and organisation. It remains
+separate from the exact source instructions and never grants deployment or
+assignment authority. Coalesced follow-ups retain each analysis with its own
+source; retries reuse the existing handoff. Older retained follow-ups without
+this optional context remain valid. Completing a review is distinct from
+delivering the implementation it recommends; retain unfinished implementation
+in an explicit native task instead of reporting queue acceptance as completion.
+
 Recent direct-message context selects the newest 30 messages in the configured
 organisation at or before the source timestamp, then presents them chronologically.
 The context records its time boundary and whether older messages were omitted.

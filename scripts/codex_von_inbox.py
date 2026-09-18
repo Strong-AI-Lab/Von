@@ -71,6 +71,17 @@ def task_followup(config, task_id):
     return json.loads(path.read_text()) if path.exists() else None
 
 
+def analysis_context(config, message, result):
+    """Carry the inbox judgement separately from the delegator's instructions."""
+    return {
+        "source_message_id": message["message_id"],
+        "actor_id": config["agent_id"],
+        "organisation_id": config["organisation_id"],
+        "content": result["answer"],
+        "authority": "Agent analysis of the source request; not additional authority.",
+    }
+
+
 def already_answered(config, message_id):
     path = state_path(config, message_id)
     return path.exists() and json.loads(path.read_text()).get("phase") == "done"
@@ -488,6 +499,7 @@ def create_assignment(config, api, state, path):
         "message_id": message["message_id"],
         "content": message["content"],
         "deployment_requested": state["result"]["deployment_requested"],
+        "agent_analysis": [analysis_context(config, message, state["result"])],
     }
     if not task_followup(config, task_id):
         write_json(followup_path(config, task_id), followup)
@@ -549,6 +561,7 @@ def finish(config, api, state, path):
                 "message_id": message["message_id"],
                 "content": message["content"],
                 "deployment_requested": result["deployment_requested"],
+                "agent_analysis": [analysis_context(config, message, result)],
                 **({"retry": state["retry_intent"]} if state["retry_intent"] else {}),
                 **(
                     {"attachments": message["attachments"]}
@@ -582,6 +595,10 @@ def finish(config, api, state, path):
                     followup["message_ids"] = [
                         *prior.get("message_ids", [prior["message_id"]]),
                         message["message_id"],
+                    ]
+                    followup["agent_analysis"] = [
+                        *prior.get("agent_analysis", []),
+                        *followup["agent_analysis"],
                     ]
                     if prior.get("attachments") or followup.get("attachments"):
                         followup["attachments"] = [
