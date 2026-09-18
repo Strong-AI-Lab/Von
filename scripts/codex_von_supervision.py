@@ -7,6 +7,7 @@ bounded repair on behalf of its existing delegator, retaining the source chain.
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 try:
     from . import codex_von_retry as retry
@@ -18,6 +19,147 @@ def resolution(task):
     from src.backend.services.task_reporting_service import resolve_task_reporting
 
     return resolve_task_reporting(task)
+
+
+def report_result(config, api, task, key, content):
+    """Notify the current canonical report-to without altering old audiences.
+
+    Freeze the intent under the caller's controller lock before delivery. A
+    lost acknowledgement retries that exact audience/content, not a new route.
+    Membership and task scope are checked again before every attempted send.
+    """
+    from scripts.codex_von_worker import write_json
+
+    path = (
+        Path(config["state_root"])
+        / "supervisor-reports"
+        / (retry.digest(key) + ".json")
+    )
+    current = api.task(task["task_concept_id"])
+    if (
+        current.get("assignee_concept_id") != config["agent_id"]
+        or current.get("organisation_concept_id") != config["organisation_id"]
+    ):
+        return None
+    if path.exists():
+        intent = json.loads(path.read_text())
+        if intent.get("message_id"):
+            return intent["message_id"]
+    else:
+        route = resolution(current)
+        recipient = route.get("concept_id")
+        if route.get("status") != "resolved" or recipient in {
+            None,
+            config["agent_id"],
+            config["delegator_id"],
+        }:
+            return None
+        intent = {
+            "recipient": recipient,
+            "content": content,
+            "task_id": current["task_concept_id"],
+            "subject": "Coding task report: " + current["title"],
+        }
+        write_json(path, intent)
+    route = resolution(current)
+    if (
+        route.get("status") != "resolved"
+        or route.get("concept_id") != intent["recipient"]
+    ):
+        # Preserve the old intent for diagnosis, but revoked reporting scope
+        # must not create a new message to the former supervisor on recovery.
+        return None
+    allowed, _ = api.messages.authorise_direct_message_participants(
+        sender_id=config["agent_id"],
+        recipient_ids=[intent["recipient"]],
+        organisation_concept_id=config["organisation_id"],
+    )
+    if not allowed:
+        raise PermissionError("Report recipient is no longer an organisation member")
+    receipt = api.messages.create_message_idempotently(
+        delivery_idempotency_key=key + ":supervisor",
+        sender_id=config["agent_id"],
+        recipient_ids=[intent["recipient"]],
+        organisation_concept_id=config["organisation_id"],
+        thread_id=intent["task_id"],
+        subject=intent["subject"],
+        content=intent["content"],
+        metadata={"attribution": "Sent by " + config["agent_id"]},
+    )
+    mid = receipt.message["concept_id"]
+    row = api.messages.get_message_for_user(mid, config["agent_id"])
+    rb = api.messages.project_direct_message(row) if row else {}
+    if (
+        rb.get("content") != intent["content"]
+        or rb.get("sender_id") != config["agent_id"]
+        or rb.get("recipient_ids") != [intent["recipient"]]
+        or rb.get("organisation_concept_id") != config["organisation_id"]
+        or rb.get("thread_id") != intent["task_id"]
+    ):
+        raise RuntimeError("Supervisor report canonical read-back failed")
+    write_json(path, {**intent, "message_id": mid})
+    return mid
+
+
+def is_task_report(config, api, message):
+    """A subordinate's canonical task report is evidence, never an instruction."""
+    if (
+        not config.get("supervision_enabled")
+        or config["agent_id"] not in message.get("recipient_ids", [])
+        or message.get("organisation_concept_id") != config["organisation_id"]
+        or not message.get("thread_id")
+    ):
+        return False
+    try:
+        task = api.task(message["thread_id"])
+    except api.tasks.TaskNotFoundError:
+        return False
+    route = resolution(task)
+    return (
+        task.get("organisation_concept_id") == config["organisation_id"]
+        and task.get("assignee_concept_id") == message.get("sender_id")
+        and message.get("sender_id") != config["agent_id"]
+        and route.get("status") == "resolved"
+        and route.get("concept_id") == config["agent_id"]
+    )
+
+
+def reconcile_completed_report(config, api, selection):
+    """Explicit operator recovery of one retained result; never rerun its task."""
+    from scripts.codex_von_worker import fingerprint
+
+    task_id, attempt = selection.rsplit("=", 1)
+    path = Path(config["state_root"]) / "tasks" / (fingerprint(task_id)[:16] + ".json")
+    state = json.loads(path.read_text())
+    task = api.task(task_id)
+    if (
+        not config.get("supervision_enabled")
+        or state.get("task_id") != task_id
+        or state.get("attempt") != attempt
+        or state.get("phase") != "done"
+        or task.get("status") != "completed"
+        or task.get("assignee_concept_id") != config["agent_id"]
+        or task.get("organisation_concept_id") != config["organisation_id"]
+    ):
+        raise PermissionError("No matching retained completed report")
+    row = api.messages.get_message_for_user(state["message_id"], config["agent_id"])
+    rb = api.messages.project_direct_message(row) if row else {}
+    if (
+        rb.get("sender_id") != config["agent_id"]
+        or rb.get("organisation_concept_id") != config["organisation_id"]
+        or rb.get("thread_id") != task_id
+        or rb.get("content") != state.get("report_content")
+        or config["delegator_id"] not in rb.get("recipient_ids", [])
+    ):
+        raise PermissionError("Original result canonical read-back failed")
+    mid = report_result(config, api, task, attempt + ":result", rb["content"])
+    return {
+        "task_id": task_id,
+        "attempt": attempt,
+        "message_id": mid,
+        "coding_replayed": False,
+        "original_message_id": state["message_id"],
+    }
 
 
 def source_authorised(config, task):

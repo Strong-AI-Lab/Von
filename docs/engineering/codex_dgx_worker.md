@@ -705,6 +705,35 @@ eligibility policy unless supervision is enabled; enabled controllers still
 require the configured creator/delegator, assignee, organisation and native writer.
 Reporting responsibility no longer substitutes for those execution checks.
 
+With supervision enabled, worker reports retain their existing delivery to the
+delegator and send a separate, canonically verified message to the resolved
+report-to. The controller freezes that delivery intent before sending, retries
+the same key after interrupted read-back, and rechecks membership and reporting
+scope. It never changes an old message's audience. A supervisor's existing inbox
+can read a subordinate's report only after checking the canonical task assignee,
+organisation and reporting route. This is context for a reply to the delegator,
+not authority to reopen the child, create work or deploy. Existing unfinished
+implementation remains in its own native task. For a selected older completed
+result, the existing controller accepts `--reconcile-report TASK_ID=ATTEMPT`
+under its normal lock and identity. It verifies the retained completed attempt
+and original canonical message, then delivers only the missing supervisor
+report; it does not execute coding, reopen the task or resend Michael's result.
+
+For an operator-installed recurring review relay, `scripts/codex_von_review.py`
+provides receipt validation and coalescing under the relay's existing lock. The
+operator retains the existing schedule, source authority and canonical message
+adapter. A canonical reply must contain one `von-review-receipt` JSON block with
+`status=reviewed`, the exact actor, organisation, source message, snapshot
+signature and reviewed revision, a substantive summary, and evidence references
+with observations. This is an accountable reviewer attestation, not automated
+verification of the judgement. Queue-only replies and legacy answered cursors
+do not establish review. Persisted delivery intent survives lost send/read-back;
+one pending review retains the newest successor and rejects reordered signals.
+Review completion never completes the separate implementation task. Source
+publication and installation do not themselves prove recurring activation;
+retain a real changed-snapshot request, canonical review reply and cursor receipt
+through the existing controller, plus the installed revision and rollback.
+
 Under its existing lock, the controller retains an episode fingerprint before
 creating a canonical repair on behalf of the existing delegator. The repair
 records that attribution, source task, blocker and agent chain in
