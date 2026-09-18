@@ -12904,7 +12904,7 @@ describe('scroll to latest message affordance', () => {
                     <div class="chat-session-tabs-row">
                         <div id="chatSessionTabs"></div>
                     </div>
-                    <div id="scrollableField"></div><div class="chat-composer"></div>
+                    <div id="scrollableField"><div class="message-container">Existing message</div></div><div class="chat-composer"></div>
                 </div>
             </div>
         `;
@@ -12931,6 +12931,43 @@ describe('scroll to latest message affordance', () => {
         __testOnly_updateScrollToEndButtonVisibility(scrollableField);
         expect(button.classList.contains('visible')).toBe(false);
         expect(button.getAttribute('aria-hidden')).toBe('true');
+    });
+
+    test.each([
+        ['truly empty', ''],
+        ['loading', '<div class="chat-session-loading">Loading conversations…</div>']
+    ])('does not render the latest control for an %s conversation', (_label, content) => {
+        const scrollableField = document.getElementById('scrollableField');
+        scrollableField.innerHTML = content;
+
+        __testOnly_updateScrollToEndButtonVisibility(scrollableField);
+
+        expect(document.getElementById('chatScrollToEndButton')).toBeNull();
+    });
+
+    test('renders the control after a streamed message arrives in an empty conversation', () => {
+        const scrollableField = document.getElementById('scrollableField');
+        scrollableField.innerHTML = '';
+        __testOnly_updateScrollToEndButtonVisibility(scrollableField);
+        expect(document.getElementById('chatScrollToEndButton')).toBeNull();
+
+        const message = document.createElement('div');
+        message.className = 'chat-message assistant-message';
+        scrollableField.appendChild(message);
+        __testOnly_updateScrollToEndButtonVisibility(scrollableField);
+
+        expect(document.getElementById('chatScrollToEndButton')).not.toBeNull();
+    });
+
+    test('removes a stale control when pagination or conversation replacement leaves no messages', () => {
+        const scrollableField = document.getElementById('scrollableField');
+        __testOnly_updateScrollToEndButtonVisibility(scrollableField);
+        expect(document.getElementById('chatScrollToEndButton')).not.toBeNull();
+
+        scrollableField.innerHTML = '<div class="chat-session-loading">Loading older messages…</div>';
+        __testOnly_updateScrollToEndButtonVisibility(scrollableField);
+
+        expect(document.getElementById('chatScrollToEndButton')).toBeNull();
     });
 
     test('clicking floating control scrolls to the latest message', () => {

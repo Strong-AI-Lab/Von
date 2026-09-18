@@ -30957,6 +30957,17 @@ function ensureScrollToEndButton(scrollableField = null) {
         return null;
     }
 
+    // A loading/empty transcript may still inherit page overflow from the
+    // surrounding composer and navigation. Do not create a latest-message
+    // affordance until there is an actual transcript item to navigate to.
+    const hasTranscriptContent = targetField.querySelector(
+        ':scope > .message-container, :scope > .chat-message'
+    );
+    if (!hasTranscriptContent) {
+        document.getElementById(CHAT_SCROLL_TO_END_BUTTON_ID)?.remove();
+        return null;
+    }
+
     const wrapper = targetField.closest('.content-wrapper') || targetField.parentElement;
     let controlHost = wrapper?.querySelector('.chat-composer') || wrapper;
     if (!isCompactComposer()) {
