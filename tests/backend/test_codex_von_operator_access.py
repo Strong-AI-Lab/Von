@@ -41,9 +41,10 @@ def test_operator_has_the_same_explicit_access_in_both_routes(inbox):
         inbox=inbox,
     )
     assert args[:2] == ["--sandbox", "danger-full-access"]
-    assert "mcp_servers.von.enabled=true" in args
-    assert 'mcp_servers.von.command="/operator/python"' in args
-    assert not any("enabled=false" in value for value in args)
+    assert "mcp_servers.von_operator.enabled=true" in args
+    assert 'mcp_servers.von_operator.command="/operator/python"' in args
+    assert "mcp_servers.von.enabled=false" in args
+    assert not any("mcp_servers.von.enabled=true" in value for value in args)
 
 
 @pytest.mark.parametrize(

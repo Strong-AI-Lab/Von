@@ -29,15 +29,17 @@ def launch_access_args(config, *, inbox=False):
             "--sandbox",
             "danger-full-access",
             "-c",
-            "mcp_servers.von.enabled=true",
+            "mcp_servers.von.enabled=false",
             "-c",
-            "mcp_servers.von.command=" + json.dumps(command[0]),
+            "mcp_servers.von_operator.enabled=true",
             "-c",
-            "mcp_servers.von.args=" + json.dumps(command[1:]),
+            "mcp_servers.von_operator.command=" + json.dumps(command[0]),
             "-c",
-            "mcp_servers.von.startup_timeout_sec=60",
+            "mcp_servers.von_operator.args=" + json.dumps(command[1:]),
             "-c",
-            "mcp_servers.von.tool_timeout_sec=180",
+            "mcp_servers.von_operator.startup_timeout_sec=60",
+            "-c",
+            "mcp_servers.von_operator.tool_timeout_sec=180",
         ]
     args = ["-c", "mcp_servers.von.enabled=false"]
     if inbox:
