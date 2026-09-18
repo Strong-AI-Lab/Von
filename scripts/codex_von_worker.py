@@ -109,6 +109,7 @@ def capability_context(config, *, read_only, worktree=None):
     return {
         "worker_identity": config["agent_id"],
         "delegator_id": config["delegator_id"],
+        "assignment_actor_ids": list(assignment_actors(config)),
         "organisation_id": config["organisation_id"],
         "source_repo": config.get("source_repo"),
         "approved_repository_roots": config.get("approved_repository_roots", []),
