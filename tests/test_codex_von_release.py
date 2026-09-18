@@ -27,6 +27,8 @@ def source(tmp_path):
     for name in (
         "codex_von_worker.py",
         "codex_von_inbox.py",
+        "codex_von_access.py",
+        "codex_von_mcp.py",
         "codex_von_retry.py",
         "codex_von_supervision.py",
         "codex_von_deploy.py",

@@ -351,6 +351,15 @@ def prepare_attachment_inputs(config, context, run):
         )
 
 
+try:
+    from .codex_von_access import launch_access_args
+except ImportError:
+    try:
+        from codex_von_access import launch_access_args
+    except ImportError:
+        from scripts.codex_von_access import launch_access_args
+
+
 def launch(config, state, lock_fd):
     run = Path(state["run_dir"])
     run.mkdir(parents=True, exist_ok=True)
@@ -374,20 +383,17 @@ def launch(config, state, lock_fd):
         settings["model"],
         "-c",
         "model_reasoning_effort=" + json.dumps(settings["reasoning_effort"]),
-        "--sandbox",
-        "read-only",
         "--cd",
         str(run),
         "--skip-git-repo-check",
         "--json",
-        "-c",
-        "mcp_servers.von.enabled=false",
         "--output-schema",
         str(run / "schema.json"),
         "--output-last-message",
         str(run / "result.json"),
         "-",
     ]
+    args[2:2] = launch_access_args(config, inbox=True)
     env = {
         key: os.environ[key]
         for key in ("HOME", "PATH", "LANG", "TERM")
@@ -633,7 +639,8 @@ def finish(config, api, state, path):
         organisation_concept_id=config["organisation_id"],
         thread_id=task_id or message.get("thread_id"),
         reply_to_id=message["message_id"],
-        subject=config.get("display_name", config.get("agent_name", config["agent_id"])) + " reply",
+        subject=config.get("display_name", config.get("agent_name", config["agent_id"]))
+        + " reply",
         content=state["report_content"],
         metadata={
             "attribution": "Sent by " + config["agent_id"],
@@ -692,7 +699,10 @@ def finish_or_retain(config, api, state, path):
                 recipient_ids=[config["delegator_id"]],
                 organisation_concept_id=config["organisation_id"],
                 reply_to_id=message["message_id"],
-                subject=config.get("display_name", config.get("agent_name", config["agent_id"])) + " recovery pending",
+                subject=config.get(
+                    "display_name", config.get("agent_name", config["agent_id"])
+                )
+                + " recovery pending",
                 content=state.setdefault("failure_report_content", content),
             )
             row = api.messages.get_message_for_user(
