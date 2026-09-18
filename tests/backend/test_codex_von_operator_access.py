@@ -108,3 +108,10 @@ def test_only_installed_methods_reach_canonical_gateway():
         bound.call("von_context", {"actor_id": "#V#michael"})["actor_id"]
         == "#V#manager"
     )
+
+
+def test_conflicting_actor_is_rejected_before_canonical_call():
+    catalogue = SimpleNamespace(get=lambda name: None)
+    gateway = SimpleNamespace(invoke=lambda *a: pytest.fail("conflicting actor reached handler"))
+    bound = BoundTools({"actor_id": "#V#manager", "organisation_id": "#V#org", "methods": ["task_get"]}, catalogue, gateway)
+    assert bound.call("task_get", {"acting_user_concept_id": "#V#owner"}) == {"success": False, "error_code": "operator_actor_mismatch"}

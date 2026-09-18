@@ -78,6 +78,10 @@ class BoundTools:
     def call(self, name, arguments):
         if name != "von_context" and name not in self.names:
             raise PermissionError("Method is not installed for this principal")
+        arguments = dict(arguments or {})
+        for field in ("acting_user_concept_id", "actor_concept_id", "sender_id"):
+            if arguments.get(field) not in (None, "", self.binding["actor_id"]):
+                return {"success": False, "error_code": "operator_actor_mismatch"}
         with self.actor():
             if name == "von_context":
                 return {
