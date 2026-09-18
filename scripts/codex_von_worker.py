@@ -1852,7 +1852,13 @@ def main():
             from .codex_von_capacity import admission
         except ImportError:
             from codex_von_capacity import admission
-        capacity_fds = admission_stack.enter_context(admission(config))
+        # Report-only recovery owns this identity's worker lock but launches no
+        # coding process, so it need not occupy the host's single coding slot.
+        capacity_fds = (
+            ()
+            if options.reconcile_report
+            else admission_stack.enter_context(admission(config))
+        )
         if capacity_fds is None:
             print(json.dumps({"outcome": "waiting_for_capacity"}), flush=True)
             return
