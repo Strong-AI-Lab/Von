@@ -149,9 +149,7 @@ class MethodDefinition:
     # The argument remains hidden from the model and is injected only when the
     # trusted entry point supplies it, but absence does not remove the method
     # from the ordinary-turn capability projection.
-    ordinary_turn_optional_trusted_argument_bindings: (
-        Mapping[str, str] | None
-    ) = None
+    ordinary_turn_optional_trusted_argument_bindings: Mapping[str, str] | None = None
     # Map capability arguments to actor-authorised constrained choices resolved
     # by the trusted entry point. The model may choose only from that bounded
     # set; dispatch maps the stable selector to the current runtime value.
@@ -831,13 +829,21 @@ class InternalMCPGateway:
                 user_id, org_id = preexisting_actor_context
             else:
                 user_id, org_id = payload_user_id, payload_org_id
+            # An installed local operator already bound both identity and
+            # provenance. Preserve that explicit authority across this gateway;
+            # ordinary authenticated actors and payload claims do not gain it.
             actor_source = (
-                "preexisting_authenticated_or_workflow_context"
+                INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE
                 if preexisting_actor_context is not None
+                and internal_mcp_actor_context_is_trusted_local_operator()
                 else (
-                    INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE
-                    if self._trusted_actor_payload_fallback
-                    else INTERNAL_MCP_UNTRUSTED_PAYLOAD_ACTOR_SOURCE
+                    "preexisting_authenticated_or_workflow_context"
+                    if preexisting_actor_context is not None
+                    else (
+                        INTERNAL_MCP_TRUSTED_LOCAL_OPERATOR_SOURCE
+                        if self._trusted_actor_payload_fallback
+                        else INTERNAL_MCP_UNTRUSTED_PAYLOAD_ACTOR_SOURCE
+                    )
                 )
             )
             actor_source_token = _ACTOR_CONTEXT_SOURCE.set(actor_source)
