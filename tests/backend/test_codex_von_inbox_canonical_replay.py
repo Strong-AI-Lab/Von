@@ -16,9 +16,10 @@ from scripts import codex_von_worker as worker
 from src.backend.security.access_control import override_current_actor
 from src.backend.services import message_service as messages
 from src.backend.services import organisation_membership_service as membership
+from src.backend.services import task_dispatch_authority_service as dispatch
 
 
-@pytest.mark.parametrize("action", ["reply", "create_task"])
+@pytest.mark.parametrize("action", ["reply", "create_task", "resume_task"])
 def test_canonical_delivery_assignment_and_crash_recovery(
     native_store, tmp_path, monkeypatch, action
 ):
@@ -33,6 +34,7 @@ def test_canonical_delivery_assignment_and_crash_recovery(
         "model": "gpt-6-astra",
         "model_reasoning_effort": "xhigh",
     }
+    monkeypatch.setattr(dispatch, "get_db", lambda: native_store)
     monkeypatch.setattr(
         messages, "get_concepts_collection", lambda: native_store.concepts
     )
@@ -86,7 +88,11 @@ def test_canonical_delivery_assignment_and_crash_recovery(
             content=(
                 captured["message"]["content"]
                 if action == "reply"
-                else "Implement the new export control and deploy it. Use gpt-6-astra with xhigh reasoning. Fixture request."
+                else (
+                    f"Resume {old['task_concept_id']}: implement the export control. No deployment."
+                    if action == "resume_task"
+                    else "Implement the new export control and deploy it. Use gpt-6-astra with xhigh reasoning. Fixture request."
+                )
             ),
         )
         response = {
@@ -95,17 +101,17 @@ def test_canonical_delivery_assignment_and_crash_recovery(
                 if action == "reply"
                 else "I will implement the new export control."
             ),
-            "task_id": "",
+            "task_id": old["task_concept_id"] if action == "resume_task" else "",
             "action": action,
             "deployment_requested": action == "create_task",
             "new_task": (
-                None
-                if action == "reply"
-                else {
+                {
                     "title": "New export control",
                     "requested_model": "gpt-6-astra",
                     "requested_reasoning_effort": "xhigh",
                 }
+                if action == "create_task"
+                else None
             ),
         }
         calls = []
@@ -145,7 +151,9 @@ def test_canonical_delivery_assignment_and_crash_recovery(
         )
         assert response["answer"] in delivered["content"]
         assert delivered["reply_to_id"] == source["concept_id"]
-        assert api.task(old["task_concept_id"])["status"] == "completed"
+        assert api.task(old["task_concept_id"])["status"] == (
+            "pending" if action == "resume_task" else "completed"
+        )
         tasks = api.tasks.search_tasks(
             assignee_concept_id="#V#worker",
             created_by_concept_id="#V#alice",
@@ -173,5 +181,24 @@ def test_canonical_delivery_assignment_and_crash_recovery(
                 len(api.tasks.list_task_comments(new["task_concept_id"])["comments"])
                 == 1
             )
-        else:
+        elif action == "reply":
             assert not list((tmp_path / "followups").glob("*.json"))
+        if action != "reply":
+            task_id = checkpoint.get("created_task_id", old["task_concept_id"])
+            coding_input = api.inputs(api.task(task_id))
+            assert (
+                coding_input["followup"]["content"]
+                == source["concept_data"]["content_fallback"]
+            )
+            assert coding_input["followup"]["agent_analysis"] == [
+                {
+                    "source_message_id": source["concept_id"],
+                    "actor_id": "#V#worker",
+                    "organisation_id": "#V#lab",
+                    "content": response["answer"],
+                    "authority": "Agent analysis of the source request; not additional authority.",
+                }
+            ]
+            # The agent's canonical note is deliberately not promoted to an
+            # instruction. Its analysis still reaches the next coding run once.
+            assert coding_input["comments"] == []

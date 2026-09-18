@@ -4,9 +4,17 @@ import copy
 from types import SimpleNamespace
 
 import pytest
+import mongomock
 
 from scripts import codex_von_inbox as inbox
 from scripts import codex_von_worker as worker
+from src.backend.services import task_dispatch_authority_service as dispatch
+
+
+@pytest.fixture(autouse=True)
+def isolated_dispatch_store(monkeypatch):
+    collection = mongomock.MongoClient().test.dispatch
+    monkeypatch.setattr(dispatch, "_collection", lambda: collection)
 
 
 @pytest.fixture
@@ -119,6 +127,15 @@ def test_reply_or_reopen_records_one_question_answer_and_one_message(
             "message_id": "#V#question",
             "content": message["content"],
             "deployment_requested": deploy,
+            "agent_analysis": [
+                {
+                    "source_message_id": "#V#question",
+                    "actor_id": "#V#agent",
+                    "organisation_id": "#V#org",
+                    "content": "The tray was deployed.",
+                    "authority": "Agent analysis of the source request; not additional authority.",
+                }
+            ],
         }
     else:
         assert inbox.task_followup(config, "#V#task") is None
@@ -204,6 +221,10 @@ def test_two_queued_followups_preserve_both_coding_requests(fixture):
     assert "Move the send controls" in followup["content"]
     assert "compact identity labels" in followup["content"]
     assert followup["message_ids"] == ["#V#question", "#V#second_question"]
+    assert [row["source_message_id"] for row in followup["agent_analysis"]] == [
+        "#V#question",
+        "#V#second_question",
+    ]
     assert task["status"] == "pending" and len(comments) == 2
     assert transitions == ["pending"]
 
@@ -455,6 +476,9 @@ def test_assignment_crash_reuses_canonical_task_without_reopening_old_task(
     assert created[0]["agent_creation_request_id"] == message["message_id"]
     assert len(comments) == 1
     assert inbox.task_followup(config, "#V#new")["deployment_requested"] is False
+    assert inbox.task_followup(config, "#V#new")["agent_analysis"][0]["content"] == (
+        "I will implement the requested change."
+    )
     assert not inbox.tick(config, api, 0)
 
 
