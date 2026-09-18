@@ -40,6 +40,14 @@ except ImportError:
     except ImportError:
         from scripts import codex_von_supervision as supervision
 
+try:
+    from .codex_von_access import launch_access_args, operator_access, assignment_actors
+except ImportError:
+    try:
+        from codex_von_access import launch_access_args, operator_access, assignment_actors
+    except ImportError:
+        from scripts.codex_von_access import launch_access_args, operator_access, assignment_actors
+
 ACTIVITY_CHECKPOINT_SECONDS = 15
 INSTANCE_PROTOCOL_VERSION = 1
 
@@ -116,15 +124,24 @@ def capability_context(config, *, read_only, worktree=None):
             "limitations": "This declaration does not itself expose a tool or grant host access.",
         },
         "read_only_host_inspection": True,
-        "run_can_edit_checkout": not read_only,
-        "von_mcp": "disabled; canonical reads/effects belong to the controller",
+        "run_can_edit_checkout": bool(operator_access(config)) or not read_only,
+        "von_mcp": (
+            "enabled; installed principal-bound canonical tools"
+            if operator_access(config)
+            else "disabled; canonical reads/effects belong to the controller"
+        ),
+        "operator_access": bool(operator_access(config)),
         "controller_actions": ["reply", "resume_task", "create_task"],
         "deployment_enabled": bool(config.get("deployment_command")),
         "retry_probe_keys": sorted((config.get("retry_probes") or {}).keys()),
         "supervision_enabled": bool(config.get("supervision_enabled")),
         "limitations": [
             "Use available shell tools for non-secret host/repository facts; missing supplied facts do not mean inspection is unavailable.",
-            "Do not access credentials, private databases or live-service mutation routes.",
+            (
+                "Use installed canonical tools and authorised host helpers; never print secrets or mutate databases directly."
+                if operator_access(config)
+                else "Do not access credentials, private databases or live-service mutation routes."
+            ),
             "Sandbox/device visibility may differ from the host; report observations and unavailable facts separately.",
             "Browser, image viewing and image generation depend on tools actually exposed in the run; subscription access does not establish them.",
             "Execution settings are configured launch arguments, not provider-observed model identity.",
@@ -198,10 +215,9 @@ def require_task_execution_preferences(task):
 
 
 def authorised_task(task, config):
-    if (
-        task.get("assignee_concept_id") != config["agent_id"]
-        or task.get("organisation_concept_id") not in (None, config["organisation_id"])
-    ):
+    if task.get("assignee_concept_id") != config["agent_id"] or task.get(
+        "organisation_concept_id"
+    ) not in (None, config["organisation_id"]):
         return False
     if not config.get("supervision_enabled") and task.get(
         "report_to_concept_id"
@@ -211,6 +227,7 @@ def authorised_task(task, config):
         has_assignment_record,
         is_authorised_assignment,
     )
+
     if (
         not task.get("federation")
         and task.get("organisation_concept_id") == config["organisation_id"]
@@ -220,7 +237,7 @@ def authorised_task(task, config):
         return True
     if not task.get("dispatch_requested"):
         return False
-    return is_authorised_assignment(task, config["delegator_id"])
+    return any(is_authorised_assignment(task, actor) for actor in assignment_actors(config))
 
 
 def referenced_tasks(config, api, supplied, task_ids=()):
@@ -536,10 +553,7 @@ class Von:
             return bool(
                 project
                 and project.get("writer") == "von"
-                and (
-                    home is None
-                    or home.get("writable_here") is True
-                )
+                and (home is None or home.get("writable_here") is True)
             )
         return not task.get("is_imported_jira_task", False)
 
@@ -586,7 +600,7 @@ class Von:
             comments.extend(
                 c
                 for c in page["comments"]
-                if c.get("author_concept_id") == self.config["delegator_id"]
+                if c.get("author_concept_id") in assignment_actors(self.config)
             )
             offset += len(page["comments"])
             if offset >= page["total"]:
@@ -604,7 +618,7 @@ class Von:
             for row in rows:
                 message = self.messages.project_direct_message(row)
                 if (
-                    message["sender_id"] == self.config["delegator_id"]
+                    message["sender_id"] in assignment_actors(self.config)
                     and message["organisation_concept_id"]
                     == self.config["organisation_id"]
                 ):
@@ -670,9 +684,11 @@ class Von:
             "requested_model": task.get("requested_model"),
             "requested_reasoning_effort": task.get("requested_reasoning_effort"),
             "comments": comments,
-            "reporting_resolution": supervision.resolution(task)
-            if self.config.get("supervision_enabled")
-            else None,
+            "reporting_resolution": (
+                supervision.resolution(task)
+                if self.config.get("supervision_enabled")
+                else None
+            ),
             "report_to_concept_id": task.get("report_to_concept_id"),
             "supervisor_repair_comments": supervision.repair_comments(
                 self.config, self, task, all_comments
@@ -686,7 +702,9 @@ class Von:
     def reconcile_supervision(self, task, state, persist):
         try:
             return supervision.reconcile(self.config, self, task, state, persist)
-        except Exception as exc:  # noqa: BLE001 - preserve failed handoffs while other tasks progress
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - preserve failed handoffs while other tasks progress
             key = (
                 fingerprint(
                     [state["task_id"], state.get("attempt"), type(exc).__name__]
@@ -898,7 +916,8 @@ class Von:
                 and task.get("status") == "completed"
                 and result["status"] == "completed"
                 and any(
-                    a["attempt_id"] == state["attempt"] and a.get("outcome") == "completed"
+                    a["attempt_id"] == state["attempt"]
+                    and a.get("outcome") == "completed"
                     for a in task.get("execution_timing", {}).get("attempts", [])
                 )
             )
@@ -1245,21 +1264,13 @@ def launch(config, state, inputs, conversation, state_path, lock_fd):
         "--cd",
         str(worktree),
         "--json",
-        "-c",
-        "mcp_servers.von.enabled=false",
         "--output-schema",
         str(run_dir / "schema.json"),
         "--output-last-message",
         str(run_dir / "result.json"),
         "-",
     ]
-    if config.get("permission_profile"):
-        args[2:2] = [
-            "-c",
-            "default_permissions=" + json.dumps(config["permission_profile"]),
-        ]
-    else:
-        args[2:2] = ["--sandbox", "workspace-write"]
+    args[2:2] = launch_access_args(config)
     try:
         from . import codex_von_android_control as android_control
     except ImportError:
@@ -1612,7 +1623,9 @@ def tick(config, api, lock_fd):
             try:
                 apply_deployment(config, api, state, path, lock_fd)
                 finish_captured(config, api, state, path)
-            except Exception as exc:  # noqa: BLE001 - preserve any failed report without wedging other tasks
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - preserve any failed report without wedging other tasks
                 state["reconciliation_error"] = type(exc).__name__
                 write_json(path, state)
     if config.get("inbox_enabled") and inbox_module().tick(config, api, lock_fd):
@@ -1673,7 +1686,9 @@ def tick(config, api, lock_fd):
                             state,
                             lambda path=path, state=state: write_json(path, state),
                         )
-                except Exception as exc:  # noqa: BLE001 - canonical reporting errors stay isolated to this task
+                except (
+                    Exception
+                ) as exc:  # noqa: BLE001 - canonical reporting errors stay isolated to this task
                     state["waiting_report_error"] = type(exc).__name__
                     write_json(path, state)
                 continue
@@ -1732,9 +1747,9 @@ def tick(config, api, lock_fd):
                 state["result"]["summary"] = (
                     "Coding execution settings rejected: " + str(exc)
                 )
-                state["result"]["question"] = (
-                    "Correct this task's model or reasoning setting, then give an explicit retry reason in the task thread."
-                )
+                state["result"][
+                    "question"
+                ] = "Correct this task's model or reasoning setting, then give an explicit retry reason in the task thread."
             write_json(path, state)
         apply_deployment(config, api, state, path, lock_fd)
         finish_captured(config, api, state, path)

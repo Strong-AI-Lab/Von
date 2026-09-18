@@ -67,6 +67,12 @@ def verify(target, commit):
                 raise runtime.DeploymentError(
                     "Incomplete worker release: " + dependency
                 )
+    if "codex_von_access" in (target / "scripts/codex_von_worker.py").read_text():
+        for dependency in ("scripts/codex_von_access.py", "scripts/codex_von_mcp.py"):
+            if not (target / dependency).is_file():
+                raise runtime.DeploymentError(
+                    "Incomplete worker release: " + dependency
+                )
     return {
         "commit": commit,
         "backend_root": str(target),

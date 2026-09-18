@@ -82,3 +82,23 @@ def test_legacy_identity_header_cannot_grant_dispatch(monkeypatch):
     monkeypatch.setattr(authority, "get_effective_user_concept_id_with_source", lambda: ("#V#owner", "legacy_identity_header"))
     assert authority.record_assignment({"task_concept_id": "#V#task"}) is None
     assert collection.find_one({"_id": "#V#task"})["revoked"] is True
+
+
+def test_explicit_manager_assignment_authority_requires_current_receipt(monkeypatch):
+    collection = mongomock.MongoClient().test.receipts
+    monkeypatch.setattr(authority, "_collection", lambda: collection)
+    config = {"agent_id": "#V#agent", "delegator_id": "#V#owner", "organisation_id": "#V#org"}
+    task = {"task_concept_id": "#V#managed", "assignee_concept_id": "#V#agent",
+            "created_by_concept_id": "#V#manager", "organisation_concept_id": "#V#org",
+            "dispatch_requested": True}
+    monkeypatch.setattr(authority, "get_effective_user_concept_id_with_source",
+                        lambda: ("#V#manager", authority.TRUSTED_IN_PROCESS_ACTOR_SOURCE))
+    authority.record_assignment(task)
+    assert not worker.authorised_task(task, config)
+    config["assignment_actor_ids"] = ["#V#manager"]
+    assert worker.authorised_task(task, config)
+    task["organisation_concept_id"] = "#V#other_org"
+    assert not worker.authorised_task(task, config)
+    task["organisation_concept_id"] = "#V#org"
+    authority.revoke_assignment(task["task_concept_id"])
+    assert not worker.authorised_task(task, config)

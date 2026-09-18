@@ -857,3 +857,44 @@ with the prior bridge and release retained for rollback. Read back a supported
 begin/resume/finish attempt on each installed adapter before claiming activation.
 Preserve the current schedule, identities, active consumers and federation/import
 state. Public web deployment is a separate authorised action.
+
+## Explicit operator instances
+
+Task ownership and a supervisor relationship do not confer operator capabilities.
+An ordinary coding worker keeps workspace confinement, disabled Von MCP and
+controller-mediated effects. A prepared trusted SAIL operator instance may opt
+in with an owner-installed `operator_access` object containing `enabled: true`
+and an absolute `mcp_command` argument array. Both coding and inbox launches then
+use host access (`danger-full-access`) and that principal-bound MCP command.
+This is deliberate host-operator authority, comparable to an authorised local
+interactive coding session; it is not a sandbox or hostile-process isolation.
+Do not enable it merely because an agent is called a manager.
+
+`scripts/codex_von_mcp.py --binding /private/operator-binding.json` exposes an
+explicit list of existing canonical catalogue methods through the existing
+gateway. The binding fixes `actor_id`, `organisation_id`, `backend_root`,
+`environment_file`, optional `environment_keys`/`environment`, and `methods`.
+Keep it outside Git, owned by the operator and unwritable by other users.
+Credentials are loaded only by the installed server. Membership is verified for
+every invocation. Payloads cannot replace the bound principal; canonical ACLs
+and publication rules still apply. No direct database mutation interface is added.
+
+The operator prompt permits authorised canonical management and host work in
+both routes. Sustained coding still uses a native assignment. Prefer existing
+lifecycle/retry/deployment helpers, preserve shared locks and receipts, and do
+not start a competing consumer. Configure `deployment_command` separately when
+deployment is in the instance's delegated remit; MCP access does not create it.
+
+Before retiring another operator, verify a fresh run's actual identity and tools,
+read of a subordinate task, task creation/assignment/read-back, direct-message
+receipt, and a real authorised host action. Test conflicting actor input and
+out-of-scope access as well as the successful route. Record code/controller
+revision separately from web runtime. Keep the prior binding/release for rollback
+and preserve existing attempts; never replay them to demonstrate readiness.
+
+A subordinate worker may also have explicit owner-installed
+`assignment_actor_ids`, in addition to its original `delegator_id`. These permit
+fresh canonical dispatch receipts from those principals and retain their authored
+task comments/replies as delegated instructions. They do not change the original
+human inbox recipient, grant authority from an editable reporting relationship,
+or bypass task home, organisation, assignee or revoked-receipt checks.
