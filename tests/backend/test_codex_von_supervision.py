@@ -221,3 +221,100 @@ def test_same_unresolved_blocker_reuses_repair_after_manual_retry(
     parent = api.task(repair_id)["external_references"]["coding_supervision"]
     assert parent["blocker"]["attempt"] == second["attempt"]
     assert first["attempt"] in parent["prior_attempts"]
+
+
+def test_result_reports_preserve_owner_and_recover_supervisor_readback(
+    canonical_controller, monkeypatch
+):
+    config, api, create, read_state, launches, fd = canonical_controller
+    configure(config, monkeypatch)
+    source = create()
+    task = api.task(source)
+    original_read = api.messages.get_message_for_user
+    failed = False
+
+    def interrupted(mid, actor):
+        nonlocal failed
+        row = original_read(mid, actor)
+        projected = api.messages.project_direct_message(row) if row else {}
+        if projected.get("recipient_ids") == ["#V#supervisor"] and not failed:
+            failed = True
+            raise OSError("Lost supervisor read-back")
+        return row
+
+    monkeypatch.setattr(api.messages, "get_message_for_user", interrupted)
+    with pytest.raises(OSError):
+        api.send(task, "completion-report-test", "Completed; retained result verified.")
+    owner_mid = api.send(
+        task, "completion-report-test", "Completed; retained result verified."
+    )
+    assert original_read(owner_mid, config["delegator_id"])
+    reports = list(
+        (__import__("pathlib").Path(config["state_root"]) / "supervisor-reports").glob(
+            "*.json"
+        )
+    )
+    assert len(reports) == 1
+    intent = json.loads(reports[0].read_text())
+    rb = api.messages.project_direct_message(
+        original_read(intent["message_id"], "#V#supervisor")
+    )
+    assert rb["content"] == "Completed; retained result verified."
+    assert rb["recipient_ids"] == ["#V#supervisor"]
+    assert rb["thread_id"] == source
+    assert len(api.messages.get_messages_for_user(config["agent_id"])) == 2
+
+
+def test_explicit_completed_report_recovery_never_replays_task(
+    canonical_controller, monkeypatch
+):
+    from scripts import codex_von_inbox as inbox
+
+    config, api, create, read_state, launches, fd = canonical_controller
+    configure(config, monkeypatch)
+    source = create()
+    task = api.task(source)
+    # Retain the canonical result of an older controller, before supervisor delivery.
+    config["supervision_enabled"] = False
+    mid = api.send(
+        task, "old-attempt:result", "Completed with verified retained artifact."
+    )
+    api.tasks.update_task_status(
+        source, "completed", actor_concept_id=config["agent_id"]
+    )
+    path = (
+        __import__("pathlib").Path(config["state_root"])
+        / "tasks"
+        / (worker.fingerprint(source)[:16] + ".json")
+    )
+    worker.write_json(
+        path,
+        {
+            "task_id": source,
+            "attempt": "old-attempt",
+            "phase": "done",
+            "message_id": mid,
+            "report_content": "Completed with verified retained artifact.",
+        },
+    )
+    config["supervision_enabled"] = True
+    selection = source + "=old-attempt"
+    recovered = supervision.reconcile_completed_report(config, api, selection)
+    assert supervision.reconcile_completed_report(config, api, selection) == recovered
+    assert recovered["coding_replayed"] is False
+    assert not launches()
+    assert api.task(source)["status"] == "completed"
+    row = api.messages.project_direct_message(
+        api.messages.get_message_for_user(recovered["message_id"], "#V#supervisor")
+    )
+    supervisor_config = dict(config, agent_id="#V#supervisor")
+    assert supervision.is_task_report(supervisor_config, api, row)
+    assert (
+        inbox.context_for(supervisor_config, api, row)["source_kind"]
+        == "supervisor_task_report"
+    )
+    with pytest.raises(PermissionError):
+        supervision.reconcile_completed_report(
+            config, api, source + "=different-attempt"
+        )
+    assert len(api.messages.get_messages_for_user(config["agent_id"])) == 2

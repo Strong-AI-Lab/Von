@@ -849,6 +849,9 @@ class Von:
 
     def send(self, task, key, content):
         c = self.config
+        # Keep the existing delegator delivery intact, including its retry key.
+        # Supervisor notification is a separate receipt: changing a reporting
+        # relation must never change an already-sent message's audience.
         allowed, _ = self.messages.authorise_direct_message_participants(
             sender_id=c["agent_id"],
             recipient_ids=[c["delegator_id"]],
@@ -875,6 +878,8 @@ class Von:
             or self.messages.project_direct_message(readback)["content"] != content
         ):
             raise RuntimeError("Direct message canonical read-back failed")
+        if c.get("supervision_enabled"):
+            supervision.report_result(c, self, task, key, content)
         return message_id
 
     def start_execution(self, state, *, source="codex_dgx"):
@@ -1810,9 +1815,17 @@ def main():
         default=[],
         help="Explicit TASK_CONCEPT_ID=ATTEMPT pair; at most 20; never executes coding",
     )
+    parser.add_argument(
+        "--reconcile-report",
+        action="append",
+        default=[],
+        help="Explicit completed TASK_CONCEPT_ID=ATTEMPT supervisor report; never executes coding",
+    )
     options = parser.parse_args()
     if len(options.backfill_run) > 20:
         parser.error("Backfill is bounded to 20 selected pairs")
+    if len(options.reconcile_report) > 20:
+        parser.error("Report recovery is bounded to 20 selected pairs")
     os.umask(0o077)
     config = json.loads(Path(options.config).read_text())
     state_root = Path(config["state_root"])
@@ -1884,6 +1897,17 @@ def main():
             if options.check_task:
                 evidence["task_check"] = check_task(config, api, options.check_task)
                 print(json.dumps(evidence), flush=True)
+                return
+            if options.reconcile_report:
+                for selection in options.reconcile_report:
+                    print(
+                        json.dumps(
+                            supervision.reconcile_completed_report(
+                                config, api, selection
+                            )
+                        ),
+                        flush=True,
+                    )
                 return
             write_json(state_root / "runtime.json", evidence)
             if options.backfill_run:

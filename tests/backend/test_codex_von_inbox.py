@@ -593,3 +593,50 @@ def test_exact_task_in_message_resolves_without_thread_projection(fixture):
     lookup = context["task_lookup"]["results"][0]
     assert lookup["status"] == "found"
     assert lookup["assignment_context"]["evidence"] == "file-copy reference"
+
+
+def test_subordinate_report_is_context_only_and_does_not_rerun_child(
+    fixture, monkeypatch
+):
+    config, api, message, task, comments, sent, transitions, rows = fixture
+    config["supervision_enabled"] = True
+    message.update(
+        sender_id="#V#child",
+        thread_id=task["task_concept_id"],
+        content="Completed with receipt.",
+    )
+    task["assignee_concept_id"] = "#V#child"
+    monkeypatch.setattr(
+        inbox.supervision,
+        "resolution",
+        lambda t: {"status": "resolved", "concept_id": config["agent_id"]},
+    )
+    assert inbox.new_messages(config, api) == [message]
+    context = inbox.context_for(config, api, message)
+    assert context["source_kind"] == "supervisor_task_report"
+    result = {
+        "answer": "Child completed; no rerun required.",
+        "action": "reply",
+        "task_id": "",
+        "deployment_requested": False,
+        "new_task": None,
+    }
+    for changes in (
+        {"action": "resume_task", "task_id": task["task_concept_id"]},
+        {"task_id": task["task_concept_id"]},
+        {"deployment_requested": True},
+    ):
+        with pytest.raises(ValueError):
+            inbox.validate_result(dict(result, **changes), context)
+
+    def launch(c, state, fd):
+        state.update(phase="reporting", result=result)
+
+    monkeypatch.setattr(inbox, "launch", launch)
+    inbox.tick(config, api, 0)
+    assert not transitions and not comments
+    assert len(sent) == 1
+    assert list(sent.values())[0]["recipient_ids"] == [config["delegator_id"]]
+    assert inbox.new_messages(config, api) == []
+    message["organisation_concept_id"] = "#V#other"
+    assert not inbox.supervision.is_task_report(config, api, message)

@@ -18,6 +18,7 @@ try:
         retry_policy,
         stage_file_copy_evidence,
         write_json,
+        supervision,
     )
 except ImportError:
     from codex_von_worker import (
@@ -29,6 +30,7 @@ except ImportError:
         retry_policy,
         stage_file_copy_evidence,
         write_json,
+        supervision,
     )
 
 SCHEMA = {
@@ -111,9 +113,10 @@ def new_messages(config, api):
             if not message.get("sent_at") or timestamp(message["sent_at"]) < since:
                 older = True
                 continue
-            if allowed_message(message, config) and not already_answered(
-                config, message["message_id"]
-            ):
+            if (
+                allowed_message(message, config)
+                or supervision.is_task_report(config, api, message)
+            ) and not already_answered(config, message["message_id"]):
                 found.append(message)
         if older or len(rows) < 100:
             break
@@ -125,6 +128,17 @@ def new_messages(config, api):
 
 
 def context_for(config, api, message):
+    if not allowed_message(message, config):
+        # A reporting relation provides context, not assignment authority. Do
+        # not mix the subordinate's message with the delegator's conversation.
+        task = api.task(message["thread_id"])
+        return {
+            "message": message,
+            "tasks": [task],
+            "source_kind": "supervisor_task_report",
+            "conversation": [],
+            "authority": "Canonical task report only; no new work or deployment authority.",
+        }
     rows = api.messages.get_conversation_between_users(
         config["agent_id"],
         config["delegator_id"],
@@ -214,6 +228,13 @@ def validate_result(value, context):
     if value["action"] == "reply" and value["deployment_requested"]:
         raise ValueError("A reply cannot deploy")
     new_task = value.get("new_task")
+    if context.get("source_kind") == "supervisor_task_report" and (
+        value["action"] != "reply"
+        or value["task_id"]
+        or value["deployment_requested"]
+        or new_task is not None
+    ):
+        raise ValueError("A subordinate report cannot assign, reopen or mutate tasks")
     if value["action"] == "create_task":
         if (
             value["task_id"]
@@ -433,8 +454,11 @@ def authorise_source(config, api, message):
     current = api.messages.get_message_for_user(
         message["message_id"], config["agent_id"]
     )
-    if not current or not allowed_message(
-        api.messages.project_direct_message(current), config
+    if not current or not (
+        allowed_message(api.messages.project_direct_message(current), config)
+        or supervision.is_task_report(
+            config, api, api.messages.project_direct_message(current)
+        )
     ):
         raise PermissionError("Inbound message no longer available to this worker")
     if api.messages.project_direct_message(current)["content"] != message["content"]:
