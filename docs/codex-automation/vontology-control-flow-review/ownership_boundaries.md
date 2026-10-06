@@ -124,6 +124,10 @@ predicates, and KB assertions should own durable:
   concepts, payload-wire bindings, required final-answer evidence fields,
   evidence-view semantics, and planner-facing tool descriptions for grounded
   read, Jira, Gmail, RAG, arXiv, concept lookup, or future integrations.
+- Learning-advice experiment authority, including experiment specs, case sets,
+  evaluator prompts, rubrics, pass/fail decision rules, promotion/rejection
+  interpretation, and candidate-disposition mappings that affect durable
+  learning candidates.
 
 ## Python Support
 
@@ -255,6 +259,11 @@ Python can remain the surface for:
   facts and generic recovery affordance kinds; represented workflows/prompts
   should still decide whether to retry, inspect state, choose an alternate
   path, or surface a bounded failure to the user.
+- generic learning-experiment execution support that loads represented
+  experiment artefacts, freezes inputs, invokes candidate/evaluator calls,
+  records receipts and TER evidence, computes requested aggregate statistics,
+  and persists/read-backs candidate disposition only after represented
+  experiment and disposition policy authorises it.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
 not normal runtime authority after Vontology authority exists.

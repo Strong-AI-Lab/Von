@@ -131,3 +131,7 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
   source-specific tool concepts, field/path/view ids, required final-answer
   fields, and tool descriptions are materialised from Python bootstraps rather
   than independent Vontology authority.
+- `JVNAUTOSCI-2762` - learning-advice experiment authority: evaluator prompt,
+  rubric, case set, decision rule, and candidate-disposition mapping still live
+  in a repo fixture/Python runner path rather than represented experiment and
+  learning-policy artefacts.

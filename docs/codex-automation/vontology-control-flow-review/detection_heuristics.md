@@ -224,6 +224,12 @@ before creating duplicates.
   route serialiser, or timing summary chooses source-specific retry/fallback
   sequencing, branches to named workflows, or writes model/user-facing recovery
   copy that should be represented.
+- Learning/experiment tooling is a strong drift candidate when repo fixtures or
+  Python runners materialise evaluator prompts, rubrics, case sets, decision
+  rules, or candidate-disposition policy into Vontology, or when those artefacts
+  decide whether learned advice is retained/rejected. Python can execute frozen
+  trials and compute generic aggregates, but durable experiment authority should
+  be represented. See `JVNAUTOSCI-2762`.
 
 ## Recent Examples
 
@@ -291,3 +297,6 @@ before creating duplicates.
   benchmark/release authority.
 - `JVNAUTOSCI-2589` - grounded-read/Jira tool-evidence contract facts are
   bootstrapped from Python specs instead of represented Vontology authority.
+- `JVNAUTOSCI-2762` - learning-advice experiment evaluator/rubric/case/decision
+  authority is still owned by a repo fixture and Python runner before durable
+  learning-candidate disposition is recorded.

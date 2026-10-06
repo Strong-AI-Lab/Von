@@ -307,6 +307,25 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   bounded retry or state inspection. File if Python starts selecting the
   concrete recovery workflow/branch, adding integration-specific timeout
   policy, or authoring user-facing recovery wording.
+- 2026-10-07: `academic_roster_workflow.py` and
+  `meeting_representation_workflow.py` looked support-only in this scan. The
+  roster path applies source-provenanced, idempotent records after represented
+  workflow extraction/selection, and the meeting path provides a bounded ICS
+  file-copy fast path. File only if either module starts owning institution,
+  title, meeting interpretation, or user-facing extraction policy instead of
+  executing represented workflow/profile authority.
+- 2026-10-07: `lab_status_digest_workflow_vontology_service.py` remains a
+  repo-seed/bootstrap watch item rather than a fresh ticket while it is an
+  explicit materialisation helper. File a narrower issue if the prompt/workflow
+  text is treated as live Python fallback authority after represented authority
+  exists.
+- 2026-10-07: `scripts/codex_von_worker.py`,
+  `scripts/codex_von_supervision.py`, and `scripts/codex_von_worker_prompt.md`
+  were sampled as operational controller surfaces. Treat as watch items, not
+  Vontology workflow drift, while they only enforce assignment, retry,
+  reporting, deployment and safety boundaries for coding tasks. File only if
+  this worker path becomes Von user-facing workflow/prompt/model policy or a
+  learning artefact instead of operator-owned execution scaffolding.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,

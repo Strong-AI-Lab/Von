@@ -393,3 +393,32 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   is empty and the purity registry reports Vontology-only runtime sources.
 - No new Jira issues were created and no production code was changed by this
   review run.
+
+## 2026-10-07T02:11:05.1523127+13:00
+
+- Read updated repo guidance, confirmed `AGENTS_Private.md` was absent, and
+  re-read design/security/VWL authority guidance plus all repo-local review
+  memory. Fast-forwarded local `main` from `de4d1b6e` to `04819d0f`; the only
+  pre-existing dirty file remained `Von.code-workspace`, which this review did
+  not edit or stage.
+- Ran `pdm run python scripts/check_workflow_purity.py --verbose`. All guarded
+  workflow/prompt/source/policy counters were `0`; the gate passed with only
+  advisory monolith deltas (`orchestrator=29585`, `catalogue=46954`,
+  `von_routes=21872`).
+- Ran `pdm run python scripts/report_turn_decision_attribution.py --limit 50`.
+  Recent-turn attribution reported mean `architecture_integrity_score=1.0` and
+  `python_fallback_signatures={}` over 50 turns.
+- Created `JVNAUTOSCI-2762` for learning-advice experiment authority drift:
+  `scripts/fixtures/jvnautosci_2720_message_channel_experiment.json`,
+  `scripts/run_jvnautosci_2720_learning_cycle.py`,
+  `scripts/run_learning_advice_experiment.py`, and
+  `learning_advice_experiment_service.py` still own evaluator prompt/rubric,
+  case-set, decision-rule, and candidate-disposition semantics that feed durable
+  learning-candidate state. Linked it to `JVNAUTOSCI-2720`, `JVNAUTOSCI-1913`,
+  and `JVNAUTOSCI-2578`. Jira parent assignment to `JVNAUTOSCI-1913` was rejected
+  by the team-managed project, so the task was created unparented and linked.
+- Treated `academic_roster_workflow.py`, `meeting_representation_workflow.py`,
+  `lab_status_digest_workflow_vontology_service.py`, and the Codex worker
+  controller scripts as watch/support surfaces rather than fresh drift based on
+  current evidence.
+- No production code was changed by this review run.
