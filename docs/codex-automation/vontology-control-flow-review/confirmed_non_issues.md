@@ -326,6 +326,12 @@ This avoids duplicate filing. Re-check if code or live evidence changes.
   reporting, deployment and safety boundaries for coding tasks. File only if
   this worker path becomes Von user-facing workflow/prompt/model policy or a
   learning artefact instead of operator-owned execution scaffolding.
+- 2026-10-08: `context_bundle_benchmark_service.py` looked like the desired
+  represented benchmark pattern: it loads suite/case/rubric authority through
+  `benchmark_suite_vontology_service.py` and fails closed when represented suite
+  authority is missing. Do not file benchmark duplicates for this path without
+  fresh evidence that Python/repo seed content has again become live benchmark
+  authority.
 
 Do not file solely because a file is large or contains domain nouns. File when
 Python owns durable decision policy, evidence choice, prompt/workflow content,

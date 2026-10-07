@@ -128,6 +128,10 @@ predicates, and KB assertions should own durable:
   evaluator prompts, rubrics, pass/fail decision rules, promotion/rejection
   interpretation, and candidate-disposition mappings that affect durable
   learning candidates.
+- Context-bundle workspace authority, including canonical context/dossier
+  vocabulary, concept descriptions and parent/type links, workspace semantic
+  roles, branch-kind policy, and fallback/default behaviour for dossier
+  reconstruction.
 
 ## Python Support
 
@@ -264,6 +268,11 @@ Python can remain the surface for:
   records receipts and TER evidence, computes requested aggregate statistics,
   and persists/read-backs candidate disposition only after represented
   experiment and disposition policy authorises it.
+- generic context-bundle support that loads represented vocabulary/profile
+  artefacts, validates dossier/workspace payloads, bounds persisted state,
+  hashes and stores receipts, writes relationships through canonical services,
+  and assembles reconstructed workspaces without authoring branch semantics or
+  missing-authority fallback policy.
 
 Seed bundles and workflow publisher scripts are migration/publication tooling,
 not normal runtime authority after Vontology authority exists.

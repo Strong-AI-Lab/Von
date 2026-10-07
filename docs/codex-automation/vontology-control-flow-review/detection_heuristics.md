@@ -230,6 +230,12 @@ before creating duplicates.
   decide whether learned advice is retained/rejected. Python can execute frozen
   trials and compute generic aggregates, but durable experiment authority should
   be represented. See `JVNAUTOSCI-2762`.
+- Context/dossier workspace support is a drift candidate when Python owns
+  canonical ontology vocabulary, concept descriptions, workspace semantic roles,
+  branch-kind/default policy, or production repair of missing represented
+  authority. Bounded persistence, hashing, truncation, relationship writes, and
+  workspace assembly can remain support code when those semantics are
+  represented. See `JVNAUTOSCI-2763`.
 
 ## Recent Examples
 
@@ -300,3 +306,6 @@ before creating duplicates.
 - `JVNAUTOSCI-2762` - learning-advice experiment evaluator/rubric/case/decision
   authority is still owned by a repo fixture and Python runner before durable
   learning-candidate disposition is recorded.
+- `JVNAUTOSCI-2763` - context-bundle workspace ontology vocabulary, concept
+  descriptions, workspace roles, and dossier branch-kind fallback/default policy
+  still originate in Python constants and repair paths.

@@ -135,3 +135,8 @@ the area. Link code-side policy drift to `JVNAUTOSCI-1913`.
   rubric, case set, decision rule, and candidate-disposition mapping still live
   in a repo fixture/Python runner path rather than represented experiment and
   learning-policy artefacts.
+- `JVNAUTOSCI-2763` - context-bundle workspace authority: canonical
+  context/dossier vocabulary, concept descriptions, workspace semantic roles,
+  and dossier branch-kind fallback/default policy still live in Python constants
+  and production repair paths rather than represented Vontology/profile
+  authority.

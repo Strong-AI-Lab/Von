@@ -422,3 +422,27 @@ Operational memory only. Keep this compact; detailed diagnosis belongs in Jira t
   controller scripts as watch/support surfaces rather than fresh drift based on
   current evidence.
 - No production code was changed by this review run.
+
+## 2026-10-08T02:04:29.5384437+13:00
+
+- Read current repo guidance, confirmed `AGENTS_Private.md` was absent, read
+  relevant design/VWL/prompt/memory/minimal-imposition guidance, personal
+  automation memory, and all repo-local review memory files. `main` matched
+  `origin/main` at `253abd91`; the only pre-existing dirty file was
+  `Von.code-workspace`, which this review did not edit or stage.
+- Ran `pdm run python scripts/check_workflow_purity.py --verbose`. All guarded
+  workflow/prompt/source/policy counters were `0`; the gate passed with advisory
+  monolith deltas only (`catalogue=46954`, `von_routes=21872`).
+- Ran `pdm run python scripts/report_turn_decision_attribution.py --limit 50`.
+  Recent-turn attribution reported mean `architecture_integrity_score=1.0` and
+  `python_fallback_signatures={}` over 50 turns.
+- Created `JVNAUTOSCI-2763` for context-bundle workspace authority drift:
+  `context_bundle_service.py` and `context_bundle_contracts.py` still own
+  canonical context/dossier vocabulary, concept descriptions, workspace semantic
+  roles, branch-kind/default policy, and production repair of missing authority.
+  Linked it to `JVNAUTOSCI-1913`.
+- Treated `context_bundle_benchmark_service.py` as a non-issue for this scan
+  because it reads represented suite/case/rubric authority through
+  `benchmark_suite_vontology_service.py` and fails closed when that authority is
+  missing.
+- No production code was changed by this review run.
